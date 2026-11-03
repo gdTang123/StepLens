@@ -1,8 +1,10 @@
 # StepLens
 
-内部使用的 STEP/IGES 轻量查看器。技术栈是 C++20、Qt 6.12、Open CASCADE Technology 8.0.1、CMake。平台是 Windows 10/11 x64，发布形式是绿色版 zip。
+内部使用的 STEP/IGES 轻量查看器。技术栈是 C++20、Qt 6.12、Open CASCADE Technology、CMake。平台是 Windows 10/11 x64，发布形式是绿色版 zip。
 
-当前是仓库脚手架（任务 T01）。程序能打开一个空窗口，状态栏写着「尚未打开文件」，还不能读 STEP/IGES。
+程序能打开一个空窗口，状态栏写着「尚未打开文件」，还不能读 STEP/IGES。core 里已经有结果类型、软取消、进度、线程池、日志和 Windows 崩溃转储。
+
+架构文档是 v1.1。它建议 v0.1 改用 OCCT 7.9.3，但 Windows 复测还没做完，`vcpkg.json` 里仍然锁着 8.0.1。
 
 ## 文档
 
@@ -10,7 +12,8 @@
 |---|---|
 | 需求 PRD v0.2 | [docs/prd/step-viewer-mvp-prd.md](docs/prd/step-viewer-mvp-prd.md) |
 | 样例清单 | [docs/prd/samples.md](docs/prd/samples.md) |
-| 架构设计 | [docs/design/step-viewer-architecture.md](docs/design/step-viewer-architecture.md) |
+| 架构设计 v1.1 | [docs/design/step-viewer-architecture.md](docs/design/step-viewer-architecture.md) |
+| M0 摸底报告 | [docs/bench/spike-m0.md](docs/bench/spike-m0.md) |
 | 样例扫描脚本和结果 | [docs/design/data/](docs/design/data/) |
 
 样例文件不要提交。GrabCAD 和 Twin Disc 的模型有版权和转贴限制，下载到本地目录，用环境变量 `STEPLENS_SAMPLES` 告诉测试程序。`scripts/fetch_samples.py` 要到 T03 才实现。
