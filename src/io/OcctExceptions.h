@@ -1,7 +1,7 @@
 #pragma once
 
 // 只给已经链接 OCCT 的翻译单元包含。core 不包含这个头。
-// 7.9.3 的 Standard_Failure 不继承 std::exception，8.0.1 继承。GetMessageString() 两个版本都有。
+// 7.9.3 的 Standard_Failure 不继承 std::exception，8.0.1 继承。取消息走 occt_compat.h。
 // 必须写在 STEPLENS_RESULT_CATCHES 之前，否则 8.0.1 会被收成笼统的 "内部错误"。
 
 #include "core/Result.h"
