@@ -99,7 +99,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: C:\Qt\6.12.0\msvc2022_64
-          key: qt-6.12.0-win64_msvc2022_64-qttools
+          key: qt-6.12.0-win64_msvc2022_64-base
 
       - name: Install Qt 6.12.0 from download.qt.io
         if: steps.qt-cache.outputs.cache-hit != 'true'
@@ -108,8 +108,9 @@ jobs:
           python -m pip install "git+https://github.com/miurahr/aqtinstall.git@8c3695d4a4e1ceabf6a74dc6c79681656dc6b74b"
           python -m aqt version
           $qtRoot = "C:\Qt"
+          # qttools（含 Linguist）已经打进基础包 qt.qt6.6120.win64_msvc2022_64，不是独立模块。
           python -m aqt install-qt windows desktop 6.12.0 win64_msvc2022_64 `
-            --outputdir $qtRoot --base https://download.qt.io -m qttools
+            --outputdir $qtRoot --base https://download.qt.io
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Point CMake at Qt
