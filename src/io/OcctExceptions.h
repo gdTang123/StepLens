@@ -5,11 +5,9 @@
 // 必须写在 STEPLENS_RESULT_CATCHES 之前，否则 8.0.1 会被收成笼统的 "内部错误"。
 
 #include "core/Result.h"
-
-#include <Standard_Failure.hxx>
+#include "io/occt_compat.h"
 
 #include <string>
-#include <string_view>
 #include <utility>
 
 namespace steplens::io {
@@ -26,12 +24,7 @@ auto catchOcctAsResult(F&& fn, ErrorCode code = ErrorCode::Internal) ->
             return R{std::invoke(std::forward<F>(fn))};
         }
     } catch (const Standard_Failure& failure) {
-        const char* text = failure.GetMessageString();
-        std::string message = "Standard_Failure";
-        if (text != nullptr && !std::string_view{text}.empty()) {
-            message = text;
-        }
-        return Error{code, std::move(message), "读取或计算时出错"};
+        return Error{code, occt::failureMessage(failure), "读取或计算时出错"};
     }
     STEPLENS_RESULT_CATCHES
 }
