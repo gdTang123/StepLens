@@ -8,6 +8,11 @@ add_executable(steplens_tests
     core/CrashDumpTest.cpp)
 target_link_libraries(steplens_tests PRIVATE steplens::core GTest::gtest_main)
 target_include_directories(steplens_tests PRIVATE "${CMAKE_SOURCE_DIR}/src")
+if(NOT STEPLENS_CORE_ONLY)
+    target_sources(steplens_tests PRIVATE occt/OcctCompatTest.cpp)
+    target_link_libraries(steplens_tests PRIVATE steplens::io)
+    target_compile_definitions(steplens_tests PRIVATE "STEPLENS_EXPECTED_OCCT=\"${STEPLENS_EXPECTED_OCCT}\"")
+endif()
 steplens_apply_warnings(steplens_tests)
 set_target_properties(steplens_tests PROPERTIES FOLDER "tests")
 

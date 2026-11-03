@@ -21,7 +21,8 @@
         "VCPKG_TARGET_TRIPLET": "x64-windows",
         "VCPKG_HOST_TRIPLET": "x64-windows",
         "VCPKG_MANIFEST_FEATURES": "",
-        "CMAKE_PREFIX_PATH": "$env{QTDIR}"
+        "CMAKE_PREFIX_PATH": "$env{QTDIR}",
+        "STEPLENS_EXPECTED_OCCT": "8.0.1"
       }
     },
     {
@@ -50,6 +51,15 @@
       "cacheVariables": {
         "VCPKG_MANIFEST_FEATURES": "tbb"
       }
+    },
+    {
+      "name": "msvc-occt793",
+      "inherits": "base",
+      "displayName": "MSVC + OCCT 7.9.3（双版本过渡期）",
+      "cacheVariables": {
+        "VCPKG_MANIFEST_DIR": "${sourceDir}/vcpkg-configs/occt-7.9.3",
+        "STEPLENS_EXPECTED_OCCT": "7.9.3"
+      }
     }
   ],
   "buildPresets": [
@@ -57,6 +67,16 @@
       "name": "debug",
       "configurePreset": "msvc",
       "configuration": "Debug",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
+    },
+    {
+      "name": "release-occt793",
+      "configurePreset": "msvc-occt793",
+      "configuration": "RelWithDebInfo",
       "condition": {
         "type": "equals",
         "lhs": "${hostSystemName}",
@@ -78,6 +98,24 @@
     {
       "name": "unit",
       "configurePreset": "msvc",
+      "configuration": "RelWithDebInfo",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      },
+      "filter": {
+        "exclude": {
+          "label": "bench|large"
+        }
+      },
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "unit-occt793",
+      "configurePreset": "msvc-occt793",
       "configuration": "RelWithDebInfo",
       "condition": {
         "type": "equals",

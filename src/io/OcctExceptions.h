@@ -5,7 +5,7 @@
 // 必须写在 STEPLENS_RESULT_CATCHES 之前，否则 8.0.1 会被收成笼统的 "内部错误"。
 
 #include "core/Result.h"
-#include "io/occt_compat.h"
+#include "occtsupport/occt_compat.h"
 
 #include <string>
 #include <utility>
