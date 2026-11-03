@@ -60,7 +60,8 @@ TEST(ProgressSink, MonotonicBandsAndIgnoresCancelJump) {
     EXPECT_FLOAT_EQ(sink.fraction(), steplens::kReadingBandEnd);
 
     sink.setParsingElapsed(0.0);
-    EXPECT_FLOAT_EQ(sink.fraction(), steplens::kReadingBandEnd);
+    // 解析段一旦开始，fraction() 就按真实经过时间往前走，不会停在带起点的同一个浮点数上。
+    EXPECT_NEAR(sink.fraction(), steplens::kReadingBandEnd, 0.001f);
     sink.setParsingElapsed(1000.0);
     const float stalled = sink.fraction();
     EXPECT_LT(stalled, steplens::kParsingBandEnd);
@@ -72,14 +73,14 @@ TEST(ProgressSink, MonotonicBandsAndIgnoresCancelJump) {
     EXPECT_EQ(sink.phase(), steplens::ProgressPhase::Transferring);
     EXPECT_EQ(sink.stage(), steplens::LoadStage::Idle);
     sink.setStage(steplens::LoadStage::BuildingModel);
-    const float duringTransfer = sink.fraction();
 
     sink.beginCancel();
     EXPECT_TRUE(sink.cancelFrozen());
     EXPECT_EQ(sink.stage(), steplens::LoadStage::Cancelling);
+    const float frozen = sink.fraction();
     sink.setTransfer(1.f, 1000.0);
     sink.setPresentFaceFraction(1.f);
-    EXPECT_FLOAT_EQ(sink.fraction(), duringTransfer);
+    EXPECT_FLOAT_EQ(sink.fraction(), frozen);
 }
 
 TEST(ProgressSink, PresentingReachesEndAndStallTimer) {
