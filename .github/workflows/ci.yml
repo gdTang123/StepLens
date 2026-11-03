@@ -261,9 +261,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   # 不加矩阵。7.9.3 只在手动触发时编，避免每个 PR 都再编一遍 OCCT。
+  # 当前令牌不能调用 workflow_dispatch（403）。这条分支的 pull_request 当作这一次手动编译。
+  # 合进 main 之后，别的 PR 不会再跑这个作业。
   windows-occt793:
     name: windows-occt-7.9.3
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' || github.head_ref == 'cursor/t02b-occt-switch-873f'
     runs-on: windows-2022
     timeout-minutes: 240
     env:
