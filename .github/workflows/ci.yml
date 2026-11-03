@@ -1,0 +1,146 @@
+name: ci
+
+# 只在 PR 和 main 上跑。私有仓库的 Windows 分钟数按倍率计费，不设矩阵、不设 schedule。
+# 二进制缓存未命中时会从源码编译 OCCT 8.0.1，第一次可能要一两个小时。
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    name: windows-build
+    runs-on: windows-2022
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: clang-format
+        run: |
+          $clangFormat = "C:\Program Files\LLVM\bin\clang-format.exe"
+          if (-not (Test-Path -LiteralPath $clangFormat)) {
+            throw "windows-2022 镜像上未找到 $clangFormat（镜像说明里有 LLVM）"
+          }
+          $files = @(git ls-files "*.h" "*.cpp")
+          if ($files.Count -eq 0) { throw "没有 C++ 文件" }
+          & $clangFormat --dry-run --Werror @files
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Checkout vcpkg 2026.10.16
+        uses: actions/checkout@v4
+        with:
+          repository: microsoft/vcpkg
+          ref: 9eec002df1cd109f8f104cd966a763daf9751489
+          path: vcpkg
+          fetch-depth: 1
+
+      - name: Cache vcpkg binaries
+        uses: actions/cache@v4
+        with:
+          path: |
+            .vcpkg-binary-cache
+            vcpkg/downloads
+          key: vcpkg-${{ runner.os }}-x64-windows-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
+
+      - name: Bootstrap vcpkg
+        run: |
+          & .\vcpkg\bootstrap-vcpkg.bat -disableMetrics
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Force -Path .vcpkg-binary-cache | Out-Null
+          $cache = (Join-Path (Get-Location) ".vcpkg-binary-cache") -replace '\\', '/'
+          $root = Join-Path (Get-Location) "vcpkg"
+          Add-Content -Path $env:GITHUB_ENV -Encoding utf8NoBOM -Value "VCPKG_ROOT=$root"
+          Add-Content -Path $env:GITHUB_ENV -Encoding utf8NoBOM -Value "VCPKG_DISABLE_METRICS=1"
+          Add-Content -Path $env:GITHUB_ENV -Encoding utf8NoBOM -Value "VCPKG_BINARY_SOURCES=clear;files,$cache,readwrite"
+
+      - name: Install Qt 6.12.0 from download.qt.io
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "aqtinstall==3.3.*"
+          $qtRoot = "C:\Qt"
+          python -m aqt install-qt windows desktop 6.12.0 win64_msvc2022_64 `
+            --outputdir $qtRoot --base https://download.qt.io -m qttools
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $qtDir = Join-Path $qtRoot "6.12.0\msvc2022_64"
+          $qmake = Join-Path $qtDir "bin\qmake.exe"
+          if (-not (Test-Path -LiteralPath $qmake)) { throw "Qt 安装后未找到 $qmake" }
+          Add-Content -Path $env:GITHUB_ENV -Encoding utf8NoBOM -Value "QTDIR=$qtDir"
+          Add-Content -Path $env:GITHUB_PATH -Encoding utf8NoBOM -Value (Join-Path $qtDir "bin")
+
+      - name: MSVC x64 environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure, build, test
+        run: |
+          Write-Host "VCPKG_ROOT=$env:VCPKG_ROOT"
+          Write-Host "QTDIR=$env:QTDIR"
+          cmake --version
+          cmake --workflow --preset ci
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Package zip
+        run: |
+          cmake --install build/msvc --config RelWithDebInfo --prefix "$pwd\dist-stage"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          python scripts/package.py `
+            --prefix "$pwd\dist-stage" `
+            --qt-dir "$env:QTDIR" `
+            --output "$pwd\dist\StepLens-0.1.0-windows-x64.zip"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: StepLens-windows-x64
+          path: dist/StepLens-0.1.0-windows-x64.zip
+          retention-days: 7
+
+      - name: Smoke the empty window offscreen
+        run: |
+          $env:QT_QPA_PLATFORM = "offscreen"
+          $env:QT_PLUGIN_PATH = Join-Path $env:QTDIR "plugins"
+          $env:PATH = "$(Join-Path $env:QTDIR 'bin');$env:PATH"
+          $exe = Join-Path (Get-Location) "build\msvc\RelWithDebInfo\StepLens.exe"
+          if (-not (Test-Path -LiteralPath $exe)) { throw "未找到 $exe" }
+          $proc = Start-Process -FilePath $exe -PassThru -WindowStyle Hidden
+          Start-Sleep -Seconds 5
+          if ($proc.HasExited) {
+            throw "空窗口进程提前退出，退出码 $($proc.ExitCode)。这一步用的是 QT_QPA_PLATFORM=offscreen，不是交互式桌面。"
+          }
+          Stop-Process -Id $proc.Id -Force
+          Write-Host "空窗口在 offscreen 平台下保持运行"
+
+      - name: clang-tidy changed C++ files
+        run: |
+          $clangTidy = "C:\Program Files\LLVM\bin\clang-tidy.exe"
+          if (-not (Test-Path -LiteralPath $clangTidy)) { throw "未找到 $clangTidy" }
+          if ($env:GITHUB_EVENT_NAME -eq "pull_request") {
+            $base = git merge-base HEAD "origin/$env:GITHUB_BASE_REF"
+          } else {
+            $base = "HEAD~1"
+          }
+          $files = @(git diff --name-only --diff-filter=ACMR $base HEAD)
+          $cpp = @($files | Where-Object { $_ -match '\.cpp$' })
+          if ($cpp.Count -eq 0) {
+            Write-Host "没有改动的 .cpp，跳过 clang-tidy"
+            exit 0
+          }
+          & $clangTidy -p build/msvc --extra-arg-before=--driver-mode=cl @cpp
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

@@ -1,0 +1,31 @@
+---
+# 基于 LLVM。缩进 4，列宽 110，指针靠左。
+# include 顺序：本文件头（自动置顶）→ 项目头 → Qt → OCCT → 标准库及其他尖括号头。
+BasedOnStyle: LLVM
+Language: Cpp
+Standard: c++20
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 110
+PointerAlignment: Left
+ReferenceAlignment: Left
+SortIncludes: CaseSensitive
+IncludeBlocks: Regroup
+IncludeIsMainRegex: '([-_](test|unittest))?$'
+AccessModifierOffset: -4
+BreakBeforeBraces: Attach
+AllowShortFunctionsOnASingleLine: Empty
+NamespaceIndentation: None
+FixNamespaceComments: true
+IncludeCategories:
+  - Regex: '^"'
+    Priority: 1
+  - Regex: '^<Q'
+    Priority: 2
+  - Regex: '\.hxx>$'
+    Priority: 3
+  - Regex: '^<(AIS_|V3d_|OpenGl_|Aspect_|Prs3d_|PrsMgr_|SelectMgr_|Graphic3d_|StdPrs_|gp_|TopoDS_|TopLoc_|TopAbs_|Bnd_|BRep|Poly_|Quantity_|Message_|OSD|STEP|IGES|XCAF|TDF_|TDocStd_|TCollection_|Standard_|IMesh)'
+    Priority: 3
+  - Regex: '^<'
+    Priority: 4

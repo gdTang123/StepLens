@@ -1,0 +1,24 @@
+* text=auto eol=lf
+
+*.h text eol=lf
+*.cpp text eol=lf
+*.cmake text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.py text eol=lf
+*.txt text eol=lf
+
+*.step binary
+*.stp binary
+*.iges binary
+*.igs binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.zip binary
+*.dll binary
+*.exe binary
+*.pdb binary
+*.lib binary

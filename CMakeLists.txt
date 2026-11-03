@@ -1,0 +1,53 @@
+cmake_minimum_required(VERSION 3.25)
+
+project(StepLens
+    VERSION 0.1.0
+    DESCRIPTION "Internal lightweight STEP/IGES viewer"
+    LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+# 架构 11.2：暂不使用 C++20 模块。3.25 会忽略这个变量，3.28 起生效。
+set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+
+# vcpkg 和官方 Qt 包只有 Debug/Release。发布构建用 RelWithDebInfo，链接它们的 Release 库。
+set(CMAKE_MAP_IMPORTED_CONFIG_RELWITHDEBINFO Release)
+set(CMAKE_MAP_IMPORTED_CONFIG_MINSIZEREL Release)
+
+include(StepLensOptions)
+include(StepLensOcct)
+
+# LinguistTools 在 qttools；其余模块都在官方 qtbase 预编译包里。
+find_package(Qt6 6.12 REQUIRED COMPONENTS
+    Core
+    Gui
+    Widgets
+    OpenGL
+    OpenGLWidgets
+    Concurrent
+    Test
+    LinguistTools)
+qt_standard_project_setup()
+
+find_package(OpenCASCADE CONFIG REQUIRED)
+find_package(GTest CONFIG REQUIRED)
+steplens_check_occt_toolkits()
+
+message(STATUS "StepLens ${PROJECT_VERSION}")
+message(STATUS "Qt ${Qt6_VERSION}")
+if(DEFINED OpenCASCADE_VERSION)
+    message(STATUS "OpenCASCADE ${OpenCASCADE_VERSION}")
+endif()
+
+include(CTest)
+
+add_subdirectory(src)
+if(BUILD_TESTING)
+    add_subdirectory(tests)
+endif()
+
+include(StepLensDeploy)

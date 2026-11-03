@@ -1,0 +1,21 @@
+name: release
+
+# 打 vX.Y.Z 标签时触发。T22 之前不在这里再编一遍 Windows，避免和 ci.yml 重复扣分钟数。
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: not-implemented
+    runs-on: ubuntu-latest
+    steps:
+      - name: 发布流水线尚未实现
+        run: |
+          echo "标签 ${{ github.ref_name }} 没有创建 GitHub Release。"
+          echo "T22 才会构建绿色版 zip、单独归档 PDB，并上传 Release。"
+          exit 1
