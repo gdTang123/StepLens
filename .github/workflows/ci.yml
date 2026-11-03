@@ -218,5 +218,16 @@ jobs:
             Write-Host "没有改动的 .cpp，跳过 clang-tidy"
             exit 0
           }
-          & $clangTidy -p build/msvc --extra-arg-before=--driver-mode=cl @cpp
+          # clang-cl 不认识 /MP 和 /external:anglebrackets，clang-tidy 会把这两条未使用参数当成错误。
+          # /w 只关掉编译器警告。/WX 仍留给 cl.exe。clang-tidy 自己的检查还在。
+          python scripts/select_compile_commands.py `
+            --input build/msvc/compile_commands.json `
+            --output-dir build/msvc-tidy `
+            --config RelWithDebInfo
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $clangTidy -p build/msvc-tidy `
+            --extra-arg-before=--driver-mode=cl `
+            --extra-arg=-Wno-unused-command-line-argument `
+            --extra-arg=/w `
+            @cpp
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
