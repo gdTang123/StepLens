@@ -37,6 +37,7 @@ TEST(Log, WritesAndRotatesToFiveFiles) {
         steplens::Log::info("line " + std::to_string(line) + " pad-pad-pad");
     }
 
+    steplens::Log::shutdown();
     EXPECT_LE(countLogs(dir.path()), static_cast<int>(steplens::Log::kDefaultKeepFiles));
     EXPECT_GE(countLogs(dir.path()), 2);
     const auto active = readFile(dir.path() / "steplens.log");
@@ -60,6 +61,7 @@ TEST(Log, ConcurrentWritesStayIntact) {
     for (auto& thread : threads) {
         thread.join();
     }
+    steplens::Log::shutdown();
     const auto text = readFile(dir.path() / "steplens.log");
     int found = 0;
     for (int threadIndex = 0; threadIndex < kThreads; ++threadIndex) {

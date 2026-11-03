@@ -69,7 +69,9 @@ TEST(ProgressSink, MonotonicBandsAndIgnoresCancelJump) {
 
     sink.setTransfer(0.1f, 0.0);
     EXPECT_GT(sink.fraction(), stalled);
-    EXPECT_EQ(sink.stage(), steplens::LoadStage::Transferring);
+    EXPECT_EQ(sink.phase(), steplens::ProgressPhase::Transferring);
+    EXPECT_EQ(sink.stage(), steplens::LoadStage::Idle);
+    sink.setStage(steplens::LoadStage::BuildingModel);
     const float duringTransfer = sink.fraction();
 
     sink.beginCancel();
@@ -89,4 +91,52 @@ TEST(ProgressSink, PresentingReachesEndAndStallTimer) {
     std::this_thread::sleep_for(std::chrono::milliseconds(30));
     EXPECT_TRUE(sink.unchangedFor(std::chrono::milliseconds(5)));
     EXPECT_FALSE(sink.unchangedFor(std::chrono::hours(1)));
+}
+
+TEST(ProgressSink, AdvancesDuringCallbackGap) {
+    steplens::ProgressSink sink;
+    sink.reset(steplens::kBytesPerMib, steplens::ProgressEstimate{0.05, 0.05});
+    sink.enterParsing();
+    const float before = sink.fraction();
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    const float after = sink.fraction();
+    EXPECT_GT(after, before);
+    EXPECT_LT(after, steplens::kParsingBandEnd);
+    EXPECT_GT(sink.elapsedSinceLoadStart(), 0.0);
+}
+
+TEST(ProgressSink, ConcurrentWritersDoNotGoBackwards) {
+    steplens::ProgressSink sink;
+    sink.reset(steplens::kBytesPerMib);
+    constexpr int kSteps = 400;
+    std::atomic<int> regressions{0};
+    std::atomic<bool> done{false};
+    std::thread reader([&]() {
+        float previous = 0.f;
+        while (!done.load()) {
+            const float current = sink.fraction();
+            if (current + 0.000001f < previous) {
+                regressions.fetch_add(1);
+            }
+            if (current > previous) {
+                previous = current;
+            }
+        }
+    });
+    std::thread left([&]() {
+        for (int step = 0; step < kSteps; ++step) {
+            sink.setPresentFaceFraction(static_cast<float>(step) / static_cast<float>(kSteps));
+        }
+    });
+    std::thread right([&]() {
+        for (int step = 0; step < kSteps; ++step) {
+            sink.setPresentFaceFraction(static_cast<float>(step) / static_cast<float>(kSteps));
+        }
+    });
+    left.join();
+    right.join();
+    done.store(true);
+    reader.join();
+    EXPECT_EQ(regressions.load(), 0);
+    EXPECT_GT(sink.fraction(), 0.99f);
 }

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cassert>
 #include <exception>
 #include <stdexcept>
 #include <utility>
@@ -9,7 +10,7 @@
 namespace steplens {
 namespace {
 
-constexpr unsigned kChunksPerWorker = 4;
+thread_local const TaskScheduler* t_runningOn = nullptr;
 
 } // namespace
 
@@ -22,8 +23,9 @@ unsigned TaskScheduler::defaultThreadCount() noexcept {
     return hardware - 1;
 }
 
-TaskScheduler::TaskScheduler(unsigned threads)
-    : m_threadCount(threads == 0 ? defaultThreadCount() : threads) {
+TaskScheduler::TaskScheduler(unsigned threads, std::function<void()> onThreadStart)
+    : m_threadCount(threads == 0 ? defaultThreadCount() : threads),
+      m_onThreadStart(std::move(onThreadStart)) {
     if (m_threadCount == 0) {
         m_threadCount = defaultThreadCount();
     }
@@ -54,6 +56,15 @@ void TaskScheduler::enqueue(std::function<void()> job) {
 }
 
 void TaskScheduler::workerMain(const std::stop_token& stop) {
+    t_runningOn = this;
+    struct ClearRunning {
+        ~ClearRunning() {
+            t_runningOn = nullptr;
+        }
+    } clearRunning;
+    if (m_onThreadStart) {
+        m_onThreadStart();
+    }
     while (!stop.stop_requested()) {
         std::function<void()> job;
         {
@@ -78,19 +89,21 @@ void TaskScheduler::workerMain(const std::stop_token& stop) {
 }
 
 void TaskScheduler::parallelFor(std::size_t count, const std::function<void(std::size_t)>& body,
-                                const CancelToken& cancel) {
+                                const CancelToken& cancel, std::size_t grain) {
+    assert(t_runningOn != this);
     if (count == 0 || !body) {
         return;
     }
     cancel.throwIfCancelled();
+    if (grain == 0) {
+        grain = 1;
+    }
 
     unsigned workers = m_threadCount;
     if (count < workers) {
         workers = static_cast<unsigned>(count);
     }
-    const std::size_t chunk =
-        std::max<std::size_t>(1, (count + static_cast<std::size_t>(workers) * kChunksPerWorker - 1) /
-                                     (static_cast<std::size_t>(workers) * kChunksPerWorker));
+    const std::size_t chunk = grain;
 
     std::atomic<std::size_t> cursor{0};
     std::atomic<std::size_t> completed{0};

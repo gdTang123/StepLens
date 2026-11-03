@@ -12,8 +12,12 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
-#include <DbgHelp.h>
+// clang-format off
+// DbgHelp.h 依赖 Windows.h 里的 DWORD/HANDLE。SortIncludes 会把 DbgHelp.h 排到前面。
 #include <Windows.h>
+#include <DbgHelp.h>
+// clang-format on
+#include <cstdlib>
 #endif
 
 namespace steplens {
@@ -22,6 +26,8 @@ namespace {
 #if defined(_WIN32)
 
 constexpr DWORD kSimulatedCrashCode = 0xE0000001;
+constexpr MINIDUMP_TYPE kDumpType =
+    static_cast<MINIDUMP_TYPE>(MiniDumpWithIndirectlyReferencedMemory | MiniDumpWithThreadInfo);
 wchar_t g_dumpDirectory[1024] = {};
 
 bool writeDumpFile(const wchar_t* path, EXCEPTION_POINTERS* info) {
@@ -38,7 +44,7 @@ bool writeDumpFile(const wchar_t* path, EXCEPTION_POINTERS* info) {
         exceptionInfo.ClientPointers = FALSE;
         exceptionPtr = &exceptionInfo;
     }
-    const BOOL wrote = MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), file, MiniDumpNormal,
+    const BOOL wrote = MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), file, kDumpType,
                                          exceptionPtr, nullptr, nullptr);
     CloseHandle(file);
     if (wrote == FALSE) {
@@ -62,17 +68,36 @@ void raiseAndCapture(const wchar_t* path, bool* wrote) {
     }
 }
 
-LONG WINAPI onUnhandled(EXCEPTION_POINTERS* info) {
+void writeAutoDump(EXCEPTION_POINTERS* info) {
     if (g_dumpDirectory[0] == L'\0') {
-        return EXCEPTION_EXECUTE_HANDLER;
+        return;
     }
     SYSTEMTIME time{};
     GetSystemTime(&time);
     wchar_t file[1200];
-    swprintf_s(file, L"%s\\steplens-%04u%02u%02u-%02u%02u%02u.dmp", g_dumpDirectory, time.wYear, time.wMonth,
-               time.wDay, time.wHour, time.wMinute, time.wSecond);
+    swprintf_s(file, L"%s\\steplens-%04u%02u%02u-%02u%02u%02u-%lu.dmp", g_dumpDirectory, time.wYear,
+               time.wMonth, time.wDay, time.wHour, time.wMinute, time.wSecond, GetCurrentProcessId());
     writeDumpFile(file, info);
+}
+
+LONG WINAPI onUnhandled(EXCEPTION_POINTERS* info) {
+    writeAutoDump(info);
     return EXCEPTION_EXECUTE_HANDLER;
+}
+
+void onTerminate() {
+    writeAutoDump(nullptr);
+    std::abort();
+}
+
+void onPureCall() {
+    writeAutoDump(nullptr);
+    std::abort();
+}
+
+void onInvalidParameter(const wchar_t*, const wchar_t*, const wchar_t*, unsigned int, uintptr_t) {
+    writeAutoDump(nullptr);
+    std::abort();
 }
 
 #endif
@@ -87,7 +112,12 @@ void CrashDump::install(const std::filesystem::path& directory) {
     if (native.size() < 1024) {
         wcsncpy_s(g_dumpDirectory, native.c_str(), _TRUNCATE);
         SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+        // 若以后调用 OSD::SetSignal，它也可能改未处理异常过滤器。install 要排在那之后。
         SetUnhandledExceptionFilter(onUnhandled);
+        std::set_terminate(onTerminate);
+        _set_purecall_handler(onPureCall);
+        _set_invalid_parameter_handler(onInvalidParameter);
+        _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
     }
 #else
     (void)directory;
@@ -111,8 +141,8 @@ Result<std::filesystem::path> CrashDump::captureSimulatedCrash(const std::filesy
     SYSTEMTIME time{};
     GetSystemTime(&time);
     wchar_t name[64];
-    swprintf_s(name, L"steplens-%04u%02u%02u-%02u%02u%02u.dmp", time.wYear, time.wMonth, time.wDay,
-               time.wHour, time.wMinute, time.wSecond);
+    swprintf_s(name, L"steplens-%04u%02u%02u-%02u%02u%02u-%lu.dmp", time.wYear, time.wMonth, time.wDay,
+               time.wHour, time.wMinute, time.wSecond, GetCurrentProcessId());
     const auto path = directory / name;
     const std::wstring native = path.wstring();
     if (native.size() >= 1024) {

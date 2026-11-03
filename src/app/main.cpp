@@ -13,6 +13,8 @@
 int main(int argc, char* argv[]) {
     try {
         steplens::Log::initialize(steplens::defaultWritableDirectory("logs"));
+        // 链上 OCCT 之后，OSD::SetSignal 可能也会换掉未处理异常过滤器。
+        // CrashDump::install 必须排在 OSD::SetSignal 之后。现在 core 还不调用 OSD。
         steplens::CrashDump::installDefault();
         steplens::Log::info("StepLens 启动");
     } catch (const std::exception& ex) {

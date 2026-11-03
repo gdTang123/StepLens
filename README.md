@@ -4,7 +4,7 @@
 
 程序能打开一个空窗口，状态栏写着「尚未打开文件」，还不能读 STEP/IGES。core 里已经有结果类型、软取消、进度、线程池、日志和 Windows 崩溃转储。
 
-架构文档是 v1.1。它建议 v0.1 改用 OCCT 7.9.3，但 Windows 复测还没做完，`vcpkg.json` 里仍然锁着 8.0.1。
+仓库里的架构文档仍是 v1.0，避免和正在写的 v1.2 冲突。摸底报告在 `docs/bench/spike-m0.md`。代码要同时能按 OCCT 8.0.1 和 7.9.3 编译，`vcpkg.json` 里仍然锁着 8.0.1，等 Windows 复测再定版。
 
 ## 文档
 
@@ -12,7 +12,7 @@
 |---|---|
 | 需求 PRD v0.2 | [docs/prd/step-viewer-mvp-prd.md](docs/prd/step-viewer-mvp-prd.md) |
 | 样例清单 | [docs/prd/samples.md](docs/prd/samples.md) |
-| 架构设计 v1.1 | [docs/design/step-viewer-architecture.md](docs/design/step-viewer-architecture.md) |
+| 架构设计 | [docs/design/step-viewer-architecture.md](docs/design/step-viewer-architecture.md) |
 | M0 摸底报告 | [docs/bench/spike-m0.md](docs/bench/spike-m0.md) |
 | 样例扫描脚本和结果 | [docs/design/data/](docs/design/data/) |
 

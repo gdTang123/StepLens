@@ -1,5 +1,6 @@
 #include "core/Log.h"
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -20,6 +21,11 @@ struct LogState {
     unsigned keepFiles = Log::kDefaultKeepFiles;
     std::uint64_t currentBytes = 0;
     bool ready = false;
+#ifdef NDEBUG
+    std::atomic<LogLevel> minLevel{LogLevel::Info};
+#else
+    std::atomic<LogLevel> minLevel{LogLevel::Debug};
+#endif
 };
 
 LogState& state() {
@@ -57,6 +63,34 @@ std::string timestampUtc() {
         return "1970-01-01T00:00:00.000Z";
     }
     return std::string(buffer);
+}
+
+std::string timestampLocal() {
+    try {
+        const auto now = std::chrono::system_clock::now();
+        const auto* zone = std::chrono::current_zone();
+        const auto local = zone->to_local(now);
+        const auto info = zone->get_info(now);
+        const auto dayPoint = std::chrono::floor<std::chrono::days>(local);
+        const std::chrono::year_month_day date{dayPoint};
+        const std::chrono::hh_mm_ss time{local - dayPoint};
+        const auto offsetMinutes = std::chrono::duration_cast<std::chrono::minutes>(info.offset).count();
+        const auto sign = offsetMinutes < 0 ? '-' : '+';
+        const auto absolute = offsetMinutes < 0 ? -offsetMinutes : offsetMinutes;
+        char buffer[40];
+        const int written = std::snprintf(
+            buffer, sizeof(buffer), "%04d-%02u-%02uT%02u:%02u:%02u%c%02d:%02d", static_cast<int>(date.year()),
+            static_cast<unsigned>(date.month()), static_cast<unsigned>(date.day()),
+            static_cast<unsigned>(time.hours().count()), static_cast<unsigned>(time.minutes().count()),
+            static_cast<unsigned>(time.seconds().count()), sign, static_cast<int>(absolute / 60),
+            static_cast<int>(absolute % 60));
+        if (written <= 0) {
+            return timestampUtc();
+        }
+        return std::string(buffer);
+    } catch (...) {
+        return timestampUtc();
+    }
 }
 
 std::string_view levelName(LogLevel level) noexcept {
@@ -118,14 +152,32 @@ bool Log::initialize(const std::filesystem::path& directory, std::uint64_t maxFi
     return log.ready;
 }
 
+void Log::shutdown() {
+    auto& log = state();
+    std::lock_guard lock(log.mutex);
+    if (log.stream.is_open()) {
+        log.stream.flush();
+        log.stream.close();
+    }
+    log.ready = false;
+}
+
+void Log::setMinLevel(LogLevel level) {
+    state().minLevel.store(level, std::memory_order_relaxed);
+}
+
 void Log::write(LogLevel level, std::string_view message) {
     auto& log = state();
+    if (static_cast<std::uint8_t>(level) <
+        static_cast<std::uint8_t>(log.minLevel.load(std::memory_order_relaxed))) {
+        return;
+    }
     std::lock_guard lock(log.mutex);
     if (!log.ready || !log.stream) {
         return;
     }
     const std::string line =
-        timestampUtc() + " " + std::string(levelName(level)) + " " + std::string(message);
+        timestampLocal() + " " + std::string(levelName(level)) + " " + std::string(message);
     const auto bytes = static_cast<std::uint64_t>(line.size() + 1);
     if (log.currentBytes > 0 && log.currentBytes + bytes > log.maxBytes) {
         rotate(log);
@@ -134,7 +186,9 @@ void Log::write(LogLevel level, std::string_view message) {
         }
     }
     log.stream << line << '\n';
-    log.stream.flush();
+    if (level == LogLevel::Warn || level == LogLevel::Error) {
+        log.stream.flush();
+    }
     log.currentBytes += bytes;
 }
 

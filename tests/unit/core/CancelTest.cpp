@@ -1,4 +1,5 @@
 #include "core/CancelToken.h"
+#include "core/LoadSession.h"
 
 #include <chrono>
 #include <gtest/gtest.h>
@@ -46,4 +47,20 @@ TEST(SoftCancel, UiReturnsBeforeBackgroundReleases) {
     worker.join();
     EXPECT_TRUE(cancel.backgroundReleased());
     EXPECT_EQ(phase.load(), 3);
+}
+
+TEST(LoadSession, GuiCanDropWhileBackgroundStillReleases) {
+    auto session = std::make_shared<steplens::LoadSession>(1024);
+    auto background = session;
+    session->progress().setReadingBytes(512);
+    session->cancel();
+    EXPECT_TRUE(session->token().isCancelled());
+    EXPECT_TRUE(session->progress().cancelFrozen());
+    EXPECT_FALSE(session->backgroundReleased());
+    session.reset();
+    background->progress().setTransfer(1.f, 10.0);
+    EXPECT_TRUE(background->progress().cancelFrozen());
+    background->noteBackgroundReleased();
+    EXPECT_TRUE(background->backgroundReleased());
+    background.reset();
 }

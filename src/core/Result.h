@@ -2,10 +2,12 @@
 
 #include "core/CancelToken.h"
 
+#include <cstdint>
 #include <exception>
 #include <functional>
 #include <new>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 #include <variant>
@@ -58,24 +60,49 @@ private:
     std::variant<T, Error> m_v;
 };
 
-// 模块边界用：把异常收成 Result。7.9.3 的 Standard_Failure 不是 std::exception，
-// 那个类型在 io 里单独捕获（core 不链接 OCCT）。
-template <class F> using CallResult = std::remove_cvref_t<std::invoke_result_t<F>>;
+template <class T> struct IsResult : std::false_type {};
 
-template <class F> auto catchAsResult(F&& fn) -> Result<CallResult<F>> {
-    try {
-        return std::invoke(std::forward<F>(fn));
-    } catch (const CancelledException&) {
-        return Error{ErrorCode::Cancelled, "cancelled", "已取消"};
-    } catch (const std::bad_alloc&) {
-        return Error{ErrorCode::OutOfMemory, "bad_alloc", "内存不足，无法打开该文件"};
-    } catch (const std::exception& ex) {
-        const char* what = ex.what();
-        if (what == nullptr || what[0] == '\0') {
-            what = "unknown";
-        }
-        return Error{ErrorCode::Internal, what, "内部错误"};
+template <class T> struct IsResult<Result<T>> : std::true_type {};
+
+template <class T> struct AsResult {
+    using type = Result<std::remove_cvref_t<T>>;
+};
+
+template <class T> struct AsResult<Result<T>> {
+    using type = Result<T>;
+};
+
+// 两个 OCCT 版本共用。7.9.3 的 Standard_Failure 不继承 std::exception，必须在这条宏之前单独捕获。
+#define STEPLENS_RESULT_CATCHES                                                                              \
+    catch (const ::steplens::CancelledException&) {                                                          \
+        return ::steplens::Error{::steplens::ErrorCode::Cancelled, "cancelled", "已取消"};                   \
+    }                                                                                                        \
+    catch (const std::bad_alloc&) {                                                                          \
+        return ::steplens::Error{::steplens::ErrorCode::OutOfMemory, "bad_alloc", "内存不足"};               \
+    }                                                                                                        \
+    catch (const std::exception& ex) {                                                                       \
+        const char* what = ex.what();                                                                        \
+        if (what == nullptr || std::string_view{what}.empty()) {                                             \
+            what = "unknown";                                                                                \
+        }                                                                                                    \
+        return ::steplens::Error{::steplens::ErrorCode::Internal, what, "内部错误"};                         \
+    }                                                                                                        \
+    catch (...) {                                                                                            \
+        return ::steplens::Error{::steplens::ErrorCode::Internal, "unknown exception", "内部错误"};          \
     }
+
+// fn 若已经返回 Result<U>，这里也返回 Result<U>，不再套一层。任何异常都不会穿出。
+template <class F> auto catchAsResult(F&& fn) -> typename AsResult<std::invoke_result_t<F&>>::type {
+    using Raw = std::remove_cvref_t<std::invoke_result_t<F&>>;
+    using R = typename AsResult<Raw>::type;
+    try {
+        if constexpr (IsResult<Raw>::value) {
+            return std::invoke(std::forward<F>(fn));
+        } else {
+            return R{std::invoke(std::forward<F>(fn))};
+        }
+    }
+    STEPLENS_RESULT_CATCHES
 }
 
 } // namespace steplens

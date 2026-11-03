@@ -19,6 +19,8 @@ public:
     static bool initialize(const std::filesystem::path& directory,
                            std::uint64_t maxFileBytes = kDefaultMaxBytes,
                            unsigned keepFiles = kDefaultKeepFiles);
+    static void shutdown();
+    static void setMinLevel(LogLevel level);
     static void write(LogLevel level, std::string_view message);
     static void debug(std::string_view message) {
         write(LogLevel::Debug, message);

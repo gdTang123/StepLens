@@ -17,7 +17,7 @@ TEST(TaskScheduler, SubmitReturnsValueAndException) {
     EXPECT_EQ(value.get(), 7);
 
     auto failed = scheduler.submit([]() -> int { throw std::runtime_error("submit failed"); });
-    EXPECT_THROW(failed.get(), std::runtime_error);
+    EXPECT_THROW((void)failed.get(), std::runtime_error);
 }
 
 TEST(TaskScheduler, ParallelForVisitsEachIndexOnce) {
@@ -75,4 +75,17 @@ TEST(TaskScheduler, ParallelForStopsWhenCancelled) {
                      source.token()),
                  steplens::CancelledException);
     canceller.join();
+}
+
+TEST(TaskScheduler, ParallelForPropagatesCancelledException) {
+    steplens::TaskScheduler scheduler(2);
+    EXPECT_THROW(scheduler.parallelFor(
+                     8,
+                     [](std::size_t index) {
+                         if (index == 1) {
+                             throw steplens::CancelledException{};
+                         }
+                     },
+                     steplens::CancelToken{}),
+                 steplens::CancelledException);
 }

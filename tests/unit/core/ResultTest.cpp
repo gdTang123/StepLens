@@ -41,4 +41,15 @@ TEST(CatchAsResult, MapsCancellationAllocAndException) {
     const auto ok = steplens::catchAsResult([]() { return 4; });
     ASSERT_TRUE(ok.ok());
     EXPECT_EQ(ok.value(), 4);
+
+    const auto foreign = steplens::catchAsResult([]() -> int { throw 42; });
+    ASSERT_FALSE(foreign.ok());
+    EXPECT_EQ(foreign.error().code, steplens::ErrorCode::Internal);
+    EXPECT_EQ(foreign.error().message, "unknown exception");
+
+    const auto nested = steplens::catchAsResult([] {
+        return steplens::Result<int>{steplens::Error{steplens::ErrorCode::MeshFailed, "mesh", "网格失败"}};
+    });
+    ASSERT_FALSE(nested.ok());
+    EXPECT_EQ(nested.error().code, steplens::ErrorCode::MeshFailed);
 }

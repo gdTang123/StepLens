@@ -3,6 +3,7 @@ steplens_add_module(core
     Version.cpp
     AppPaths.cpp
     ProgressSink.cpp
+    LoadSession.cpp
     TaskScheduler.cpp
     Log.cpp
     CrashDump.cpp
@@ -10,11 +11,12 @@ steplens_add_module(core
     Result.h
     CancelToken.h
     ProgressSink.h
+    LoadSession.h
     TaskScheduler.h
     Log.h
     CrashDump.h
     AppPaths.h)
 
 if(WIN32)
-    target_link_libraries(steplens_core PRIVATE dbghelp)
+    target_link_libraries(steplens_core PRIVATE dbghelp shell32 ole32)
 endif()
