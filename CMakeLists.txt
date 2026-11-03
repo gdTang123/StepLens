@@ -19,35 +19,55 @@ set(CMAKE_MAP_IMPORTED_CONFIG_RELWITHDEBINFO Release)
 set(CMAKE_MAP_IMPORTED_CONFIG_MINSIZEREL Release)
 
 include(StepLensOptions)
-include(StepLensOcct)
 
-# LinguistTools 在 qttools；其余模块都在官方 qtbase 预编译包里。
-find_package(Qt6 6.12 REQUIRED COMPONENTS
-    Core
-    Gui
-    Widgets
-    OpenGL
-    OpenGLWidgets
-    Concurrent
-    Test
-    LinguistTools)
-qt_standard_project_setup()
+if(STEPLENS_CORE_ONLY)
+    include(FetchContent)
+    FetchContent_Declare(
+        googletest
+        URL https://github.com/google/googletest/archive/refs/tags/v1.15.2.tar.gz
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+    set(BUILD_GMOCK OFF CACHE BOOL "" FORCE)
+    set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(googletest)
+else()
+    include(StepLensOcct)
 
-find_package(OpenCASCADE CONFIG REQUIRED)
-find_package(GTest CONFIG REQUIRED)
-steplens_check_occt_toolkits()
+    # LinguistTools 在 qttools；其余模块都在官方 qtbase 预编译包里。
+    find_package(Qt6 6.12 REQUIRED COMPONENTS
+        Core
+        Gui
+        Widgets
+        OpenGL
+        OpenGLWidgets
+        Concurrent
+        Test
+        LinguistTools)
+    qt_standard_project_setup()
+
+    find_package(OpenCASCADE CONFIG REQUIRED)
+    find_package(GTest CONFIG REQUIRED)
+    steplens_check_occt_toolkits()
+endif()
 
 message(STATUS "StepLens ${PROJECT_VERSION}")
-message(STATUS "Qt ${Qt6_VERSION}")
-if(DEFINED OpenCASCADE_VERSION)
-    message(STATUS "OpenCASCADE ${OpenCASCADE_VERSION}")
+if(NOT STEPLENS_CORE_ONLY)
+    message(STATUS "Qt ${Qt6_VERSION}")
+    if(DEFINED OpenCASCADE_VERSION)
+        message(STATUS "OpenCASCADE ${OpenCASCADE_VERSION}")
+    endif()
 endif()
 
 include(CTest)
 
-add_subdirectory(src)
+if(STEPLENS_CORE_ONLY)
+    add_subdirectory(src/core)
+else()
+    add_subdirectory(src)
+endif()
 if(BUILD_TESTING)
     add_subdirectory(tests)
 endif()
 
-include(StepLensDeploy)
+if(NOT STEPLENS_CORE_ONLY)
+    include(StepLensDeploy)
+endif()

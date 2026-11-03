@@ -1,38 +1,43 @@
 # 编译选项、警告级别、/utf-8、ASan。只针对本仓库代码打开 /WX。
+# STEPLENS_CORE_ONLY：不找 Qt/OCCT，用 GCC/Clang 编 core 和单元测试（含 TSan）。完整程序仍只支持 MSVC。
 
+option(STEPLENS_CORE_ONLY "Build only core and unit tests, without Qt or OCCT" OFF)
 option(STEPLENS_ASAN "Build with AddressSanitizer (MSVC)" OFF)
-
-if(NOT MSVC)
-    message(FATAL_ERROR
-        "StepLens 只支持 MSVC 2022（v143）x64。当前编译器是 ${CMAKE_CXX_COMPILER_ID}。请使用 CMake 预设 msvc（Ninja Multi-Config + x64 Native Tools）。")
-endif()
 
 if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
     message(FATAL_ERROR "StepLens 只编 64 位。32 位地址空间装不下超大装配。")
 endif()
 
-# /MP 与 Ninja 会叠加并行度。架构 3.5 仍要求带上这个开关，预设因此保留它。
-add_compile_options(
-    /permissive-
-    /Zc:__cplusplus
-    /utf-8
-    /EHsc
-    /MP
-)
-
-if(STEPLENS_ASAN)
-    add_compile_options(/fsanitize=address)
-    add_link_options(/fsanitize=address)
+if(MSVC)
+    # /MP 与 Ninja 会叠加并行度。架构 3.5 仍要求带上这个开关，预设因此保留它。
+    add_compile_options(
+        /permissive-
+        /Zc:__cplusplus
+        /utf-8
+        /EHsc
+        /MP
+    )
+    if(STEPLENS_ASAN)
+        add_compile_options(/fsanitize=address)
+        add_link_options(/fsanitize=address)
+    endif()
+elseif(NOT STEPLENS_CORE_ONLY)
+    message(FATAL_ERROR
+        "StepLens 只支持 MSVC 2022（v143）x64。当前编译器是 ${CMAKE_CXX_COMPILER_ID}。请使用 CMake 预设 msvc（Ninja Multi-Config + x64 Native Tools）。只跑 core 单测时加 -DSTEPLENS_CORE_ONLY=ON。")
 endif()
 
 # 尖括号头（Qt、OCCT、标准库）视为外部头，不把第三方警告变成错误。
 function(steplens_apply_warnings target)
-    target_compile_options(${target} PRIVATE
-        /W4
-        /WX
-        /external:anglebrackets
-        /external:W0
-    )
+    if(MSVC)
+        target_compile_options(${target} PRIVATE
+            /W4
+            /WX
+            /external:anglebrackets
+            /external:W0
+        )
+    elseif(STEPLENS_CORE_ONLY)
+        target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    endif()
 endfunction()
 
 # 在子目录里创建一个静态库。sources 相对该子目录。

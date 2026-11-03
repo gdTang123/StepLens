@@ -16,6 +16,30 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Linux 托管 runner 比 Windows 便宜。只编 core，不下载 Qt、不编 OCCT。
+  core:
+    name: core-tests-tsan
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install compiler
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends g++ cmake ninja-build
+
+      - name: Configure, build, test with TSan
+        run: |
+          cmake -S . -B build/core -G Ninja \
+            -DSTEPLENS_CORE_ONLY=ON \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER=gcc \
+            -DCMAKE_CXX_COMPILER=g++ \
+            -DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
+          cmake --build build/core
+          ctest --test-dir build/core --output-on-failure
+
   windows:
     name: windows-build
     runs-on: windows-2022
@@ -67,15 +91,30 @@ jobs:
           Add-Content -Path $env:GITHUB_ENV -Encoding utf8NoBOM -Value "VCPKG_DISABLE_METRICS=1"
           Add-Content -Path $env:GITHUB_ENV -Encoding utf8NoBOM -Value "VCPKG_BINARY_SOURCES=clear;files,$cache,readwrite"
 
+      # Qt 6.11 起 Windows 仓库按编译器拆目录：qt6_6120/qt6_6120_msvc2022_64/Updates.xml。
+      # PyPI 上的 aqtinstall 3.3.0 仍去找 qt6_6120/qt6_6120/Updates.xml（404）。
+      # 8c3695d 是已合并的 “Support Qt 6.11+ for Windows x64”，尚未发版。
+      - name: Cache Qt 6.12.0
+        id: qt-cache
+        uses: actions/cache@v4
+        with:
+          path: C:\Qt\6.12.0\msvc2022_64
+          key: qt-6.12.0-win64_msvc2022_64-qttools
+
       - name: Install Qt 6.12.0 from download.qt.io
+        if: steps.qt-cache.outputs.cache-hit != 'true'
         run: |
           python -m pip install --upgrade pip
-          python -m pip install "aqtinstall==3.3.*"
+          python -m pip install "git+https://github.com/miurahr/aqtinstall.git@8c3695d4a4e1ceabf6a74dc6c79681656dc6b74b"
+          python -m aqt version
           $qtRoot = "C:\Qt"
           python -m aqt install-qt windows desktop 6.12.0 win64_msvc2022_64 `
             --outputdir $qtRoot --base https://download.qt.io -m qttools
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $qtDir = Join-Path $qtRoot "6.12.0\msvc2022_64"
+
+      - name: Point CMake at Qt
+        run: |
+          $qtDir = "C:\Qt\6.12.0\msvc2022_64"
           $qmake = Join-Path $qtDir "bin\qmake.exe"
           if (-not (Test-Path -LiteralPath $qmake)) { throw "Qt 安装后未找到 $qmake" }
           Add-Content -Path $env:GITHUB_ENV -Encoding utf8NoBOM -Value "QTDIR=$qtDir"
