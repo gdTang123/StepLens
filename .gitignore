@@ -1,0 +1,42 @@
+# 构建
+build/
+out/
+dist/
+dist-stage/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+CMakeUserPresets.json
+compile_commands.json
+Testing/
+*.user
+
+# Visual Studio
+.vs/
+*.suo
+*.VC.db
+*.VC.opendb
+*.vcxproj.user
+*.sln.docstates
+
+# vcpkg。清单模式把依赖装进构建目录；不要把工具链克隆提交进来。
+vcpkg_installed/
+vcpkg/
+.vcpkg-binary-cache/
+
+# 样例体积大，而且 GrabCAD / Twin Disc 的文件不能进仓库。
+samples/
+
+# 本地运行产物
+logs/
+__pycache__/
+*.pyc
+*.obj
+*.o
+*.pdb
+*.ilk
+*.exp
+*.exe
+*.dll
+*.lib
+*.qm

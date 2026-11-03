@@ -1,0 +1,7 @@
+StepLens
+
+Copyright (c) 2026 StepLens 项目。保留所有权利。
+
+本软件仅供团队内部使用。未经授权，不得对外发布、销售或再分发。
+
+第三方组件（Qt、Open CASCADE Technology、FreeType，以及启用时的 oneTBB）各自适用其许可证。绿色版发布时把这些许可证文本放进 licenses/ 目录，见 packaging/licenses/README.md。那些许可证与本文件相互独立。
