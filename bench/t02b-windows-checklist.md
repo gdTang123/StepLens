@@ -73,7 +73,7 @@ foreach ($n in $f.Keys) { $u,$h = $f[$n].Split('|'); if (-not (Test-Path $n)) { 
 Set-ExecutionPolicy -Scope Process Bypass -Force   # 只对当前窗口生效，允许运行 VS 的环境脚本
 & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\Launch-VsDevShell.ps1" -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
 Set-Location C:\sl\t02b
-cmake -S . -B build801 -G "Visual Studio 17 2022" -A x64 -DCMAKE_TOOLCHAIN_FILE=C:\sl\vcpkg\scripts\buildsystems\vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows-release -DVCPKG_INSTALL_OPTIONS=--clean-after-build -DSTEPLENS_EXPECTED_OCCT=8.0.1
+cmake -S . -B build801 -G "Visual Studio 17 2022" -A x64 -DCMAKE_TOOLCHAIN_FILE=C:\sl\vcpkg\scripts\buildsystems\vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows-release -DVCPKG_INSTALL_OPTIONS=--clean-after-build "-DSTEPLENS_EXPECTED_OCCT=8.0.1"
 cmake --build build801 --config RelWithDebInfo
 ```
 通过条件：最后一行没有 `error`，`C:\sl\t02b\build801\RelWithDebInfo\spike.exe` 存在。失败时把窗口最后 50 行发回团队。
@@ -91,7 +91,7 @@ Set-Location C:\sl\t02b; powershell -ExecutionPolicy Bypass -File windows\run-t0
 Set-ExecutionPolicy -Scope Process Bypass -Force   # 只对当前窗口生效，允许运行 VS 的环境脚本
 & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\Launch-VsDevShell.ps1" -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
 Set-Location C:\sl\t02b
-cmake -S . -B build793 -G "Visual Studio 17 2022" -A x64 -DCMAKE_TOOLCHAIN_FILE=C:\sl\vcpkg\scripts\buildsystems\vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows-release -DVCPKG_INSTALL_OPTIONS=--clean-after-build -DVCPKG_MANIFEST_DIR=C:\sl\t02b\occt-7.9.3 -DSTEPLENS_EXPECTED_OCCT=7.9.3
+cmake -S . -B build793 -G "Visual Studio 17 2022" -A x64 -DCMAKE_TOOLCHAIN_FILE=C:\sl\vcpkg\scripts\buildsystems\vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows-release -DVCPKG_INSTALL_OPTIONS=--clean-after-build -DVCPKG_MANIFEST_DIR=C:\sl\t02b\occt-7.9.3 "-DSTEPLENS_EXPECTED_OCCT=7.9.3"
 cmake --build build793 --config RelWithDebInfo
 ```
 

@@ -190,7 +190,7 @@ jobs:
           cmake -S bench -B build/bench -G Ninja `
             -DCMAKE_BUILD_TYPE=RelWithDebInfo `
             -DCMAKE_PREFIX_PATH="$pwd\build\msvc\vcpkg_installed\x64-windows" `
-            -DSTEPLENS_EXPECTED_OCCT=8.0.1
+            "-DSTEPLENS_EXPECTED_OCCT=8.0.1"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmake --build build/bench
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -361,7 +361,7 @@ jobs:
           cmake -S bench -B build/bench793 -G Ninja `
             -DCMAKE_BUILD_TYPE=RelWithDebInfo `
             -DCMAKE_PREFIX_PATH="$pwd\build\msvc-occt793\vcpkg_installed\x64-windows" `
-            -DSTEPLENS_EXPECTED_OCCT=7.9.3
+            "-DSTEPLENS_EXPECTED_OCCT=7.9.3"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmake --build build/bench793
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
