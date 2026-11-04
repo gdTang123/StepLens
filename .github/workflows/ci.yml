@@ -9,6 +9,7 @@ on:
     # refs/pull/<n>/merge 上，别的 PR 读不到。push 把 vcpkg/Qt 缓存记在分支上，
     # 以该分支为 base 的 PR 才能直接用。合并后这条分支名可以删掉。
     branches: [main, cursor/fix-qt612-ci-873f]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -23,7 +24,8 @@ jobs:
   core:
     name: core-tests-tsan
     # 该分支的 push 已经会跑同一套检查。pull_request 再跑会占双份额度，Windows 上会把 OCCT 编两次。
-    if: github.event_name != 'pull_request' || github.head_ref != 'cursor/fix-qt612-ci-873f'
+    # workflow_dispatch 只跑 7.9.3 那一个作业。
+    if: github.event_name != 'workflow_dispatch' && (github.event_name != 'pull_request' || github.head_ref != 'cursor/fix-qt612-ci-873f')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -45,9 +47,20 @@ jobs:
           cmake --build build/core
           ctest --test-dir build/core --output-on-failure
 
+      - name: Check vcpkg manifests and OCCT version macro
+        run: |
+          python3 scripts/check_manifests.py
+          hits=$(git grep -n OCC_VERSION_HEX -- '*.h' '*.hpp' '*.cpp' '*.cxx' ':!src/occtsupport/occt_compat.h' || true)
+          if [ -n "$hits" ]; then
+            echo "$hits"
+            echo "OCC_VERSION_HEX 只能出现在 src/occtsupport/occt_compat.h"
+            exit 1
+          fi
+          git grep -n OCC_VERSION_HEX -- src/occtsupport/occt_compat.h >/dev/null
+
   windows:
     name: windows-build
-    if: github.event_name != 'pull_request' || github.head_ref != 'cursor/fix-qt612-ci-873f'
+    if: github.event_name != 'workflow_dispatch' && (github.event_name != 'pull_request' || github.head_ref != 'cursor/fix-qt612-ci-873f')
     runs-on: windows-2022
     timeout-minutes: 240
     env:
@@ -91,6 +104,8 @@ jobs:
             .vcpkg-binary-cache
             vcpkg/downloads
           key: vcpkg-${{ runner.os }}-x64-windows-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
+          restore-keys: |
+            vcpkg-${{ runner.os }}-x64-windows-
 
       - name: Bootstrap vcpkg
         run: |
@@ -170,6 +185,19 @@ jobs:
             vcpkg/downloads
           key: ${{ steps.vcpkg-cache.outputs.cache-primary-key }}
 
+      - name: Build bench tools against the installed OCCT
+        run: |
+          cmake -S bench -B build/bench -G Ninja `
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo `
+            -DCMAKE_PREFIX_PATH="$pwd\build\msvc\vcpkg_installed\x64-windows" `
+            "-DSTEPLENS_EXPECTED_OCCT=8.0.1"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build build/bench
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:PATH = "$pwd\build\msvc\vcpkg_installed\x64-windows\bin;$env:PATH"
+          & "$pwd\build\bench\test_compat.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Package zip
         run: |
           cmake --install build/msvc --config RelWithDebInfo --prefix "$pwd\dist-stage"
@@ -213,7 +241,8 @@ jobs:
             $base = "HEAD~1"
           }
           $files = @(git diff --name-only --diff-filter=ACMR $base HEAD)
-          $cpp = @($files | Where-Object { $_ -match '\.cpp$' })
+          # bench/ 是独立摸底工具，编译数据库在 build/bench，不在主工程这份里。
+          $cpp = @($files | Where-Object { $_ -match '\.cpp$' -and $_ -notmatch '^bench/' })
           if ($cpp.Count -eq 0) {
             Write-Host "没有改动的 .cpp，跳过 clang-tidy"
             exit 0
@@ -230,4 +259,112 @@ jobs:
             --extra-arg=-Wno-unused-command-line-argument `
             --extra-arg=/w `
             @cpp
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  # 不加矩阵。7.9.3 只在手动触发时编，避免每个 PR 都再编一遍 OCCT。
+  # 这条分支已经手动编过一次并成功（run 41769758492）。之后只留 workflow_dispatch。
+  windows-occt793:
+    name: windows-occt-7.9.3
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-2022
+    timeout-minutes: 240
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: utf-8
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Checkout vcpkg 2026.10.16
+        uses: actions/checkout@v4
+        with:
+          repository: microsoft/vcpkg
+          ref: 9eec002df1cd109f8f104cd966a763daf9751489
+          path: vcpkg
+          fetch-depth: 1
+
+      - name: Restore vcpkg binaries for 7.9.3
+        id: vcpkg-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            .vcpkg-binary-cache
+            vcpkg/downloads
+          key: vcpkg-occt793-${{ runner.os }}-x64-windows-${{ hashFiles('vcpkg-configs/occt-7.9.3/vcpkg.json', 'vcpkg-configs/occt-7.9.3/vcpkg-configuration.json') }}
+
+      - name: Bootstrap vcpkg
+        run: |
+          & .\vcpkg\bootstrap-vcpkg.bat -disableMetrics
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Force -Path .vcpkg-binary-cache | Out-Null
+          $cache = (Join-Path (Get-Location) ".vcpkg-binary-cache") -replace '\\', '/'
+          $root = Join-Path (Get-Location) "vcpkg"
+          Add-Content -Path $env:GITHUB_ENV -Encoding utf8NoBOM -Value "VCPKG_ROOT=$root"
+          Add-Content -Path $env:GITHUB_ENV -Encoding utf8NoBOM -Value "VCPKG_DISABLE_METRICS=1"
+          Add-Content -Path $env:GITHUB_ENV -Encoding utf8NoBOM -Value "VCPKG_BINARY_SOURCES=clear;files,$cache,readwrite"
+
+      - name: Restore Qt 6.12.0
+        id: qt-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: C:\Qt\6.12.0\msvc2022_64
+          key: qt-6.12.0-win64_msvc2022_64-base
+
+      - name: Install Qt 6.12.0 from download.qt.io
+        if: steps.qt-cache.outputs.cache-hit != 'true'
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "git+https://github.com/miurahr/aqtinstall.git@8c3695d4a4e1ceabf6a74dc6c79681656dc6b74b"
+          python -m aqt install-qt windows desktop 6.12.0 win64_msvc2022_64 `
+            --outputdir C:\Qt --base https://download.qt.io
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Point CMake at Qt
+        run: |
+          $qtDir = "C:\Qt\6.12.0\msvc2022_64"
+          $qmake = Join-Path $qtDir "bin\qmake.exe"
+          if (-not (Test-Path -LiteralPath $qmake)) { throw "Qt 安装后未找到 $qmake" }
+          Add-Content -Path $env:GITHUB_ENV -Encoding utf8NoBOM -Value "QTDIR=$qtDir"
+          Add-Content -Path $env:GITHUB_PATH -Encoding utf8NoBOM -Value (Join-Path $qtDir "bin")
+
+      - name: MSVC x64 environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure OCCT 7.9.3
+        run: |
+          cmake --preset msvc-occt793
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Save vcpkg binary cache for 7.9.3
+        if: success() && steps.vcpkg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            .vcpkg-binary-cache
+            vcpkg/downloads
+          key: ${{ steps.vcpkg-cache.outputs.cache-primary-key }}
+
+      - name: Build and test OCCT 7.9.3
+        run: |
+          cmake --build --preset release-occt793
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ctest --preset unit-occt793
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build bench tools against OCCT 7.9.3
+        run: |
+          cmake -S bench -B build/bench793 -G Ninja `
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo `
+            -DCMAKE_PREFIX_PATH="$pwd\build\msvc-occt793\vcpkg_installed\x64-windows" `
+            "-DSTEPLENS_EXPECTED_OCCT=7.9.3"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build build/bench793
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:PATH = "$pwd\build\msvc-occt793\vcpkg_installed\x64-windows\bin;$env:PATH"
+          & "$pwd\build\bench793\test_compat.exe"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

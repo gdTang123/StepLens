@@ -4,7 +4,7 @@
 
 程序能打开一个空窗口，状态栏写着「尚未打开文件」，还不能读 STEP/IGES。core 里已经有结果类型、软取消、进度、线程池、日志和 Windows 崩溃转储。
 
-仓库里的架构文档仍是 v1.0，避免和正在写的 v1.2 冲突。摸底报告在 `docs/bench/spike-m0.md`。代码要同时能按 OCCT 8.0.1 和 7.9.3 编译，`vcpkg.json` 里仍然锁着 8.0.1，等 Windows 复测再定版。
+架构文档是 v1.2。摸底报告在 `docs/bench/spike-m0.md`，Windows 复测清单在 `docs/bench/t02b-windows-checklist.md`。根 `vcpkg.json` 不写 overrides，默认 OCCT 8.0.1。预设 `msvc-occt793` 用 `vcpkg-configs/occt-7.9.3` 切到 7.9.3。版本差异只在 `src/occtsupport/occt_compat.h`。老板在自己电脑上跑的工具在 `bench/`。
 
 ## 文档
 
@@ -14,6 +14,7 @@
 | 样例清单 | [docs/prd/samples.md](docs/prd/samples.md) |
 | 架构设计 | [docs/design/step-viewer-architecture.md](docs/design/step-viewer-architecture.md) |
 | M0 摸底报告 | [docs/bench/spike-m0.md](docs/bench/spike-m0.md) |
+| T02b Windows 复测清单 | [docs/bench/t02b-windows-checklist.md](docs/bench/t02b-windows-checklist.md) |
 | 样例扫描脚本和结果 | [docs/design/data/](docs/design/data/) |
 
 样例文件不要提交。GrabCAD 和 Twin Disc 的模型有版权和转贴限制，下载到本地目录，用环境变量 `STEPLENS_SAMPLES` 告诉测试程序。`scripts/fetch_samples.py` 要到 T03 才实现。
