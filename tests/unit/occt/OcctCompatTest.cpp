@@ -17,18 +17,18 @@ TEST(OcctCompat, VersionMatchesManifest) {
 }
 
 TEST(OcctCompat, FailureStaysInsideResult) {
-    const auto fromOcct = steplens::io::catchOcctAsResult([] { throw Standard_DomainError("boom"); },
+    const auto fromOcct = steplens::io::catchOcctAsResult([]() -> int { throw Standard_DomainError("boom"); },
                                                           steplens::ErrorCode::TransferFailed);
     ASSERT_FALSE(fromOcct.ok());
     EXPECT_EQ(fromOcct.error().code, steplens::ErrorCode::TransferFailed);
     EXPECT_EQ(fromOcct.error().message, "boom");
 
-    const auto fromStd = steplens::io::catchOcctAsResult([] { throw std::runtime_error("x"); });
+    const auto fromStd = steplens::io::catchOcctAsResult([]() -> int { throw std::runtime_error("x"); });
     ASSERT_FALSE(fromStd.ok());
     EXPECT_EQ(fromStd.error().code, steplens::ErrorCode::Internal);
     EXPECT_EQ(fromStd.error().message, "x");
 
-    const auto fromOther = steplens::io::catchOcctAsResult([] { throw 42; });
+    const auto fromOther = steplens::io::catchOcctAsResult([]() -> int { throw 42; });
     ASSERT_FALSE(fromOther.ok());
     EXPECT_EQ(fromOther.error().code, steplens::ErrorCode::Internal);
     EXPECT_EQ(fromOther.error().message, "unknown exception");

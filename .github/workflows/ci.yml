@@ -335,13 +335,9 @@ jobs:
         with:
           arch: x64
 
-      - name: Configure, build, test OCCT 7.9.3
+      - name: Configure OCCT 7.9.3
         run: |
           cmake --preset msvc-occt793
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cmake --build --preset release-occt793
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          ctest --preset unit-occt793
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Save vcpkg binary cache for 7.9.3
@@ -352,6 +348,13 @@ jobs:
             .vcpkg-binary-cache
             vcpkg/downloads
           key: ${{ steps.vcpkg-cache.outputs.cache-primary-key }}
+
+      - name: Build and test OCCT 7.9.3
+        run: |
+          cmake --build --preset release-occt793
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ctest --preset unit-occt793
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build bench tools against OCCT 7.9.3
         run: |
