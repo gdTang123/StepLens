@@ -33,7 +33,7 @@ static std::string boundary(void (*f)()) { // 模拟模块边界：先捕获 Sta
     }
 }
 int main() {
-    std::printf("occt_version=%s\n", steplens::occt::versionString());
+    std::printf("occt_version=%s expected=%s\n", steplens::occt::versionString(), STEPLENS_EXPECTED_OCCT);
     if (std::strlen(STEPLENS_EXPECTED_OCCT))
         CHECK(std::strcmp(steplens::occt::versionString(), STEPLENS_EXPECTED_OCCT) == 0); // 防止配错清单
     CHECK(boundary([] { throw Standard_DomainError("boom"); }) == "occt:boom");

@@ -20,7 +20,8 @@ target_link_libraries(spike PRIVATE TKDESTEP TKDEIGES TKXCAF TKLCAF TKCAF TKMesh
 add_executable(test_compat compat/test_compat.cpp)
 target_include_directories(test_compat PRIVATE ${OpenCASCADE_INCLUDE_DIR} "${CMAKE_CURRENT_SOURCE_DIR}/../src")
 target_link_libraries(test_compat PRIVATE TKLCAF TKCDF TKernel)
-target_compile_definitions(test_compat PRIVATE STEPLENS_EXPECTED_OCCT="${STEPLENS_EXPECTED_OCCT}")
+# 和主工程单测同一写法。MSVC 的 /D 若少了这层引号，宏值会带上引号字符，strcmp 对不上。
+target_compile_definitions(test_compat PRIVATE "STEPLENS_EXPECTED_OCCT=\"${STEPLENS_EXPECTED_OCCT}\"")
 
 if(MSVC)
   # 源码含中文注释（UTF-8 无 BOM）；RelWithDebInfo 自带 /Zi + /DEBUG，生成 PDB 供崩溃栈符号化
