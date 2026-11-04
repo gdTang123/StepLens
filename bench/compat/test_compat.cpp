@@ -1,4 +1,5 @@
 // 双版本兼容的最小单测（不依赖 GTest，供 T02b 冒烟；仓库里改写成 GTest）
+#include "expected_occt.h"
 #include "occtsupport/occt_compat.h"
 
 #include <NCollection_Sequence.hxx>
@@ -10,9 +11,7 @@
 #include <cstring>
 #include <stdexcept>
 #include <string>
-#ifndef STEPLENS_EXPECTED_OCCT
-#define STEPLENS_EXPECTED_OCCT ""
-#endif
+
 struct Dummy : Standard_Transient {};
 static int fails = 0;
 #define CHECK(c)                                                                                             \

@@ -1,0 +1,3 @@
+#pragma once
+
+#define STEPLENS_EXPECTED_OCCT "@STEPLENS_EXPECTED_OCCT@"
