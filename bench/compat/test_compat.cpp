@@ -27,7 +27,7 @@ static std::string boundary(void (*f)()) { // 模拟模块边界：先捕获 Sta
         f();
         return "ok";
     } catch (const Standard_Failure& e) {
-        return "occt:" + steplens::occt::failureMessage(e);
+        return std::string("occt:") + steplens::occt::failureMessage(e);
     } catch (const std::exception& e) {
         return std::string("std:") + e.what();
     }
