@@ -21,7 +21,18 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _configure_stdio() -> None:
+    # Windows 的 CI 控制台是 cp1252。中文 print 在默认编码下会抛 UnicodeEncodeError，
+    # 而这时 zip 已经写好了，任务却被记成失败，后面的缓存保存也会被跳过。
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        reconfigure(encoding="utf-8", errors="backslashreplace")
+
+
 def main() -> int:
+    _configure_stdio()
     args = parse_args()
     app_dir = args.prefix / "StepLens"
     exe = app_dir / "StepLens.exe"

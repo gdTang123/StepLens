@@ -28,6 +28,8 @@
 
 第一次配置会按清单编译 OCCT 8.0.1 和 GoogleTest。OCCT 编译很久，编完后 vcpkg 的二进制缓存会让下次快很多。
 
+只编 core 并跑单元测试（不需要 Qt、OCCT、MSVC），可以加 `-DSTEPLENS_CORE_ONLY=ON`。CI 的 Ubuntu 任务用这个选项，并打开 ThreadSanitizer。
+
 ## 构建
 
 把下面两个路径换成自己机器上的目录，然后执行这一条：

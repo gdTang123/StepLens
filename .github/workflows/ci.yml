@@ -1,11 +1,14 @@
 name: ci
 
-# 只在 PR 和 main 上跑。私有仓库的 Windows 分钟数按倍率计费，不设矩阵、不设 schedule。
-# 二进制缓存未命中时会从源码编译 OCCT 8.0.1，第一次可能要一两个小时。
+# PR、main，以及下面列出的那条修复分支。私有仓库的 Windows 分钟数按倍率计费，不设矩阵、不设 schedule。
+# 二进制缓存未命中时会从源码编译 OCCT 8.0.1，第一次大约两个半小时，超时留到四小时，避免缓存上传被掐掉。
 on:
   pull_request:
   push:
-    branches: [main]
+    # cursor/fix-qt612-ci-873f 多一次 push 触发：pull_request 写入的缓存挂在
+    # refs/pull/<n>/merge 上，别的 PR 读不到。push 把 vcpkg/Qt 缓存记在分支上，
+    # 以该分支为 base 的 PR 才能直接用。合并后这条分支名可以删掉。
+    branches: [main, cursor/fix-qt612-ci-873f]
 
 permissions:
   contents: read
@@ -16,10 +19,40 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Linux 托管 runner 比 Windows 便宜。只编 core，不下载 Qt、不编 OCCT。
+  core:
+    name: core-tests-tsan
+    # 该分支的 push 已经会跑同一套检查。pull_request 再跑会占双份额度，Windows 上会把 OCCT 编两次。
+    if: github.event_name != 'pull_request' || github.head_ref != 'cursor/fix-qt612-ci-873f'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install compiler
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends g++ cmake ninja-build
+
+      - name: Configure, build, test with TSan
+        run: |
+          cmake -S . -B build/core -G Ninja \
+            -DSTEPLENS_CORE_ONLY=ON \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER=gcc \
+            -DCMAKE_CXX_COMPILER=g++ \
+            -DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
+          cmake --build build/core
+          ctest --test-dir build/core --output-on-failure
+
   windows:
     name: windows-build
+    if: github.event_name != 'pull_request' || github.head_ref != 'cursor/fix-qt612-ci-873f'
     runs-on: windows-2022
-    timeout-minutes: 180
+    timeout-minutes: 240
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: utf-8
     defaults:
       run:
         shell: pwsh
@@ -48,8 +81,11 @@ jobs:
           path: vcpkg
           fetch-depth: 1
 
-      - name: Cache vcpkg binaries
-        uses: actions/cache@v4
+      # restore + 编译成功后立刻 save。actions/cache 的保存挂在整次 job 成功上，
+      # 打包或冒烟失败时 Post Cache 会被跳过，OCCT 就得重编。
+      - name: Restore vcpkg binaries
+        id: vcpkg-cache
+        uses: actions/cache/restore@v4
         with:
           path: |
             .vcpkg-binary-cache
@@ -67,19 +103,42 @@ jobs:
           Add-Content -Path $env:GITHUB_ENV -Encoding utf8NoBOM -Value "VCPKG_DISABLE_METRICS=1"
           Add-Content -Path $env:GITHUB_ENV -Encoding utf8NoBOM -Value "VCPKG_BINARY_SOURCES=clear;files,$cache,readwrite"
 
+      # Qt 6.11 起 Windows 仓库按编译器拆目录：qt6_6120/qt6_6120_msvc2022_64/Updates.xml。
+      # PyPI 上的 aqtinstall 3.3.0 仍去找 qt6_6120/qt6_6120/Updates.xml（404）。
+      # 8c3695d 是已合并的 “Support Qt 6.11+ for Windows x64”，尚未发版。
+      - name: Restore Qt 6.12.0
+        id: qt-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: C:\Qt\6.12.0\msvc2022_64
+          key: qt-6.12.0-win64_msvc2022_64-base
+
       - name: Install Qt 6.12.0 from download.qt.io
+        if: steps.qt-cache.outputs.cache-hit != 'true'
         run: |
           python -m pip install --upgrade pip
-          python -m pip install "aqtinstall==3.3.*"
+          python -m pip install "git+https://github.com/miurahr/aqtinstall.git@8c3695d4a4e1ceabf6a74dc6c79681656dc6b74b"
+          python -m aqt version
           $qtRoot = "C:\Qt"
+          # qttools（含 Linguist）已经打进基础包 qt.qt6.6120.win64_msvc2022_64，不是独立模块。
           python -m aqt install-qt windows desktop 6.12.0 win64_msvc2022_64 `
-            --outputdir $qtRoot --base https://download.qt.io -m qttools
+            --outputdir $qtRoot --base https://download.qt.io
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $qtDir = Join-Path $qtRoot "6.12.0\msvc2022_64"
+
+      - name: Point CMake at Qt
+        run: |
+          $qtDir = "C:\Qt\6.12.0\msvc2022_64"
           $qmake = Join-Path $qtDir "bin\qmake.exe"
           if (-not (Test-Path -LiteralPath $qmake)) { throw "Qt 安装后未找到 $qmake" }
           Add-Content -Path $env:GITHUB_ENV -Encoding utf8NoBOM -Value "QTDIR=$qtDir"
           Add-Content -Path $env:GITHUB_PATH -Encoding utf8NoBOM -Value (Join-Path $qtDir "bin")
+
+      - name: Save Qt cache
+        if: success() && steps.qt-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: C:\Qt\6.12.0\msvc2022_64
+          key: ${{ steps.qt-cache.outputs.cache-primary-key }}
 
       - name: MSVC x64 environment
         uses: ilammy/msvc-dev-cmd@v1
@@ -93,6 +152,23 @@ jobs:
           cmake --version
           cmake --workflow --preset ci
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Check vcpkg binary cache
+        if: success() && steps.vcpkg-cache.outputs.cache-hit != 'true'
+        run: |
+          $files = @(Get-ChildItem -LiteralPath .vcpkg-binary-cache -Recurse -File -ErrorAction SilentlyContinue)
+          if ($files.Count -eq 0) { throw ".vcpkg-binary-cache 是空的，拒绝写入空缓存" }
+          $bytes = ($files | Measure-Object -Property Length -Sum).Sum
+          Write-Host ("vcpkg binary cache: {0} files, {1:N1} MiB" -f $files.Count, ($bytes / 1MB))
+
+      - name: Save vcpkg binary cache
+        if: success() && steps.vcpkg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            .vcpkg-binary-cache
+            vcpkg/downloads
+          key: ${{ steps.vcpkg-cache.outputs.cache-primary-key }}
 
       - name: Package zip
         run: |
