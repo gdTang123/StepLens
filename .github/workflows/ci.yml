@@ -241,7 +241,8 @@ jobs:
             $base = "HEAD~1"
           }
           $files = @(git diff --name-only --diff-filter=ACMR $base HEAD)
-          $cpp = @($files | Where-Object { $_ -match '\.cpp$' })
+          # bench/ 是独立摸底工具，编译数据库在 build/bench，不在主工程这份里。
+          $cpp = @($files | Where-Object { $_ -match '\.cpp$' -and $_ -notmatch '^bench/' })
           if ($cpp.Count -eq 0) {
             Write-Host "没有改动的 .cpp，跳过 clang-tidy"
             exit 0
@@ -261,11 +262,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   # 不加矩阵。7.9.3 只在手动触发时编，避免每个 PR 都再编一遍 OCCT。
-  # 当前令牌不能调用 workflow_dispatch（403）。这条分支的 pull_request 当作这一次手动编译。
-  # 合进 main 之后，别的 PR 不会再跑这个作业。
+  # 这条分支已经手动编过一次并成功（run 41769758492）。之后只留 workflow_dispatch。
   windows-occt793:
     name: windows-occt-7.9.3
-    if: github.event_name == 'workflow_dispatch' || github.head_ref == 'cursor/t02b-occt-switch-873f'
+    if: github.event_name == 'workflow_dispatch'
     runs-on: windows-2022
     timeout-minutes: 240
     env:
