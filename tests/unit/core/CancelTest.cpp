@@ -1,8 +1,10 @@
 #include "core/CancelToken.h"
 #include "core/LoadSession.h"
 
+#include <atomic>
 #include <chrono>
 #include <gtest/gtest.h>
+#include <memory>
 #include <thread>
 
 TEST(CancelToken, ThrowIfCancelled) {
@@ -17,17 +19,17 @@ TEST(CancelToken, ThrowIfCancelled) {
     EXPECT_THROW(token.throwIfCancelled(), steplens::CancelledException);
 }
 
-TEST(SoftCancel, UiReturnsBeforeBackgroundReleases) {
-    steplens::SoftCancel cancel;
+TEST(LoadSession, UiReturnsBeforeBackgroundReleases) {
+    auto session = std::make_shared<steplens::LoadSession>(1024);
     std::atomic<int> phase{0};
     std::thread worker([&]() {
         phase.store(1);
-        while (!cancel.stopRequested()) {
+        while (!session->token().isCancelled()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
         phase.store(2);
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
-        cancel.noteBackgroundReleased();
+        session->noteBackgroundReleased();
         phase.store(3);
     });
 
@@ -36,16 +38,17 @@ TEST(SoftCancel, UiReturnsBeforeBackgroundReleases) {
     }
 
     const auto started = std::chrono::steady_clock::now();
-    cancel.requestFromUi();
+    session->cancel();
     const auto elapsed = std::chrono::steady_clock::now() - started;
 
     EXPECT_LT(elapsed, std::chrono::seconds(1));
-    EXPECT_TRUE(cancel.stopRequested());
+    EXPECT_TRUE(session->token().isCancelled());
+    EXPECT_TRUE(session->progress().cancelFrozen());
     EXPECT_LT(phase.load(), 3);
-    EXPECT_FALSE(cancel.backgroundReleased());
+    EXPECT_FALSE(session->backgroundReleased());
 
     worker.join();
-    EXPECT_TRUE(cancel.backgroundReleased());
+    EXPECT_TRUE(session->backgroundReleased());
     EXPECT_EQ(phase.load(), 3);
 }
 

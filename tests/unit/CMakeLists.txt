@@ -28,7 +28,9 @@ add_executable(steplens_tests
     core/VersionTest.cpp
     core/ResultTest.cpp
     core/CancelTest.cpp
+    core/LoadCoordinatorTest.cpp
     core/ProgressSinkTest.cpp
+    core/ProgressSinkRaceTest.cpp
     core/TaskSchedulerTest.cpp
     core/LogTest.cpp
     core/CrashDumpTest.cpp)

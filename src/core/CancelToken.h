@@ -1,6 +1,5 @@
 #pragma once
 
-#include <atomic>
 #include <exception>
 #include <stop_token>
 #include <utility>
@@ -62,37 +61,6 @@ public:
 
 private:
     std::stop_source m_source;
-};
-
-// 架构 6.6：界面调用 requestFromUi 后立刻返回（目标 ≤ 1 秒，这里本身不等待）。
-// 后台线程观察 token，释放完再 noteBackgroundReleased。退出进程时不必等待释放。
-class SoftCancel {
-public:
-    void requestFromUi() noexcept {
-        m_source.requestStop();
-    }
-
-    [[nodiscard]] CancelToken token() const noexcept {
-        return m_source.token();
-    }
-
-    [[nodiscard]] bool stopRequested() const noexcept {
-        return m_source.stopRequested();
-    }
-
-    // 由后台线程在丢弃结果并释放内存之后调用。界面不调用它。
-    void noteBackgroundReleased() noexcept {
-        m_released.store(true, std::memory_order_release);
-    }
-
-    [[nodiscard]] bool backgroundReleased() const noexcept {
-        return m_released.load(std::memory_order_acquire);
-    }
-
-private:
-    CancelSource m_source;
-    // 由后台线程写，界面线程读。
-    std::atomic<bool> m_released{false};
 };
 
 } // namespace steplens

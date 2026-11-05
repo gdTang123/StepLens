@@ -259,9 +259,13 @@ jobs:
       # 冒烟读的是 build 目录里的 StepLens.exe，不依赖上面的 zip。PR 上打包被跳过时这里仍然跑。
       - name: Smoke the empty window offscreen
         run: |
+          # G1-5：离屏平台没有可判定的 GPU 帧缓冲。这里只确认进程还活着。
+          # 100%/150% DPI、resize、逐帧不是单色，见 docs/bench/t09-gpu-smoke-checklist.md。
+          # 缺帧缓冲内容不得让本作业变红。程序在 offscreen 下不创建 ViewerWidget。
           $env:QT_QPA_PLATFORM = "offscreen"
           $env:QT_PLUGIN_PATH = Join-Path $env:QTDIR "plugins"
-          $env:PATH = "$(Join-Path $env:QTDIR 'bin');$env:PATH"
+          $vcpkgBin = Join-Path (Get-Location) "build\msvc\vcpkg_installed\x64-windows\bin"
+          $env:PATH = "$vcpkgBin;$(Join-Path $env:QTDIR 'bin');$env:PATH"
           $exe = Join-Path (Get-Location) "build\msvc\RelWithDebInfo\StepLens.exe"
           if (-not (Test-Path -LiteralPath $exe)) { throw "未找到 $exe" }
           $proc = Start-Process -FilePath $exe -PassThru -WindowStyle Hidden

@@ -4,6 +4,8 @@ steplens_add_module(core
     AppPaths.cpp
     ProgressSink.cpp
     LoadSession.cpp
+    LoadCoordinator.cpp
+    OcctLoadContract.cpp
     TaskScheduler.cpp
     Log.cpp
     CrashDump.cpp
@@ -12,6 +14,8 @@ steplens_add_module(core
     CancelToken.h
     ProgressSink.h
     LoadSession.h
+    LoadCoordinator.h
+    OcctLoadContract.h
     TaskScheduler.h
     Log.h
     CrashDump.h
