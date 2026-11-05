@@ -191,15 +191,10 @@ jobs:
           $buildCode = $LASTEXITCODE
           Get-Content -LiteralPath build-msvc.log
           if ($buildCode -ne 0) { exit $buildCode }
-          # 这两个脚本和 occt-link-report.txt 随 PR #10 进来。文件还没有时跳过，避免 #10 合并前打断本作业。
-          if (Test-Path -LiteralPath scripts/check_build_log.ps1) {
-            pwsh -File scripts/check_build_log.ps1 -Log build-msvc.log
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
-          if (Test-Path -LiteralPath scripts/verify_occt_link.ps1) {
-            pwsh -File scripts/verify_occt_link.ps1 -BuildDir build/msvc -Report build/msvc/occt-link-report.txt
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
+          pwsh -File scripts/check_build_log.ps1 -Log build-msvc.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pwsh -File scripts/verify_occt_link.ps1 -BuildDir build/msvc -Report build/msvc/occt-link-report.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Check vcpkg binary cache
         if: success() && steps.vcpkg-cache.outputs.cache-hit != 'true'
@@ -229,16 +224,12 @@ jobs:
           $buildCode = $LASTEXITCODE
           Get-Content -LiteralPath build-bench.log
           if ($buildCode -ne 0) { exit $buildCode }
-          if (Test-Path -LiteralPath scripts/check_build_log.ps1) {
-            pwsh -File scripts/check_build_log.ps1 -Log build-bench-config.log
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            pwsh -File scripts/check_build_log.ps1 -Log build-bench.log
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
-          if (Test-Path -LiteralPath scripts/verify_occt_link.ps1) {
-            pwsh -File scripts/verify_occt_link.ps1 -BuildDir build/bench
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
+          pwsh -File scripts/check_build_log.ps1 -Log build-bench-config.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pwsh -File scripts/check_build_log.ps1 -Log build-bench.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pwsh -File scripts/verify_occt_link.ps1 -BuildDir build/bench
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $env:PATH = "$pwd\build\msvc\vcpkg_installed\x64-windows\bin;$env:PATH"
           & "$pwd\build\bench\test_compat.exe"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -311,12 +302,11 @@ jobs:
             @cpp
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-  # 不加矩阵。默认只在手动触发且 suite 不是 pr 时编 7.9.3，避免每个 PR 都再编一遍 OCCT。
+  # 不加矩阵。只在手动触发且 suite 不是 pr 时编 7.9.3，避免每个 PR 都再编一遍 OCCT。
   # 手动作业已成功过一次（run 41769758492）。
-  # cursor/occt-eh-boundary-5586 的 PR 额外跑一次：那条 PR 的令牌没有 actions:write，workflow_dispatch 会 403。
   windows-occt793:
     name: windows-occt-7.9.3
-    if: (github.event_name == 'workflow_dispatch' && inputs.suite != 'pr') || (github.event_name == 'pull_request' && github.head_ref == 'cursor/occt-eh-boundary-5586')
+    if: github.event_name == 'workflow_dispatch' && inputs.suite != 'pr'
     runs-on: windows-2022
     timeout-minutes: 240
     env:
@@ -406,16 +396,12 @@ jobs:
           $buildCode = $LASTEXITCODE
           Get-Content -LiteralPath build-occt793.log
           if ($buildCode -ne 0) { exit $buildCode }
-          if (Test-Path -LiteralPath scripts/check_build_log.ps1) {
-            pwsh -File scripts/check_build_log.ps1 -Log build-occt793.log
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
+          pwsh -File scripts/check_build_log.ps1 -Log build-occt793.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ctest --preset unit-occt793
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          if (Test-Path -LiteralPath scripts/verify_occt_link.ps1) {
-            pwsh -File scripts/verify_occt_link.ps1 -BuildDir build/msvc-occt793 -Report build/msvc-occt793/occt-link-report.txt
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
+          pwsh -File scripts/verify_occt_link.ps1 -BuildDir build/msvc-occt793 -Report build/msvc-occt793/occt-link-report.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build bench tools against OCCT 7.9.3
         run: |
