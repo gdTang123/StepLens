@@ -1820,7 +1820,7 @@ CTest 标签：`unit`、`small`、`medium`、`large`、`xlarge`、`bench`；PR �
 
 ### 附录 D：T02b 在老板 Windows 电脑上的执行清单
 
-> v1.2 新增。与 `/workspace/bench/t02b-windows-checklist.md` 内容相同（该文件是给老板直接用的独立版本，两者有出入时以独立文件为准）。原标题：T02b 执行清单：在老板的 Windows 电脑上复测 OCCT 8.0.1 / 7.9.3。
+> v1.2 新增。与 `/workspace/bench/t02b-windows-checklist.md` 内容相同（该文件是给老板直接用的独立版本，两者有出入时以独立文件为准）。2026-11-05 起老板执行以独立清单 **v1.1** 为准：开跑前检查 pdb、兼容单测失败立刻停、转换取消在三次结果之间回退、新增解析盲区取消和中文路径测试。原标题：T02b 执行清单：在老板的 Windows 电脑上复测 OCCT 8.0.1 / 7.9.3。
 
 > 版本 v1.0（2026-11-04）｜配套：架构文档 v1.2 §3.3、附录 D｜结果写入 `/workspace/bench/spike-m0b.md`
 > 目的：① 8.0.1 在 Windows + vcpkg 下读超大 IGES（X-07）还崩不崩；② 两个版本 STEP 的速度和内存；③ Windows 内存口径与取消行为。**GPU 帧率不在这里测**（需要 Qt 和显示代码），挪到 T19 在团队电脑上测。

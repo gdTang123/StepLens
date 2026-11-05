@@ -3,7 +3,10 @@
 //   spike bench  <file> [--no-mesh]             读取→转换→释放读取器→统计→三角化(粗/方案B/细)
 //   spike cancel-read <file> <fraction>         读取阶段在已读字节达到 fraction 时由另一线程请求取消
 //   spike cancel-transfer <file> <fraction>     转换阶段在进度达到 fraction 时由另一线程请求取消
+//   spike cancel-parse <file> [delay_s]         流读到 EOF 后再等 delay_s（默认 2 秒）请求取消，
+//                                               记录 ReadStream 返回延迟，并打印 cancel_stage=parsing
 // 所有输出为 "key=value" 行，便于汇总。
+// Windows 上用宽字符命令行打开文件，交给 OCCT 的文件名是 UTF-8（7.9.3 / 8.0.1 按 UTF-8 转成宽路径）。
 #include "occtsupport/occt_compat.h"
 
 #include <BRepBndLib.hxx>
@@ -36,8 +39,12 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <cwchar>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <mutex>
@@ -57,9 +64,11 @@
 #include <Windows.h>
 #include <psapi.h>
 #include <DbgHelp.h>
+#include <shellapi.h>
 // clang-format on
 #pragma comment(lib, "psapi.lib")
 #pragma comment(lib, "dbghelp.lib")
+#pragma comment(lib, "shell32.lib")
 #include <malloc.h>
 #else
 #include <malloc.h>
@@ -215,6 +224,49 @@ static void kvs(const char* k, const std::string& v) {
     std::fflush(stdout);
 }
 
+#ifdef _WIN32
+static std::string utf8FromWide(const wchar_t* text) {
+    if (text == nullptr || text[0] == L'\0')
+        return {};
+    const int chars = static_cast<int>(wcslen(text));
+    const int bytes = WideCharToMultiByte(CP_UTF8, 0, text, chars, nullptr, 0, nullptr, nullptr);
+    if (bytes <= 0)
+        return {};
+    std::string out(static_cast<size_t>(bytes), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, text, chars, out.data(), bytes, nullptr, nullptr);
+    return out;
+}
+#endif
+
+static std::string utf8FromPath(const std::filesystem::path& path) {
+#ifdef _WIN32
+    return utf8FromWide(path.c_str());
+#else
+    return path.string();
+#endif
+}
+
+static FILE* openBinary(const std::filesystem::path& path) {
+#ifdef _WIN32
+    FILE* file = nullptr;
+    if (_wfopen_s(&file, path.c_str(), L"rb") != 0)
+        return nullptr;
+    return file;
+#else
+    return std::fopen(path.c_str(), "rb");
+#endif
+}
+
+struct WatcherJoin {
+    std::thread& thread;
+    std::atomic<bool>& done;
+    ~WatcherJoin() {
+        done.store(true, std::memory_order_release);
+        if (thread.joinable())
+            thread.join();
+    }
+};
+
 // ---------- 取消标志 ----------
 static std::atomic<bool> g_cancel{false};
 static std::atomic<double> g_cancelReqTime{-1};
@@ -222,11 +274,27 @@ static std::atomic<double> g_cancelReqTime{-1};
 // ---------- 带进度/取消的 streambuf ----------
 class ProgressStreamBuf : public std::streambuf {
 public:
-    ProgressStreamBuf(const std::string& path, size_t chunk = 1 << 20) : m_buf(chunk) {
-        m_f = std::fopen(path.c_str(), "rb");
-        std::fseek(m_f, 0, SEEK_END);
-        m_total = std::ftell(m_f);
-        std::fseek(m_f, 0, SEEK_SET);
+    explicit ProgressStreamBuf(const std::filesystem::path& path, size_t chunk = 1 << 20) : m_buf(chunk) {
+        m_f = openBinary(path);
+        if (m_f == nullptr)
+            return;
+        if (std::fseek(m_f, 0, SEEK_END) != 0) {
+            std::fclose(m_f);
+            m_f = nullptr;
+            return;
+        }
+        const long sz = std::ftell(m_f);
+        if (sz < 0) {
+            std::fclose(m_f);
+            m_f = nullptr;
+            return;
+        }
+        m_total = static_cast<uint64_t>(sz);
+        if (std::fseek(m_f, 0, SEEK_SET) != 0) {
+            std::fclose(m_f);
+            m_f = nullptr;
+            m_total = 0;
+        }
     }
     ~ProgressStreamBuf() override {
         if (m_f)
@@ -237,6 +305,8 @@ public:
     }
     std::atomic<uint64_t> bytes{0};
     std::atomic<uint64_t> calls{0};
+    // steady_clock 的 time_since_epoch 计数；-1 表示流还没读到 EOF。给取消线程看。
+    std::atomic<long long> eofAtNs{-1};
     double tFirst = -1, tEof = -1, tCancelEof = -1;
     uint64_t total() const {
         return m_total;
@@ -254,14 +324,17 @@ protected:
                 tCancelEof = now_s();
             return traits_type::eof();
         }
-        size_t n = std::fread(m_buf.data(), 1, m_buf.size(), m_f);
+        size_t n = m_f == nullptr ? 0 : std::fread(m_buf.data(), 1, m_buf.size(), m_f);
         if (n == 0) {
-            if (tEof < 0)
+            if (tEof < 0) {
                 tEof = now_s();
+                eofAtNs.store(static_cast<long long>(Clock::now().time_since_epoch().count()),
+                              std::memory_order_release);
+            }
             return traits_type::eof();
         }
         uint64_t b = bytes += n;
-        double frac = double(b) / double(m_total);
+        double frac = m_total == 0 ? 1.0 : double(b) / double(m_total);
         if (samples.empty() || frac - samples.back().second >= 0.05 || b == m_total)
             samples.push_back({now_s(), frac});
         setg(m_buf.data(), m_buf.data(), m_buf.data() + n);
@@ -468,20 +541,28 @@ static void meshLevel(std::vector<Proto>& protos, const std::vector<double>& pdi
 }
 
 // ---------- 主流程 ----------
-static int run(const std::string& mode, const std::string& path, double frac, bool doMesh) {
-    kvs("file", path);
+static int run(const std::string& mode, const std::filesystem::path& path, double frac, bool doMesh) {
+    const std::string pathUtf8 = utf8FromPath(path);
+    kvs("file", pathUtf8);
     kvs("mode", mode);
     kvs("occt_version", OCC_VERSION_COMPLETE);
     kv("threads_hw", std::thread::hardware_concurrency());
     kv("rss_start_mb", rssMB());
-    bool iges = isIges(path);
+    bool iges = isIges(pathUtf8);
+    if (mode == "cancel-parse" && iges) {
+        kvs("cancel_stage", "parsing");
+        kvs("error", "cancel-parse requires STEP");
+        return 2;
+    }
     auto doc = newDoc();
     std::unique_ptr<STEPCAFControl_Reader> sr;
     std::unique_ptr<IGESCAFControl_Reader> ir;
 
     // ---- 阶段1：读取 ----
-    std::thread watcher;
     std::unique_ptr<ProgressStreamBuf> sb;
+    std::thread watcher;
+    std::atomic<bool> readDone{false};
+    WatcherJoin joinWatcher{watcher, readDone};
     resetHwm();
     double tr0 = now_s();
     bool readOk = false;
@@ -489,6 +570,11 @@ static int run(const std::string& mode, const std::string& path, double frac, bo
         sr = std::make_unique<STEPCAFControl_Reader>();
         setupStepReader(*sr);
         sb = std::make_unique<ProgressStreamBuf>(path);
+        if (!sb->ok()) {
+            kvs("error", "open failed");
+            kv("read_ok", 0);
+            return 2;
+        }
         if (mode == "cancel-read") {
             watcher = std::thread([&] {
                 while (sb->bytes.load() < frac * sb->total())
@@ -496,9 +582,31 @@ static int run(const std::string& mode, const std::string& path, double frac, bo
                 g_cancelReqTime = now_s();
                 g_cancel = true;
             });
+        } else if (mode == "cancel-parse") {
+            // 流已经读到 EOF、ReadStream 还在建实体的那段没有 underflow 检查点。
+            // 等到 EOF 之后再延迟 frac 秒请求取消，用来量这段盲区要多久才返回。
+            watcher = std::thread([&] {
+                long long stamp = -1;
+                while ((stamp = sb->eofAtNs.load(std::memory_order_acquire)) < 0) {
+                    if (readDone.load(std::memory_order_acquire))
+                        return;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
+                const auto eofTp = Clock::time_point(Clock::duration(static_cast<Clock::rep>(stamp)));
+                const double eofAt = std::chrono::duration<double>(eofTp - g_t0).count();
+                while (now_s() - eofAt < frac) {
+                    if (readDone.load(std::memory_order_acquire))
+                        return;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
+                if (readDone.load(std::memory_order_acquire))
+                    return;
+                g_cancelReqTime = now_s();
+                g_cancel = true;
+            });
         }
         std::istream in(sb.get());
-        IFSelect_ReturnStatus st = sr->ReadStream(path.c_str(), in);
+        IFSelect_ReturnStatus st = sr->ReadStream(pathUtf8.c_str(), in);
         readOk = (st == IFSelect_RetDone);
         kv("read_status", (double)st);
     } else {
@@ -509,11 +617,12 @@ static int run(const std::string& mode, const std::string& path, double frac, bo
             ir->SetNameMode(attrs);
             ir->SetLayerMode(false);
         }
-        IFSelect_ReturnStatus st = ir->ReadFile(path.c_str());
+        IFSelect_ReturnStatus st = ir->ReadFile(pathUtf8.c_str());
         readOk = (st == IFSelect_RetDone);
         kv("read_status", (double)st);
     }
     double tr1 = now_s();
+    readDone.store(true, std::memory_order_release);
     if (watcher.joinable())
         watcher.join();
     kv("read_time_s", tr1 - tr0);
@@ -550,6 +659,27 @@ static int run(const std::string& mode, const std::string& path, double frac, bo
         double tx1 = now_s();
         kv("cancel_release_ms", (tx1 - tx0) * 1000);
         kv("cancel_total_to_released_ms", (tx1 - req) * 1000);
+        kv("rss_after_release_mb", rssMB());
+        return 0;
+    }
+    if (mode == "cancel-parse") {
+        kvs("cancel_stage", "parsing");
+        kv("cancel_delay_s", frac);
+        double req = g_cancelReqTime.load();
+        if (req >= 0) {
+            kv("cancel_req_at_s", req - tr0);
+            kv("cancel_latency_readstream_return_ms", (tr1 - req) * 1000);
+            if (sb && sb->tEof >= 0)
+                kv("cancel_after_eof_s", req - sb->tEof);
+        }
+        double tx0 = now_s();
+        sr.reset();
+        doc.Nullify();
+        malloc_trim(0);
+        double tx1 = now_s();
+        kv("cancel_release_ms", (tx1 - tx0) * 1000);
+        if (req >= 0)
+            kv("cancel_total_to_released_ms", (tx1 - req) * 1000);
         kv("rss_after_release_mb", rssMB());
         return 0;
     }
@@ -723,10 +853,34 @@ static int run(const std::string& mode, const std::string& path, double frac, bo
 }
 
 int main(int argc, char** argv) {
-    if (argc < 3) {
-        std::fprintf(stderr, "usage: spike bench|cancel-read|cancel-transfer <file> [fraction|--no-mesh]\n");
+#ifdef _WIN32
+    int argcW = 0;
+    wchar_t** argvW = CommandLineToArgvW(GetCommandLineW(), &argcW);
+    if (argvW == nullptr || argcW < 3) {
+        std::fprintf(stderr, "usage: spike bench|cancel-read|cancel-transfer|cancel-parse <file> "
+                             "[fraction|delay_s|--no-mesh]\n");
+        if (argvW != nullptr)
+            LocalFree(argvW);
         return 1;
     }
+    const std::string mode = utf8FromWide(argvW[1]);
+    const std::filesystem::path path(argvW[2]);
+    std::string third;
+    if (argcW > 3)
+        third = utf8FromWide(argvW[3]);
+    LocalFree(argvW);
+    (void)argc;
+    (void)argv;
+#else
+    if (argc < 3) {
+        std::fprintf(stderr, "usage: spike bench|cancel-read|cancel-transfer|cancel-parse <file> "
+                             "[fraction|delay_s|--no-mesh]\n");
+        return 1;
+    }
+    const std::string mode = argv[1];
+    const std::filesystem::path path(argv[2]);
+    const std::string third = argc > 3 ? std::string(argv[3]) : std::string();
+#endif
     // 关掉 OCCT 默认消息输出，避免日志刷屏影响计时（只保留 Fail 级别）
 #ifdef _WIN32
     SetUnhandledExceptionFilter(crashFilter);
@@ -735,14 +889,13 @@ int main(int argc, char** argv) {
     kvs("occt_version_at_start", OCC_VERSION_COMPLETE);
     for (auto& p : Message::DefaultMessenger()->Printers())
         p->SetTraceLevel(Message_Fail);
-    std::string mode = argv[1], path = argv[2];
-    double frac = 0.5;
+    double frac = mode == "cancel-parse" ? 2.0 : 0.5;
     bool doMesh = true;
-    if (argc > 3) {
-        if (std::string(argv[3]) == "--no-mesh")
+    if (!third.empty()) {
+        if (third == "--no-mesh")
             doMesh = false;
         else
-            frac = std::atof(argv[3]);
+            frac = std::atof(third.c_str());
     }
     try {
         return run(mode, path, frac, doMesh);
