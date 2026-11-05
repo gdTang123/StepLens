@@ -4,6 +4,7 @@
     powershell -ExecutionPolicy Bypass -File windows\run-t02b.ps1 -Tag 801 -Build build801
     powershell -ExecutionPolicy Bypass -File windows\run-t02b.ps1 -Tag 793 -Build build793
   输出：results\<Tag>\<编号>.txt（key=value）、.err（stderr，崩溃栈在这里）、崩溃时 <编号>.dmp
+        results\<Tag>\kit_commit.txt（kit_commit= / git_head=）
         results\<Tag>\env.txt（仅在需要时出现：pdb_missing=、skipped=、transfer_time_s_from=）
   开跑前检查 spike.pdb 和 spike 会加载的 TK*.pdb，缺了只警告、不中断。
   test_compat.exe 退出码不是 0 就立刻停止，后面的测试都不跑。
@@ -235,6 +236,67 @@ function Get-MissingPdbs([string]$exePath, [string[]]$dirs) {
   return @($missing | Sort-Object -Unique)
 }
 
+# G1-8：目录联接先解析到真实路径，再找上一级的 KIT_COMMIT。
+function Get-BenchReal([string]$path) {
+  $item = Get-Item -LiteralPath $path -Force
+  $target = $null
+  if ($item.PSObject.Properties.Name -contains 'Target' -and $item.Target) {
+    $target = @($item.Target)[0]
+  } elseif ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+    $parent = Split-Path -Parent $item.FullName
+    $leaf = [regex]::Escape($item.Name)
+    foreach ($line in @(& cmd.exe /d /c "dir /AL `"$parent`"")) {
+      if ($line -match ('\s' + $leaf + '\s+\[(.+)\]\s*$')) { $target = $Matches[1]; break }
+    }
+  }
+  if ($target) {
+    $target = ([string]$target).Trim().TrimEnd('\', '/')
+    if (-not [IO.Path]::IsPathRooted($target)) { $target = Join-Path (Split-Path -Parent $item.FullName) $target }
+    return $target
+  }
+  return $item.FullName
+}
+
+# G1-8：写入 results\<Tag>\kit_commit.txt，并在和 git HEAD 不一致时黄字提示。不因此中断测试。
+function Write-KitIdentity {
+  $benchReal = Get-BenchReal $root
+  $kitCommit = $null
+  foreach ($dir in @((Split-Path -Parent $benchReal), (Split-Path -Parent $root), $benchReal, $root)) {
+    if (-not $dir) { continue }
+    $kitPath = Join-Path $dir "KIT_COMMIT"
+    if (Test-Path -LiteralPath $kitPath) {
+      $kitCommit = ([IO.File]::ReadAllText($kitPath)).Trim()
+      break
+    }
+  }
+  $gitHead = $null
+  if (Get-Command git -ErrorAction SilentlyContinue) {
+    foreach ($dir in @($benchReal, $root)) {
+      if (-not $dir) { continue }
+      try {
+        $probe = & git -C $dir rev-parse HEAD 2>$null
+        if ($LASTEXITCODE -eq 0 -and $probe) { $gitHead = "$probe".Trim(); break }
+      } catch { $gitHead = $null }
+    }
+  }
+  if ($kitCommit) { Write-Host "kit_commit=$kitCommit" }
+  if ($gitHead) { Write-Host "git_head=$gitHead" }
+  if ($kitCommit -and $gitHead -and ($kitCommit.ToLower() -ne $gitHead.ToLower())) {
+    Write-Host "KIT_COMMIT 与当前 git 提交不一致：KIT_COMMIT=$kitCommit，git HEAD=$gitHead。请改到 KIT_COMMIT 对应的提交再跑，或用 scripts/make_t02b_kit.py 按 main HEAD 重新打包。" -ForegroundColor Yellow
+  } elseif ($kitCommit -and $kitCommit -notmatch '^[0-9a-fA-F]{40}$') {
+    Write-Host "KIT_COMMIT 不是 40 位提交号：$kitCommit" -ForegroundColor Yellow
+  } elseif (-not $kitCommit -and -not $gitHead) {
+    Write-Host "未找到 KIT_COMMIT，当前目录也不在 git 仓库内，无法确认这次摸底对应的提交。" -ForegroundColor Yellow
+  }
+  $metaLines = @()
+  if ($kitCommit) { $metaLines += "kit_commit=$kitCommit" }
+  if ($gitHead) { $metaLines += "git_head=$gitHead" }
+  if ($metaLines.Count -gt 0) {
+    $utf8 = New-Object System.Text.UTF8Encoding $false
+    [IO.File]::WriteAllText((Join-Path $out "kit_commit.txt"), (($metaLines -join "`n") + "`n"), $utf8)
+  }
+}
+
 function Run([string]$id, [string[]]$a) {
   $t0 = Get-Date
   Write-Host ("== {0}  {1:HH:mm:ss}" -f $id, $t0)
@@ -293,6 +355,7 @@ $compatExe = Join-Under @($root, $Build, "RelWithDebInfo", "test_compat.exe")
 $occtBin = Join-Under @($root, $Build, "vcpkg_installed", "x64-windows-release", "bin")
 $out  = Join-Under @($root, "results", $Tag)
 New-Item -ItemType Directory -Force -Path $out | Out-Null
+Write-KitIdentity
 
 $exeDir = Split-Path -Parent $exe
 $env:PATH = $exeDir + [IO.Path]::PathSeparator + $occtBin + [IO.Path]::PathSeparator + $env:PATH

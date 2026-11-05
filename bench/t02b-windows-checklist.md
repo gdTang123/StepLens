@@ -38,17 +38,21 @@ winget install --id Git.Git -e --accept-source-agreements --accept-package-agree
 完成后**关掉这个窗口，重新打开一个普通 PowerShell**（让 Git 进入 PATH）。
 
 ### 第 3 步　取 vcpkg 和摸底工具（普通权限，约 2–5 分钟，下载约 0.1 GB）
-做什么：建 `C:\sl` 工作目录；按 vcpkg 发布标签 2026.10.16 浅取 vcpkg（`--filter=blob:none`，约 70 MB；旧版本 OCCT 端口按需下载）；取摸底工具到 `C:\sl\t02b`。
+做什么：建 `C:\sl` 工作目录；按 vcpkg 发布标签 2026.10.16 浅取 vcpkg（`--filter=blob:none`，约 70 MB；旧版本 OCCT 端口按需下载）；取摸底工具到 `C:\sl\t02b`。方式 A、方式 B 二选一。
+
+方式 B **不要**用 2026-11-04 的旧 `t02b-kit.zip`（缺 `src/occtsupport`，解压后 cmake 找不到头文件）。团队在 **main HEAD** 上、仓库根目录执行一条命令现打：`python scripts/make_t02b_kit.py`。生成 `dist/t02b-kit-<12位SHA>.zip`。zip 根上是 `KIT_COMMIT`（一行完整 commit SHA）、`bench\`（与该提交的 `bench/` 相同）、`src\occtsupport\`。核对：`KIT_COMMIT` 里的 SHA 必须等于打包当时的 `git rev-parse HEAD`（在 main 上打包时，就是当时的 main HEAD）。老板用下面命令块里的 `Get-Content` 读出这一行，和团队随 zip 发来的 SHA 比对。脚本启动时打印 `kit_commit=<sha>`，并写入 `results\<Tag>\kit_commit.txt`。方式 A 在仓库里跑时，脚本用 `git rev-parse HEAD` 与 `KIT_COMMIT`（旁边有这份文件时）核对，不一致就打中文提示。`bench/` 或 `windows/run-t02b.ps1` 再改过（包括本清单后续缺陷修复合入之后），在当时的 main HEAD 上把这条命令再跑一次。
 ```powershell
 New-Item -ItemType Directory -Force C:\sl | Out-Null; Set-Location C:\sl
 git clone --filter=blob:none --branch 2026.10.16 https://github.com/microsoft/vcpkg C:\sl\vcpkg
 C:\sl\vcpkg\bootstrap-vcpkg.bat -disableMetrics
-# 方式 A（推荐，前提是团队已把 bench/ 提交到仓库）：首次会弹浏览器登录 GitHub
+# 方式 A（推荐）：首次会弹浏览器登录 GitHub。t02b 是指向仓库 bench 的目录联接。
 git clone https://github.com/gdTang123/StepLens C:\sl\StepLens; cmd /c mklink /J C:\sl\t02b C:\sl\StepLens\bench
-# 方式 B（仓库里还没有 bench/ 时）：把团队发来的 t02b-kit.zip 放到 C:\sl 后执行下一行（与方式 A 二选一）
-# Expand-Archive C:\sl\t02b-kit.zip C:\sl\t02b
+# 方式 B：把上面命令打好的 t02b-kit-<12位SHA>.zip 放到 C:\sl 后，去掉下面三行的注释再执行（与方式 A 二选一）。
+# Expand-Archive -LiteralPath C:\sl\t02b-kit-<12位SHA>.zip -DestinationPath C:\sl\t02b-kit
+# cmd /c mklink /J C:\sl\t02b C:\sl\t02b-kit\bench
+# Get-Content -LiteralPath C:\sl\t02b-kit\KIT_COMMIT
 ```
-通过条件：`C:\sl\vcpkg\vcpkg.exe`、`C:\sl\t02b\vcpkg.json`、`C:\sl\t02b\occt-7.9.3\vcpkg.json` 都存在。
+通过条件：`C:\sl\vcpkg\vcpkg.exe`、`C:\sl\t02b\vcpkg.json`、`C:\sl\t02b\occt-7.9.3\vcpkg.json` 都存在。方式 B 还要有 `C:\sl\t02b-kit\src\occtsupport\occt_compat.h`，且 `KIT_COMMIT` 与团队给出的完整 SHA 一致。
 
 ### 第 4 步　下载样例并校验（普通权限，约 5–20 分钟，必需 1.06 GB + 可选 0.53 GB）
 做什么：从 PRD 样例清单（`samples.md`）的原始地址下载；X-07 是判定项，X-02/L-03 是 STEP 对比主样例，X-01 补充；X-06/X-08（另两个超大 IGES）可选。另外下载 OCCT 自带的小文件 `screw.step`（约 87 KB，88,552 字节），第 8 步用它测「文件夹名里有中文和空格」时能不能打开。

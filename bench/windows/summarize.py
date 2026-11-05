@@ -39,12 +39,19 @@ def status(d, err):
 
 for tagdir in map(pathlib.Path, sys.argv[1:]):
     tag = tagdir.name
+    # kit_commit.txt 只有提交号（kit_commit= / git_head=），不是样例运行。
     runs = {p.stem: (load(p), (p.with_suffix(".err").read_text(encoding="utf-8", errors="replace") if p.with_suffix(".err").exists() else ""))
-            for p in sorted(tagdir.glob("*.txt")) if p.stem not in ("test_compat", "env")}
+            for p in sorted(tagdir.glob("*.txt")) if p.stem not in ("test_compat", "env", "kit_commit")}
     ver = next((d.get("occt_version_at_start") for d, _ in runs.values() if d.get("occt_version_at_start")), tag)
     tc = (tagdir / "test_compat.txt")
     print(f"\n### OCCT {ver}（{tag}）\n\n兼容单测：{'PASS' if tc.exists() and 'RESULT=PASS' in tc.read_text(encoding='utf-8-sig', errors='replace') else '未通过/未运行'}\n")
     notes = env_notes(tagdir)
+    kit = tagdir / "kit_commit.txt"
+    if kit.exists():
+        for line in kit.read_text(encoding="utf-8-sig", errors="replace").splitlines():
+            stripped = line.strip()
+            if stripped:
+                notes.append(stripped)
     if notes:
         print("旁注（来自 env.txt）：")
         for line in notes:
