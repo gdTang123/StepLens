@@ -1,14 +1,26 @@
 name: ci
 
-# PR、main，以及下面列出的那条修复分支。私有仓库的 Windows 分钟数按倍率计费，不设矩阵、不设 schedule。
+# PR，以及推送到 main 或 v* 标签。私有仓库的 Windows 分钟数按倍率计费，不设矩阵、不设 schedule。
 # 二进制缓存未命中时会从源码编译 OCCT 8.0.1，第一次大约两个半小时，超时留到四小时，避免缓存上传被掐掉。
+# 只改文档时不触发：docs/**（含图片等非 Markdown），以及任意位置的 .md。
+# bench 清单因此跳过。bench 的代码、脚本和 CMake 不匹配这些模式，改了仍会跑。
+# workflow、vcpkg 清单、packaging 脚本和 CMake 逻辑同样不在忽略列表里。
+# 标签推送不做路径过滤（GitHub 不对 tag 计算 paths-ignore），v* 总会跑，并在 Windows 作业里打 zip。
 on:
   pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
+      - '**.md'
+      - '**/*.md'
   push:
-    # cursor/fix-qt612-ci-873f 多一次 push 触发：pull_request 写入的缓存挂在
-    # refs/pull/<n>/merge 上，别的 PR 读不到。push 把 vcpkg/Qt 缓存记在分支上，
-    # 以该分支为 base 的 PR 才能直接用。合并后这条分支名可以删掉。
-    branches: [main, cursor/fix-qt612-ci-873f]
+    branches: [main]
+    tags: ['v*']
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
+      - '**.md'
+      - '**/*.md'
   workflow_dispatch:
 
 permissions:
@@ -23,9 +35,8 @@ jobs:
   # Linux 托管 runner 比 Windows 便宜。只编 core，不下载 Qt、不编 OCCT。
   core:
     name: core-tests-tsan
-    # 该分支的 push 已经会跑同一套检查。pull_request 再跑会占双份额度，Windows 上会把 OCCT 编两次。
     # workflow_dispatch 只跑 7.9.3 那一个作业。
-    if: github.event_name != 'workflow_dispatch' && (github.event_name != 'pull_request' || github.head_ref != 'cursor/fix-qt612-ci-873f')
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -60,7 +71,8 @@ jobs:
 
   windows:
     name: windows-build
-    if: github.event_name != 'workflow_dispatch' && (github.event_name != 'pull_request' || github.head_ref != 'cursor/fix-qt612-ci-873f')
+    # workflow_dispatch 只跑 7.9.3 那一个作业。
+    if: github.event_name != 'workflow_dispatch'
     runs-on: windows-2022
     timeout-minutes: 240
     env:
@@ -198,7 +210,10 @@ jobs:
           & "$pwd\build\bench\test_compat.exe"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      # zip 只在推送到 main 和 v* 标签时产生。PR 不上传 artifact。
+      # 缓存保存发生在这一步之前，跳过打包不会丢掉 vcpkg/Qt 缓存。
       - name: Package zip
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         run: |
           cmake --install build/msvc --config RelWithDebInfo --prefix "$pwd\dist-stage"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -210,12 +225,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Upload zip
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         uses: actions/upload-artifact@v4
         with:
           name: StepLens-windows-x64
           path: dist/StepLens-0.1.0-windows-x64.zip
           retention-days: 7
 
+      # 冒烟读的是 build 目录里的 StepLens.exe，不依赖上面的 zip。PR 上打包被跳过时这里仍然跑。
       - name: Smoke the empty window offscreen
         run: |
           $env:QT_QPA_PLATFORM = "offscreen"
@@ -262,7 +279,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   # 不加矩阵。7.9.3 只在手动触发时编，避免每个 PR 都再编一遍 OCCT。
-  # 这条分支已经手动编过一次并成功（run 41769758492）。之后只留 workflow_dispatch。
+  # 手动作业已成功过一次（run 41769758492），之后只留 workflow_dispatch。
   windows-occt793:
     name: windows-occt-7.9.3
     if: github.event_name == 'workflow_dispatch'
