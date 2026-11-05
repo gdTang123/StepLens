@@ -17,6 +17,62 @@ $root = Split-Path -Parent $PSScriptRoot
 $exe  = Join-Path $root "$Build\RelWithDebInfo\spike.exe"
 $out  = Join-Path $root "results\$Tag"
 New-Item -ItemType Directory -Force $out | Out-Null
+# G1-8：kit 读上一级或本目录的 KIT_COMMIT；在 git 仓库里与 HEAD 核对。写入 results\<Tag>\kit_commit.txt
+function Get-BenchReal([string]$path) {
+  $item = Get-Item -LiteralPath $path -Force
+  $target = $null
+  if ($item.PSObject.Properties.Name -contains 'Target' -and $item.Target) {
+    $target = @($item.Target)[0]
+  } elseif ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+    $parent = Split-Path -Parent $item.FullName
+    $leaf = [regex]::Escape($item.Name)
+    foreach ($line in @(& cmd.exe /d /c "dir /AL `"$parent`"")) {
+      if ($line -match ('\s' + $leaf + '\s+\[(.+)\]\s*$')) { $target = $Matches[1]; break }
+    }
+  }
+  if ($target) {
+    $target = ([string]$target).Trim().TrimEnd('\', '/')
+    if (-not [IO.Path]::IsPathRooted($target)) { $target = Join-Path (Split-Path -Parent $item.FullName) $target }
+    return $target
+  }
+  return $item.FullName
+}
+$benchReal = Get-BenchReal $root
+$kitCommit = $null
+foreach ($dir in @((Split-Path -Parent $benchReal), (Split-Path -Parent $root), $benchReal, $root)) {
+  if (-not $dir) { continue }
+  $kitPath = Join-Path $dir "KIT_COMMIT"
+  if (Test-Path -LiteralPath $kitPath) {
+    $kitCommit = ([IO.File]::ReadAllText($kitPath)).Trim()
+    break
+  }
+}
+$gitHead = $null
+if (Get-Command git -ErrorAction SilentlyContinue) {
+  foreach ($dir in @($benchReal, $root)) {
+    if (-not $dir) { continue }
+    try {
+      $probe = & git -C $dir rev-parse HEAD 2>$null
+      if ($LASTEXITCODE -eq 0 -and $probe) { $gitHead = "$probe".Trim(); break }
+    } catch { $gitHead = $null }
+  }
+}
+if ($kitCommit) { Write-Host "kit_commit=$kitCommit" }
+if ($gitHead) { Write-Host "git_head=$gitHead" }
+if ($kitCommit -and $gitHead -and ($kitCommit.ToLower() -ne $gitHead.ToLower())) {
+  Write-Host "KIT_COMMIT 与当前 git 提交不一致：KIT_COMMIT=$kitCommit，git HEAD=$gitHead。请改到 KIT_COMMIT 对应的提交再跑，或用 scripts/make_t02b_kit.py 按 main HEAD 重新打包。" -ForegroundColor Yellow
+} elseif ($kitCommit -and $kitCommit -notmatch '^[0-9a-fA-F]{40}$') {
+  Write-Host "KIT_COMMIT 不是 40 位提交号：$kitCommit" -ForegroundColor Yellow
+} elseif (-not $kitCommit -and -not $gitHead) {
+  Write-Host "未找到 KIT_COMMIT，当前目录也不在 git 仓库内，无法确认这次摸底对应的提交。" -ForegroundColor Yellow
+}
+$metaLines = @()
+if ($kitCommit) { $metaLines += "kit_commit=$kitCommit" }
+if ($gitHead) { $metaLines += "git_head=$gitHead" }
+if ($metaLines.Count -gt 0) {
+  $utf8 = New-Object System.Text.UTF8Encoding $false
+  [IO.File]::WriteAllText((Join-Path $out "kit_commit.txt"), (($metaLines -join "`n") + "`n"), $utf8)
+}
 # 崩溃栈符号化：exe 目录（含 OCCT DLL）+ vcpkg 安装目录下的 PDB
 $env:_NT_SYMBOL_PATH = "$(Split-Path $exe);$(Join-Path $root "$Build\vcpkg_installed\x64-windows-release\bin")"
 

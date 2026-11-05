@@ -25,3 +25,4 @@ export LD_LIBRARY_PATH=/opt/mm/occt/lib
 - 两份清单：根目录 `vcpkg.json`（基线 2026.10.16 → OCCT 8.0.1）；`occt-7.9.3/vcpkg.json`（同一基线 + `overrides` 锁 `7.9.3#1`），用 `-DVCPKG_MANIFEST_DIR` 切换。
 - `compat/test_compat.cpp`：版本敏感点单测（`-DSTEPLENS_EXPECTED_OCCT=8.0.1|7.9.3`）。版本分支在仓库的 `src/occtsupport/occt_compat.h`，不在本目录再放一份。
 - `windows/run-t02b.ps1`：按清单第 6、8 步运行；`windows/summarize.py results\801 results\793`：生成 spike-m0b.md 的结果表。
+- 方式 B 的 zip：在仓库根目录执行 `python scripts/make_t02b_kit.py`（打包当前提交的 `bench/` 与 `src/occtsupport`，并写入 `KIT_COMMIT`）。`bench/` 或这个脚本再改过，就在 main HEAD 上重新打一次。
