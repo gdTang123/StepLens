@@ -244,7 +244,7 @@ bool ViewerWidget::wrapQtFramebuffer() {
     if (driver.IsNull()) {
         return false;
     }
-    const Handle(OpenGl_Context)& gl = driver->GetSharedContext();
+    const Handle(OpenGl_Context) & gl = driver->GetSharedContext();
     if (gl.IsNull()) {
         return false;
     }
