@@ -47,7 +47,8 @@ target_include_directories(test_compat PRIVATE ${OpenCASCADE_INCLUDE_DIR} "${STE
 target_link_libraries(test_compat PRIVATE TKLCAF TKCDF TKernel)
 
 if(MSVC)
-  # 源码含中文注释（UTF-8 无 BOM）；RelWithDebInfo 自带 /Zi + /DEBUG，生成 PDB 供崩溃栈符号化
-  target_compile_options(spike PRIVATE /utf-8 /EHsc)
-  target_compile_options(test_compat PRIVATE /utf-8 /EHsc)
+  # 源码含中文注释（UTF-8 无 BOM）；RelWithDebInfo 自带 /Zi + /DEBUG，生成 PDB 供崩溃栈符号化。
+  # /EHsc 已经在 CMake 的默认 CXX 标志里，这里再写一次会让 cl 报异常模型被覆盖。
+  target_compile_options(spike PRIVATE /utf-8)
+  target_compile_options(test_compat PRIVATE /utf-8)
 endif()

@@ -21,7 +21,9 @@ namespace steplens {
 // parallelFor 不能在本池的工作线程里调用（Debug 下断言），否则会死锁。
 // 析构会把队列里还没跑的任务跑完再 join。单个网格任务可以到数秒，后台释放可以到约一分钟。
 // 进程退出不要靠这个析构：T11 应 TerminateProcess 或 quick_exit，让操作系统收内存。
-// onThreadStart 在每个工作线程入口调用，用来注入 OSD::SetThreadLocalSignal 或降低优先级。core 不链接 OCCT。
+// onThreadStart 在每个工作线程入口调用，先于队列里的第一个任务。core 不链接 OCCT。
+// 跑 OCCT 的线程池必须用 occt::makeOcctTaskScheduler 创建，由它注入 OcctBoundary::armWorkerThread
+// （OSD::SetThreadLocalSignal）。不要在调用方手写这个钩子。
 class TaskScheduler {
 public:
     explicit TaskScheduler(unsigned threads = defaultThreadCount(), std::function<void()> onThreadStart = {});

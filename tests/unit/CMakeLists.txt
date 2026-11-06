@@ -12,6 +12,7 @@ if(STEPLENS_OCCT_CONTRACT)
     target_compile_definitions(steplens_occt_contract PRIVATE
         "STEPLENS_EXPECTED_OCCT=\"${STEPLENS_EXPECTED_OCCT}\"")
     steplens_apply_warnings(steplens_occt_contract)
+    steplens_apply_exceptions(steplens_occt_contract OFF)
     set_target_properties(steplens_occt_contract PROPERTIES FOLDER "tests")
 
     include(GoogleTest)
@@ -36,11 +37,15 @@ target_include_directories(steplens_tests PRIVATE "${CMAKE_SOURCE_DIR}/src")
 if(NOT STEPLENS_CORE_ONLY)
     target_sources(steplens_tests PRIVATE
         occt/OcctCompatTest.cpp
-        occt/OcctKernelContractTest.cpp)
-    target_link_libraries(steplens_tests PRIVATE steplens::io)
+        occt/OcctKernelContractTest.cpp
+        occt/OcctBoundaryTest.cpp)
+    # io 把数据交换工具包拉进测试进程，用来确认这条链上没有 TKOpenGl。
+    # 契约单测用到 StdPrs（TKV3d）。只链 TKV3d，不链 vis，避免把 TKOpenGl 带进测试进程。
+    target_link_libraries(steplens_tests PRIVATE steplens::occtsupport steplens::io TKV3d)
     target_compile_definitions(steplens_tests PRIVATE "STEPLENS_EXPECTED_OCCT=\"${STEPLENS_EXPECTED_OCCT}\"")
 endif()
 steplens_apply_warnings(steplens_tests)
+steplens_apply_exceptions(steplens_tests OFF)
 set_target_properties(steplens_tests PROPERTIES FOLDER "tests")
 
 include(GoogleTest)

@@ -1,4 +1,5 @@
 add_subdirectory(core)
+add_subdirectory(occtsupport)
 add_subdirectory(io)
 add_subdirectory(model)
 add_subdirectory(mesh)
