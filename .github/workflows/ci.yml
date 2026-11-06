@@ -1,19 +1,27 @@
 name: ci
 
-# PR、main，以及下面列出的那条修复分支。私有仓库的 Windows 分钟数按倍率计费，不设矩阵、不设 schedule。
+# PR，以及推送到 main 或 v* 标签。私有仓库的 Windows 分钟数按倍率计费，不设矩阵、不设 schedule。
 # 二进制缓存未命中时会从源码编译 OCCT 8.0.1，第一次大约两个半小时，超时留到四小时，避免缓存上传被掐掉。
+# 只改文档时不触发：docs/**（含图片等非 Markdown），以及任意位置的 .md。
+# bench 清单因此跳过。bench 的代码、脚本和 CMake 不匹配这些模式，改了仍会跑。
+# workflow、vcpkg 清单、packaging 脚本和 CMake 逻辑同样不在忽略列表里。
+# 标签推送不做路径过滤（GitHub 不对 tag 计算 paths-ignore），v* 总会跑，并在 Windows 作业里打 zip。
 on:
   pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
+      - '**.md'
+      - '**/*.md'
   push:
-    # cursor/fix-qt612-ci-873f 多一次 push 触发：pull_request 写入的缓存挂在
-    # refs/pull/<n>/merge 上，别的 PR 读不到。push 把 vcpkg/Qt 缓存记在分支上，
-    # 以该分支为 base 的 PR 才能直接用。合并后这条分支名可以删掉。
-    branches: [main, cursor/fix-qt612-ci-873f]
+    branches: [main]
+    tags: ['v*']
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
+      - '**.md'
+      - '**/*.md'
   workflow_dispatch:
-    # suite 默认 occt793，和改之前一样只跑 7.9.3。
-    # 与并行改本文件的 PR 合并时：保留 inputs.suite；
-    # core/windows 的 if 在原条件上或上 event==workflow_dispatch && inputs.suite=='pr'；
-    # windows-occt-7.9.3 的 if 加上 inputs.suite!='pr'。不要改 concurrency 这一段。
     inputs:
       suite:
         description: "occt793 只编 7.9.3（默认，与原来的手动触发相同）；pr 只跑 core 和 windows-build"
@@ -27,17 +35,18 @@ permissions:
   contents: read
   actions: write
 
+# 同一 PR 的新推送才取消旧运行。push 和 workflow_dispatch 不取消。
+# group 带上事件名和 suite，所以 main 上的 push 与手动的 occt793 / pr 各占一组。
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}-${{ inputs.suite }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # Linux 托管 runner 比 Windows 便宜。只编 core，不下载 Qt、不编 OCCT。
   core:
     name: core-tests-tsan
-    # 该分支的 push 已经会跑同一套检查。pull_request 再跑会占双份额度，Windows 上会把 OCCT 编两次。
-    # 手动触发默认仍只跑 7.9.3。suite=pr 时改跑 core 和 windows-build，不跑 7.9.3。
-    if: (github.event_name != 'workflow_dispatch' && (github.event_name != 'pull_request' || github.head_ref != 'cursor/fix-qt612-ci-873f')) || (github.event_name == 'workflow_dispatch' && inputs.suite == 'pr')
+    # 手动触发默认只跑 7.9.3。suite=pr 时改跑 core 和 windows-build。
+    if: github.event_name != 'workflow_dispatch' || inputs.suite == 'pr'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -72,7 +81,8 @@ jobs:
 
   windows:
     name: windows-build
-    if: (github.event_name != 'workflow_dispatch' && (github.event_name != 'pull_request' || github.head_ref != 'cursor/fix-qt612-ci-873f')) || (github.event_name == 'workflow_dispatch' && inputs.suite == 'pr')
+    # 手动触发默认只跑 7.9.3。suite=pr 时改跑 core 和 windows-build。
+    if: github.event_name != 'workflow_dispatch' || inputs.suite == 'pr'
     runs-on: windows-2022
     timeout-minutes: 240
     env:
@@ -177,8 +187,19 @@ jobs:
           Write-Host "VCPKG_ROOT=$env:VCPKG_ROOT"
           Write-Host "QTDIR=$env:QTDIR"
           cmake --version
-          cmake --workflow --preset ci
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmd /c "cmake --workflow --preset ci > build-msvc.log 2>&1"
+          $buildCode = $LASTEXITCODE
+          Get-Content -LiteralPath build-msvc.log
+          if ($buildCode -ne 0) { exit $buildCode }
+          # 这两个脚本和 occt-link-report.txt 随 PR #10 进来。文件还没有时跳过，避免 #10 合并前打断本作业。
+          if (Test-Path -LiteralPath scripts/check_build_log.ps1) {
+            pwsh -File scripts/check_build_log.ps1 -Log build-msvc.log
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          if (Test-Path -LiteralPath scripts/verify_occt_link.ps1) {
+            pwsh -File scripts/verify_occt_link.ps1 -BuildDir build/msvc -Report build/msvc/occt-link-report.txt
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
 
       - name: Check vcpkg binary cache
         if: success() && steps.vcpkg-cache.outputs.cache-hit != 'true'
@@ -199,18 +220,33 @@ jobs:
 
       - name: Build bench tools against the installed OCCT
         run: |
-          cmake -S bench -B build/bench -G Ninja `
-            -DCMAKE_BUILD_TYPE=RelWithDebInfo `
-            -DCMAKE_PREFIX_PATH="$pwd\build\msvc\vcpkg_installed\x64-windows" `
-            "-DSTEPLENS_EXPECTED_OCCT=8.0.1"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cmake --build build/bench
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $prefix = Join-Path (Get-Location) "build\msvc\vcpkg_installed\x64-windows"
+          cmd /c "cmake -S bench -B build/bench -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_PREFIX_PATH=`"$prefix`" -DSTEPLENS_EXPECTED_OCCT=8.0.1 > build-bench-config.log 2>&1"
+          $configCode = $LASTEXITCODE
+          Get-Content -LiteralPath build-bench-config.log
+          if ($configCode -ne 0) { exit $configCode }
+          cmd /c "cmake --build build/bench > build-bench.log 2>&1"
+          $buildCode = $LASTEXITCODE
+          Get-Content -LiteralPath build-bench.log
+          if ($buildCode -ne 0) { exit $buildCode }
+          if (Test-Path -LiteralPath scripts/check_build_log.ps1) {
+            pwsh -File scripts/check_build_log.ps1 -Log build-bench-config.log
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            pwsh -File scripts/check_build_log.ps1 -Log build-bench.log
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          if (Test-Path -LiteralPath scripts/verify_occt_link.ps1) {
+            pwsh -File scripts/verify_occt_link.ps1 -BuildDir build/bench
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
           $env:PATH = "$pwd\build\msvc\vcpkg_installed\x64-windows\bin;$env:PATH"
           & "$pwd\build\bench\test_compat.exe"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      # zip 只在推送到 main 和 v* 标签时产生。PR 不上传 artifact。
+      # 缓存保存发生在这一步之前，跳过打包不会丢掉 vcpkg/Qt 缓存。
       - name: Package zip
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         run: |
           cmake --install build/msvc --config RelWithDebInfo --prefix "$pwd\dist-stage"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -222,12 +258,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Upload zip
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         uses: actions/upload-artifact@v4
         with:
           name: StepLens-windows-x64
           path: dist/StepLens-0.1.0-windows-x64.zip
           retention-days: 7
 
+      # 冒烟读的是 build 目录里的 StepLens.exe，不依赖上面的 zip。PR 上打包被跳过时这里仍然跑。
       - name: Smoke the empty window offscreen
         run: |
           $env:QT_QPA_PLATFORM = "offscreen"
@@ -273,11 +311,12 @@ jobs:
             @cpp
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-  # 不加矩阵。7.9.3 只在手动触发时编，避免每个 PR 都再编一遍 OCCT。
-  # 这条分支已经手动编过一次并成功（run 41769758492）。之后只留 workflow_dispatch。
+  # 不加矩阵。默认只在手动触发且 suite 不是 pr 时编 7.9.3，避免每个 PR 都再编一遍 OCCT。
+  # 手动作业已成功过一次（run 41769758492）。
+  # cursor/occt-eh-boundary-5586 的 PR 额外跑一次：那条 PR 的令牌没有 actions:write，workflow_dispatch 会 403。
   windows-occt793:
     name: windows-occt-7.9.3
-    if: github.event_name == 'workflow_dispatch' && inputs.suite != 'pr'
+    if: (github.event_name == 'workflow_dispatch' && inputs.suite != 'pr') || (github.event_name == 'pull_request' && github.head_ref == 'cursor/occt-eh-boundary-5586')
     runs-on: windows-2022
     timeout-minutes: 240
     env:
@@ -363,10 +402,20 @@ jobs:
 
       - name: Build and test OCCT 7.9.3
         run: |
-          cmake --build --preset release-occt793
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmd /c "cmake --build --preset release-occt793 > build-occt793.log 2>&1"
+          $buildCode = $LASTEXITCODE
+          Get-Content -LiteralPath build-occt793.log
+          if ($buildCode -ne 0) { exit $buildCode }
+          if (Test-Path -LiteralPath scripts/check_build_log.ps1) {
+            pwsh -File scripts/check_build_log.ps1 -Log build-occt793.log
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
           ctest --preset unit-occt793
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (Test-Path -LiteralPath scripts/verify_occt_link.ps1) {
+            pwsh -File scripts/verify_occt_link.ps1 -BuildDir build/msvc-occt793 -Report build/msvc-occt793/occt-link-report.txt
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
 
       - name: Build bench tools against OCCT 7.9.3
         run: |
