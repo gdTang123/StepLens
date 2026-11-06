@@ -43,7 +43,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <cwchar>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -62,9 +61,6 @@
 #endif
 // clang-format off
 #include <Windows.h>
-// WIN32_LEAN_AND_MEAN 下新版 SDK 不从 Windows.h 带出代码页转换。
-// 直接包含 stringapiset.h 会因缺少 LPNLSVERSIONINFO 失败；winnls.h 会先定义它。
-#include <winnls.h>
 #include <psapi.h>
 #include <DbgHelp.h>
 #include <shellapi.h>
@@ -231,13 +227,9 @@ static void kvs(const char* k, const std::string& v) {
 static std::string utf8FromWide(const wchar_t* text) {
     if (text == nullptr || text[0] == L'\0')
         return {};
-    const int chars = static_cast<int>(wcslen(text));
-    const int bytes = WideCharToMultiByte(CP_UTF8, 0, text, chars, nullptr, 0, nullptr, nullptr);
-    if (bytes <= 0)
-        return {};
-    std::string out(static_cast<size_t>(bytes), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, text, chars, out.data(), bytes, nullptr, nullptr);
-    return out;
+    // C++17 path::u8string() 是 UTF-8 的 std::string。不用 WideCharToMultiByte：
+    // WIN32_LEAN_AND_MEAN 下 CI 的 Windows SDK 不从 Windows.h 带出这个 API。
+    return std::filesystem::path(text).u8string();
 }
 #endif
 
