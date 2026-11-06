@@ -31,15 +31,12 @@
 #include <exception>
 
 #if defined(_WIN32) && !STEPLENS_USE_WNT_WINDOW
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-// clang-format off
-#include <windows.h>
-// clang-format on
+// Qt 的头在包含 windows.h 时会定义 NOGDI 和 NOUSER，wingdi.h / winuser.h 里的函数被整段跳过。
+// 包含守卫让后面再包含 windows.h 不会展开，所以按 SDK 原型补上 NeutralWindow 要用的两个函数。
+extern "C" {
+__declspec(dllimport) HDC __stdcall wglGetCurrentDC(void);
+__declspec(dllimport) HWND __stdcall WindowFromDC(HDC);
+}
 #endif
 
 namespace steplens {
