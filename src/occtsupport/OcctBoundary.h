@@ -20,6 +20,10 @@ class OcctBoundary {
 public:
     static void armWorkerThread();
 
+    // 测试缝：本线程已经执行过几次 armWorkerThread。生产代码不读它。
+    // 计数发生在钩子内部，所以只调用 SetThreadLocalSignal 之外的空函数不会增加。
+    [[nodiscard]] static int armCountOnThisThread() noexcept;
+
     // 在当前线程触发一次空指针写入，并收成 Result。进程不退出。
     // 成功接住时 code 为 Internal，userMessage 为 kProcessContaminatedUserMessage，并置
     // processContaminated()。

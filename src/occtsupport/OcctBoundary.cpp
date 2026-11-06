@@ -40,8 +40,20 @@ bool processContaminated() noexcept {
     return contaminatedFlag().load(std::memory_order_acquire);
 }
 
+namespace {
+
+// 每个工作线程自己的计数。入口钩子跑过之后，该线程的第一个任务才能看到非 0。
+thread_local int t_armCount = 0;
+
+} // namespace
+
 void OcctBoundary::armWorkerThread() {
     OSD::SetThreadLocalSignal(OSD_SignalMode_Set, false);
+    ++t_armCount;
+}
+
+int OcctBoundary::armCountOnThisThread() noexcept {
+    return t_armCount;
 }
 
 #if defined(_MSC_VER)
