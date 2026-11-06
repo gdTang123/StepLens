@@ -62,8 +62,9 @@
 #endif
 // clang-format off
 #include <Windows.h>
-// WIN32_LEAN_AND_MEAN 下新版 SDK 不再从 Windows.h 带出 WideCharToMultiByte / CP_UTF8。
-#include <stringapiset.h>
+// WIN32_LEAN_AND_MEAN 下新版 SDK 不从 Windows.h 带出代码页转换。
+// 直接包含 stringapiset.h 会因缺少 LPNLSVERSIONINFO 失败；winnls.h 会先定义它。
+#include <winnls.h>
 #include <psapi.h>
 #include <DbgHelp.h>
 #include <shellapi.h>
