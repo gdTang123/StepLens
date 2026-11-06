@@ -16,6 +16,8 @@ namespace steplens {
 // 任意时刻最多一个后台 LoadSession 在执行。A 还在释放时再提交 B、再提交 C，只保留 C。
 // C 的 run 在 A 调用 noteBackgroundReleased() 之后才开始。槽位空出来靠条件变量，不空转。
 // run 必须在取消后返回。可以自己调用 noteBackgroundReleased；没调用时协调器补上。
+// m_mutex 只保护队列和 m_active。cancel() 会同步跑 stop callback，callback 可以重入 submit，
+// 所以取消和被替换请求的析构都在锁外进行。不要改成递归锁。
 class LoadCoordinator {
 public:
     struct LoadRequest {

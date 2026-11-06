@@ -5,12 +5,46 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdio>
+#include <cstdlib>
 #include <gtest/gtest.h>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
+#include <stop_token>
 #include <thread>
 #include <vector>
+
+namespace {
+
+// 死锁时后台线程不会返回。超时后摘掉线程并让进程以非 0 退出，避免 gtest 在 join 上一直挂着。
+template <class F> void requireFinishes(std::chrono::milliseconds budget, const char* name, F&& body) {
+    auto finished = std::make_shared<std::atomic<bool>>(false);
+    std::thread worker([finished, body = std::forward<F>(body)]() mutable {
+        body();
+        finished->store(true, std::memory_order_release);
+    });
+    const auto deadline = std::chrono::steady_clock::now() + budget;
+    while (!finished->load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    if (!finished->load(std::memory_order_acquire)) {
+        worker.detach();
+        std::fprintf(stderr, "DEADLOCK %s exceeded %lld ms\n", name, static_cast<long long>(budget.count()));
+        std::_Exit(2);
+    }
+    worker.join();
+}
+
+struct ReplaceProbe {
+    steplens::LoadCoordinator coordinator;
+    std::atomic<bool> started{false};
+    std::atomic<int> callbackSubmits{0};
+    std::atomic<bool> ranSuperseded{false};
+    std::atomic<bool> ranLatest{false};
+};
+
+} // namespace
 
 TEST(LoadSession, NoteWakesWaiter) {
     auto session = std::make_shared<steplens::LoadSession>(8);
@@ -109,6 +143,102 @@ TEST(LoadCoordinator, LastRequestWinsRunsOnlyLatestAfterPreviousRelease) {
     EXPECT_EQ(ran[1], 'C');
     EXPECT_LE(maxLive.load(), 1);
     EXPECT_GE(maxLive.load(), 1);
+}
+
+TEST(LoadCoordinator, StopCallbackReenterSubmitDoesNotDeadlock) {
+    constexpr auto kBudget = std::chrono::seconds(4);
+    auto probe = std::make_shared<ReplaceProbe>();
+    requireFinishes(kBudget, "reenter-submit", [probe] {
+        probe->coordinator.submit(steplens::LoadCoordinator::LoadRequest{
+            32, {}, [probe](const std::shared_ptr<steplens::LoadSession>& session) {
+                std::stop_callback callback(session->token().stopToken(), [probe] {
+                    probe->callbackSubmits.fetch_add(1);
+                    probe->coordinator.submit(steplens::LoadCoordinator::LoadRequest{
+                        8, {}, [probe](const std::shared_ptr<steplens::LoadSession>& next) {
+                            probe->ranLatest.store(true);
+                            next->noteBackgroundReleased();
+                        }});
+                });
+                probe->started.store(true);
+                while (!session->token().isCancelled()) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
+                session->noteBackgroundReleased();
+            }});
+        for (int i = 0; i < 400 && !probe->started.load(); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        probe->coordinator.submit(steplens::LoadCoordinator::LoadRequest{
+            16, {}, [probe](const std::shared_ptr<steplens::LoadSession>& session) {
+                probe->ranSuperseded.store(true);
+                session->noteBackgroundReleased();
+            }});
+        probe->coordinator.waitUntilIdle();
+    });
+    EXPECT_EQ(probe->callbackSubmits.load(), 1);
+    EXPECT_FALSE(probe->ranSuperseded.load());
+    EXPECT_TRUE(probe->ranLatest.load());
+}
+
+TEST(LoadCoordinator, DestructorCancelReenterSubmitDoesNotDeadlock) {
+    constexpr auto kBudget = std::chrono::seconds(4);
+    auto probe = std::make_shared<ReplaceProbe>();
+    requireFinishes(kBudget, "reenter-destructor", [probe] {
+        auto coordinator = std::make_unique<steplens::LoadCoordinator>();
+        coordinator->submit(steplens::LoadCoordinator::LoadRequest{
+            32, {}, [probe, raw = coordinator.get()](const std::shared_ptr<steplens::LoadSession>& session) {
+                std::stop_callback callback(session->token().stopToken(), [probe, raw] {
+                    probe->callbackSubmits.fetch_add(1);
+                    raw->submit(steplens::LoadCoordinator::LoadRequest{
+                        8, {}, [](const std::shared_ptr<steplens::LoadSession>& next) {
+                            next->noteBackgroundReleased();
+                        }});
+                });
+                probe->started.store(true);
+                while (!session->token().isCancelled()) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
+                session->noteBackgroundReleased();
+            }});
+        for (int i = 0; i < 400 && !probe->started.load(); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        coordinator.reset();
+    });
+    EXPECT_EQ(probe->callbackSubmits.load(), 1);
+    EXPECT_TRUE(probe->started.load());
+}
+
+TEST(LoadCoordinator, RapidSupersedeKeepsOnlyLatest) {
+    constexpr auto kBudget = std::chrono::seconds(4);
+    auto probe = std::make_shared<ReplaceProbe>();
+    requireFinishes(kBudget, "rapid-bc", [probe] {
+        probe->coordinator.submit(steplens::LoadCoordinator::LoadRequest{
+            128, {}, [probe](const std::shared_ptr<steplens::LoadSession>& session) {
+                probe->started.store(true);
+                while (!session->token().isCancelled()) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
+                session->noteBackgroundReleased();
+            }});
+        for (int i = 0; i < 400 && !probe->started.load(); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        probe->coordinator.submit(steplens::LoadCoordinator::LoadRequest{
+            64, {}, [probe](const std::shared_ptr<steplens::LoadSession>& session) {
+                probe->ranSuperseded.store(true);
+                session->noteBackgroundReleased();
+            }});
+        probe->coordinator.submit(steplens::LoadCoordinator::LoadRequest{
+            32, {}, [probe](const std::shared_ptr<steplens::LoadSession>& session) {
+                probe->ranLatest.store(true);
+                session->noteBackgroundReleased();
+            }});
+        probe->coordinator.waitUntilIdle();
+    });
+    EXPECT_TRUE(probe->started.load());
+    EXPECT_FALSE(probe->ranSuperseded.load());
+    EXPECT_TRUE(probe->ranLatest.load());
 }
 
 TEST(OcctLoadContract, InterfaceStaticInitializesOnce) {

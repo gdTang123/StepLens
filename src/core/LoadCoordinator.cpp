@@ -8,14 +8,18 @@ namespace steplens {
 LoadCoordinator::LoadCoordinator() : m_thread([this] { threadMain(); }) {}
 
 LoadCoordinator::~LoadCoordinator() {
+    std::shared_ptr<LoadSession> cancelSession;
+    LoadRequest displaced;
     {
         std::lock_guard lock(m_mutex);
         m_stop = true;
+        displaced = std::move(m_pending);
         m_hasPending = false;
-        m_pending = {};
-        if (m_active) {
-            m_active->cancel();
-        }
+        cancelSession = m_active;
+    }
+    displaced = {};
+    if (cancelSession) {
+        cancelSession->cancel();
     }
     m_cv.notify_all();
     if (m_thread.joinable()) {
@@ -24,24 +28,29 @@ LoadCoordinator::~LoadCoordinator() {
 }
 
 void LoadCoordinator::submit(LoadRequest request) {
-    std::lock_guard lock(m_mutex);
-    if (m_stop) {
-        return;
-    }
-    if (m_running || m_hasPending) {
-        if (m_active) {
-            m_active->cancel();
+    std::shared_ptr<LoadSession> cancelSession;
+    LoadRequest displaced;
+    bool shouldNotify = false;
+    {
+        std::lock_guard lock(m_mutex);
+        if (!m_stop) {
+            if (m_running || m_hasPending) {
+                cancelSession = m_active;
+                displaced = std::move(m_pending);
+            }
+            m_pending = std::move(request);
+            m_hasPending = true;
+            shouldNotify = !m_running;
         }
-        m_pending = std::move(request);
-        m_hasPending = true;
-        if (!m_running) {
-            m_cv.notify_all();
-        }
-        return;
     }
-    m_pending = std::move(request);
-    m_hasPending = true;
-    m_cv.notify_all();
+    // 旧请求的析构和 request_stop 的同步回调都可能重入 submit。锁已经放下。
+    displaced = {};
+    if (cancelSession) {
+        cancelSession->cancel();
+    }
+    if (shouldNotify) {
+        m_cv.notify_all();
+    }
 }
 
 void LoadCoordinator::waitUntilIdle() {

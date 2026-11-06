@@ -1,14 +1,18 @@
 #include "viewer/ViewerWidget.h"
 
 #include "occtsupport/occt_compat.h"
+#include "viewer/GlCleanup.h"
 
 #include <QDebug>
+#include <QOpenGLContext>
 #include <QResizeEvent>
 #include <QShowEvent>
 #include <QSurfaceFormat>
 #include <QTimer>
 
 #include <AIS_DisplayMode.hxx>
+#include <AIS_InteractiveContext.hxx>
+#include <AIS_Shape.hxx>
 #include <Aspect_DisplayConnection.hxx>
 #include <Aspect_NeutralWindow.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
@@ -16,6 +20,8 @@
 #include <OpenGl_FrameBuffer.hxx>
 #include <OpenGl_GraphicDriver.hxx>
 #include <Standard_Failure.hxx>
+#include <V3d_View.hxx>
+#include <V3d_Viewer.hxx>
 #include <gp_Ax1.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Pnt.hxx>
@@ -47,14 +53,31 @@ constexpr double kFullTurn = 6.283185307179586;
 
 } // namespace
 
+struct ViewerWidget::State {
+    QTimer* timer = nullptr;
+    Handle(V3d_Viewer) viewer;
+    Handle(V3d_View) view;
+    Handle(AIS_InteractiveContext) context;
+    Handle(AIS_Shape) box;
+    double angle = 0.0;
+    bool paintReady = false;
+    bool fboWarned = false;
+    bool resourcesAlive = false;
+    bool cleanupConnected = false;
+};
+
 ViewerWidget::ViewerWidget(QWidget* parent)
 #if STEPLENS_USE_WNT_WINDOW
-    : QWidget(parent) {
+    : QWidget(parent),
+#else
+    : QOpenGLWidget(parent),
+#endif
+      m_state(std::make_unique<State>()) {
+#if STEPLENS_USE_WNT_WINDOW
     setAttribute(Qt::WA_NativeWindow);
     setAttribute(Qt::WA_PaintOnScreen);
     setAttribute(Qt::WA_NoSystemBackground);
 #else
-    : QOpenGLWidget(parent) {
     QSurfaceFormat format;
     format.setDepthBufferSize(24);
     format.setStencilBufferSize(8);
@@ -64,8 +87,8 @@ ViewerWidget::ViewerWidget(QWidget* parent)
     setUpdateBehavior(QOpenGLWidget::NoPartialUpdate);
 #endif
     setMinimumSize(320, 240);
-    m_timer = new QTimer(this);
-    connect(m_timer, &QTimer::timeout, this, [this] { update(); });
+    m_state->timer = new QTimer(this);
+    connect(m_state->timer, &QTimer::timeout, this, [this] { update(); });
     try {
         createScene();
     } catch (const Standard_Failure& failure) {
@@ -78,23 +101,22 @@ ViewerWidget::ViewerWidget(QWidget* parent)
 }
 
 ViewerWidget::~ViewerWidget() {
-    if (m_timer != nullptr) {
-        m_timer->stop();
+    if (m_state->timer != nullptr) {
+        m_state->timer->stop();
     }
-#if !STEPLENS_USE_WNT_WINDOW
-    if (m_glReady) {
-        makeCurrent();
-    }
-#endif
+#if STEPLENS_USE_WNT_WINDOW
     releaseScene();
-#if !STEPLENS_USE_WNT_WINDOW
-    if (m_glReady) {
-        doneCurrent();
+#else
+    // 基类析构才会销毁 context。先断开，避免 aboutToBeDestroyed 在 m_state 析构之后再进来。
+    if (QOpenGLContext* ctx = context()) {
+        ctx->disconnect(this);
     }
+    releaseGl();
 #endif
 }
 
 void ViewerWidget::createScene() {
+    m_state->resourcesAlive = true;
     Handle(Aspect_DisplayConnection) display = new Aspect_DisplayConnection();
     // false：不要在构造时自建 GL 上下文，交给 Qt（或 WNT_Window）已经当前的那个。
     Handle(OpenGl_GraphicDriver) driver = new OpenGl_GraphicDriver(display, false);
@@ -106,57 +128,62 @@ void ViewerWidget::createScene() {
     driver->ChangeOptions().buffersOpaqueAlpha = true;
     driver->ChangeOptions().useSystemBuffer = false;
 #endif
-    m_viewer = new V3d_Viewer(driver);
-    m_viewer->SetDefaultLights();
-    m_viewer->SetLightOn();
-    m_view = m_viewer->CreateView();
-    m_view->SetImmediateUpdate(false);
-    m_view->SetBackgroundColor(Quantity_TOC_RGB, 0.16, 0.18, 0.22);
-    m_context = new AIS_InteractiveContext(m_viewer);
-    m_box = new AIS_Shape(BRepPrimAPI_MakeBox(100.0, 50.0, 90.0).Shape());
+    m_state->viewer = new V3d_Viewer(driver);
+    m_state->viewer->SetDefaultLights();
+    m_state->viewer->SetLightOn();
+    m_state->view = m_state->viewer->CreateView();
+    m_state->view->SetImmediateUpdate(false);
+    m_state->view->SetBackgroundColor(Quantity_TOC_RGB, 0.16, 0.18, 0.22);
+    m_state->context = new AIS_InteractiveContext(m_state->viewer);
+    m_state->box = new AIS_Shape(BRepPrimAPI_MakeBox(100.0, 50.0, 90.0).Shape());
 }
 
 void ViewerWidget::displayBox() {
-    m_context->Display(m_box, AIS_Shaded, -1, false);
-    m_view->FitAll(0.01, false);
-    m_glReady = true;
-    m_timer->start(kFrameIntervalMs);
+    m_state->context->Display(m_state->box, AIS_Shaded, -1, false);
+    m_state->view->FitAll(0.01, false);
+    m_state->paintReady = true;
+    m_state->timer->start(kFrameIntervalMs);
 }
 
 void ViewerWidget::spinBox() {
-    m_angle += 0.03;
-    if (m_angle > kFullTurn) {
-        m_angle -= kFullTurn;
+    m_state->angle += 0.03;
+    if (m_state->angle > kFullTurn) {
+        m_state->angle -= kFullTurn;
     }
     gp_Trsf trsf;
-    trsf.SetRotation(gp_Ax1(gp_Pnt(50.0, 25.0, 45.0), gp_Dir(0.0, 0.0, 1.0)), m_angle);
-    m_box->SetLocalTransformation(trsf);
-    m_context->Redisplay(m_box, false);
+    trsf.SetRotation(gp_Ax1(gp_Pnt(50.0, 25.0, 45.0), gp_Dir(0.0, 0.0, 1.0)), m_state->angle);
+    m_state->box->SetLocalTransformation(trsf);
+    m_state->context->Redisplay(m_state->box, false);
 }
 
 void ViewerWidget::releaseScene() {
-    m_box.Nullify();
-    m_context.Nullify();
-    m_view.Nullify();
-    m_viewer.Nullify();
-    m_glReady = false;
+    if (m_state->timer != nullptr) {
+        m_state->timer->stop();
+    }
+    m_state->box.Nullify();
+    m_state->context.Nullify();
+    m_state->view.Nullify();
+    m_state->viewer.Nullify();
+    m_state->paintReady = false;
+    m_state->resourcesAlive = false;
+    m_state->cleanupConnected = false;
 }
 
 #if STEPLENS_USE_WNT_WINDOW
 
 void ViewerWidget::bindWntWindow() {
-    if (m_view.IsNull() || m_glReady) {
+    if (m_state->view.IsNull() || m_state->paintReady) {
         return;
     }
     try {
         auto* nativePtr = reinterpret_cast<void*>(static_cast<std::uintptr_t>(winId()));
         const auto handle = static_cast<Aspect_Handle>(nativePtr);
         Handle(WNT_Window) window = new WNT_Window(handle);
-        m_view->SetWindow(window);
+        m_state->view->SetWindow(window);
         if (!window->IsMapped()) {
             window->Map();
         }
-        m_view->MustBeResized();
+        m_state->view->MustBeResized();
         displayBox();
     } catch (const Standard_Failure& failure) {
         qWarning("StepLens: WNT_Window bind failed: %s", steplens::occt::failureMessage(failure));
@@ -174,37 +201,70 @@ void ViewerWidget::showEvent(QShowEvent* event) {
 
 void ViewerWidget::resizeEvent(QResizeEvent* event) {
     QWidget::resizeEvent(event);
-    if (m_glReady && !m_view.IsNull()) {
-        m_view->MustBeResized();
-        m_view->FitAll(0.01, false);
+    if (m_state->paintReady && !m_state->view.IsNull()) {
+        m_state->view->MustBeResized();
+        m_state->view->FitAll(0.01, false);
     }
 }
 
 void ViewerWidget::paintEvent(QPaintEvent* event) {
     static_cast<void>(event);
-    if (!m_glReady || m_view.IsNull()) {
+    if (!m_state->paintReady || m_state->view.IsNull()) {
         return;
     }
     try {
         spinBox();
-        m_view->Redraw();
+        m_state->view->Redraw();
     } catch (const Standard_Failure& failure) {
         qWarning("StepLens: WNT redraw failed: %s", steplens::occt::failureMessage(failure));
-        m_glReady = false;
-        m_timer->stop();
+        m_state->paintReady = false;
+        m_state->timer->stop();
     } catch (...) {
-        m_glReady = false;
-        m_timer->stop();
+        m_state->paintReady = false;
+        m_state->timer->stop();
     }
 }
 
 #else
 
-void ViewerWidget::initializeGL() {
-    if (m_view.IsNull()) {
+void ViewerWidget::bindContextCleanup() {
+    if (m_state->cleanupConnected || context() == nullptr) {
         return;
     }
+    connect(
+        context(), &QOpenGLContext::aboutToBeDestroyed, this, [this] { releaseGl(); }, Qt::DirectConnection);
+    m_state->cleanupConnected = true;
+}
+
+void ViewerWidget::releaseGl() {
+    if (!m_state->resourcesAlive) {
+        return;
+    }
+    QOpenGLContext* ctx = context();
+    const bool contextValid = ctx != nullptr && ctx->isValid();
+    const bool alreadyCurrent = contextValid && QOpenGLContext::currentContext() == ctx;
+    const GlCleanupPlan plan = planGlCleanup(GlCleanupInput{true, contextValid, alreadyCurrent});
+    bool madeCurrent = false;
+    if (plan.makeCurrent) {
+        madeCurrent = makeCurrent();
+    }
+    if (plan.releaseResources) {
+        releaseScene();
+    }
+    if (plan.doneCurrent && madeCurrent) {
+        doneCurrent();
+    }
+}
+
+void ViewerWidget::initializeGL() {
     try {
+        if (m_state->view.IsNull()) {
+            createScene();
+        }
+        if (m_state->view.IsNull()) {
+            return;
+        }
+        bindContextCleanup();
         Handle(OpenGl_Context) gl = new OpenGl_Context();
         if (!gl->Init(true)) {
             qWarning("StepLens: OpenGl_Context::Init failed; 3D smoke stays blank");
@@ -224,7 +284,7 @@ void ViewerWidget::initializeGL() {
 #endif
         window->SetNativeHandle(native);
         window->SetSize(pixelWidth, pixelHeight);
-        m_view->SetWindow(window, gl->RenderingContext());
+        m_state->view->SetWindow(window, gl->RenderingContext());
         displayBox();
     } catch (const Standard_Failure& failure) {
         qWarning("StepLens: NeutralWindow init failed: %s", steplens::occt::failureMessage(failure));
@@ -237,7 +297,7 @@ void ViewerWidget::initializeGL() {
 
 bool ViewerWidget::wrapQtFramebuffer() {
     Handle(OpenGl_GraphicDriver) driver =
-        Handle(OpenGl_GraphicDriver)::DownCast(m_context->CurrentViewer()->Driver());
+        Handle(OpenGl_GraphicDriver)::DownCast(m_state->context->CurrentViewer()->Driver());
     if (driver.IsNull()) {
         return false;
     }
@@ -251,14 +311,14 @@ bool ViewerWidget::wrapQtFramebuffer() {
         gl->SetDefaultFrameBuffer(framebuffer);
     }
     if (!framebuffer->InitWrapper(gl)) {
-        if (!m_fboWarned) {
-            m_fboWarned = true;
+        if (!m_state->fboWarned) {
+            m_state->fboWarned = true;
             // 无 GPU / 离屏时这里会失败。进程继续跑，像素检查留给清单，不在 CI 里判。
             qWarning("StepLens: OpenGl_FrameBuffer::InitWrapper failed");
         }
         return false;
     }
-    Handle(Aspect_NeutralWindow) window = Handle(Aspect_NeutralWindow)::DownCast(m_view->Window());
+    Handle(Aspect_NeutralWindow) window = Handle(Aspect_NeutralWindow)::DownCast(m_state->view->Window());
     if (window.IsNull()) {
         return false;
     }
@@ -269,15 +329,15 @@ bool ViewerWidget::wrapQtFramebuffer() {
     window->Size(oldWidth, oldHeight);
     if (oldWidth != pixelWidth || oldHeight != pixelHeight) {
         window->SetSize(pixelWidth, pixelHeight);
-        m_view->MustBeResized();
-        m_view->FitAll(0.01, false);
-        m_view->Invalidate();
+        m_state->view->MustBeResized();
+        m_state->view->FitAll(0.01, false);
+        m_state->view->Invalidate();
     }
     return true;
 }
 
 void ViewerWidget::paintGL() {
-    if (!m_glReady || m_view.IsNull() || m_context.IsNull()) {
+    if (!m_state->paintReady || m_state->view.IsNull() || m_state->context.IsNull()) {
         return;
     }
     try {
@@ -285,14 +345,14 @@ void ViewerWidget::paintGL() {
             return;
         }
         spinBox();
-        m_view->Redraw();
+        m_state->view->Redraw();
     } catch (const Standard_Failure& failure) {
         qWarning("StepLens: paintGL failed: %s", steplens::occt::failureMessage(failure));
-        m_glReady = false;
-        m_timer->stop();
+        m_state->paintReady = false;
+        m_state->timer->stop();
     } catch (...) {
-        m_glReady = false;
-        m_timer->stop();
+        m_state->paintReady = false;
+        m_state->timer->stop();
     }
 }
 
