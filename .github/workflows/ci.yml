@@ -10,6 +10,14 @@ on:
     # 以该分支为 base 的 PR 才能直接用。合并后这条分支名可以删掉。
     branches: [main, cursor/fix-qt612-ci-873f]
   workflow_dispatch:
+    inputs:
+      suite:
+        description: "occt793 只编 7.9.3（默认，与原来的手动触发相同）；pr 只跑 core 和 windows-build"
+        type: choice
+        default: occt793
+        options:
+          - occt793
+          - pr
 
 permissions:
   contents: read
@@ -24,8 +32,8 @@ jobs:
   core:
     name: core-tests-tsan
     # 该分支的 push 已经会跑同一套检查。pull_request 再跑会占双份额度，Windows 上会把 OCCT 编两次。
-    # workflow_dispatch 只跑 7.9.3 那一个作业。
-    if: github.event_name != 'workflow_dispatch' && (github.event_name != 'pull_request' || github.head_ref != 'cursor/fix-qt612-ci-873f')
+    # 手动触发默认仍只跑 7.9.3。suite=pr 时改跑 core 和 windows-build，不跑 7.9.3。
+    if: (github.event_name != 'workflow_dispatch' && (github.event_name != 'pull_request' || github.head_ref != 'cursor/fix-qt612-ci-873f')) || (github.event_name == 'workflow_dispatch' && inputs.suite == 'pr')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -60,7 +68,7 @@ jobs:
 
   windows:
     name: windows-build
-    if: github.event_name != 'workflow_dispatch' && (github.event_name != 'pull_request' || github.head_ref != 'cursor/fix-qt612-ci-873f')
+    if: (github.event_name != 'workflow_dispatch' && (github.event_name != 'pull_request' || github.head_ref != 'cursor/fix-qt612-ci-873f')) || (github.event_name == 'workflow_dispatch' && inputs.suite == 'pr')
     runs-on: windows-2022
     timeout-minutes: 240
     env:
@@ -265,7 +273,7 @@ jobs:
   # 这条分支已经手动编过一次并成功（run 41769758492）。之后只留 workflow_dispatch。
   windows-occt793:
     name: windows-occt-7.9.3
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && inputs.suite != 'pr'
     runs-on: windows-2022
     timeout-minutes: 240
     env:
