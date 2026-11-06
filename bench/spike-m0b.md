@@ -6,17 +6,17 @@
 - kit：`e502584`（`KIT_COMMIT=e5025844885bdad264927c2360f12e86bb3ff4a6`）
 - 样例：X-07=`PX13226.IGS`（`C:\sl\samples\PX13226.IGS`）
 - 对比版本：OCCT 8.0.1（801） vs OCCT 7.9.3（793）
-- 7.9.3 构建：周严离线 overlay port；CMake 生成器实际为 `"Visual Studio 18 2026"`
-- `env.txt`：素材仅见 `kit_commit=e5025844885bdad264927c2360f12e86bb3ff4a6`；其余未采集。
+- 7.9.3 构建：周严离线 overlay port；CMake 生成器离线脚本指定为 `"Visual Studio 18 2026"`（见 `t02b-occt793-offline-v2.ps1:18`；实际 configure 日志未归档）
+- kit SHA `e5025844885bdad264927c2360f12e86bb3ff4a6` 来自 `res/{801,793}/kit_commit.txt`，`env.txt` 未归档；其余环境信息未采集。
 - 第 1 步机器硬件详情（CPU 型号/内存/磁盘等）：未采集；X-07 日志仅记录 `threads_hw=28`。
 
 ## 1. 结论
 
-按老板 2026-11-04 定版规则：**8.0.1 读超大 IGES 崩且 7.9.3 全过 → 选用 OCCT 7.9.3**。
+按老板 2026-11-04 定版规则：**8.0.1 读超大 IGES 崩，且 7.9.3 本批 17 项全部正常退出 → 选用 OCCT 7.9.3**。
 
 - OCCT 8.0.1 在 X-07=`PX13226.IGS` 上崩溃：`-1073741819`，minidump 确认 `0xC0000005`，读地址 `0x38`，崩溃帧指向 `TKDEIGES.dll!IGESCAFControl_Reader::Transfer+0x174`，位置 `IGESCAFControl_Reader.cxx:204`。
-- OCCT 7.9.3 的兼容单测 `PASS`，X-07 成功（合计 `69.0 s`），取消测试 `7/7` 成功。
-- 速度差已标出：X-02 合计中位数 801=`48.8 s` / 793=`52.4 s`，793 约慢 `7.4%`；L-03 合计中位数 801=`67.1 s` / 793=`72.0 s`，793 约慢 `7.3%`。均未到 `≥20%`；按规则即使 STEP 慢 `≥20%` 仍用 7.9.3（IGES 是 P0），但需在文中标出速度差。
+- OCCT 7.9.3 的兼容单测 `PASS`，X-07 成功（合计 `69.0 s`），取消测试 `7/7` 成功。注意：X-07 两个版本当前归档各只测了 1 次，不能推广为所有 IGES 均稳定。
+- 速度差已标出：X-02 合计中位数 801=`48.8 s` / 793=`52.4 s`，793 约慢 `7.5%`（按未舍入中位数 48.7579 s / 52.3946 s 计算）；L-03 合计中位数 801=`67.1 s` / 793=`72.0 s`，793 约慢 `7.3%`。均未到 `≥20%`；按规则即使 STEP 慢 `≥20%` 仍用 7.9.3（IGES 是 P0），但需在文中标出速度差。
 
 **最终选择：OCCT 7.9.3。**
 
@@ -51,7 +51,7 @@
 |---|---|---|---|
 | 兼容单测 | PASS | PASS | 两者均 PASS |
 | X-07（`PX13226.IGS`） | 崩溃：`-1073741819`；`0xC0000005`；read `0x38`；`TKDEIGES.dll!IGESCAFControl_Reader::Transfer+0x174` | 成功；合计 `69.0 s`；原型数 `32711` | 按 2026-11-04 规则选 7.9.3 |
-| X-02 合计中位数 | `48.8 s`（3 次） | `52.4 s`（3 次） | 793 约慢 `7.4%`，<`20%` |
+| X-02 合计中位数 | `48.8 s`（3 次） | `52.4 s`（3 次） | 793 约慢 `7.5%`（按未舍入中位数），<`20%` |
 | L-03 合计中位数 | `67.1 s`（3 次） | `72.0 s`（3 次） | 793 约慢 `7.3%`，<`20%` |
 | 取消测试是否全过 | 是（7/7） | 是（7/7） | summary 中取消测试均成功 |
 
@@ -104,7 +104,7 @@
 
 ### 4.1 VS2026 生成器
 
-- CMake 生成器实际为 `"Visual Studio 18 2026"`，架构 `-A x64`。
+- CMake 生成器离线脚本指定为 `"Visual Studio 18 2026"`，架构 `-A x64`（见 `t02b-occt793-offline-v2.ps1:18`）；实际 configure 日志未归档。
 - 脚本用 `vswhere.exe` 定位 VS 安装路径：`"${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -prerelease -products * -property installationPath`。
 - 未采集：VS2026 具体版本号、安装 workload、其他生成器对比/失败日志。
 
@@ -143,7 +143,7 @@
 
 | 项 | 状态 |
 |---|---|
-| 第 1 步机器硬件详情（OS/CPU 型号/内存容量/显卡/磁盘，清单 env 输出） | 未采集（`results/*/env.txt` 未随结果带回；仅有 `kit_commit` 与 `threads_hw=28`） |
+| 第 1 步机器硬件详情（OS/CPU 型号/内存容量/显卡/磁盘，清单 env 输出） | 未采集（`results/*/env.txt` 未随结果带回；kit SHA 来自 `res/{801,793}/kit_commit.txt`，另仅有 `threads_hw=28`） |
 | VS2026 / MSVC 具体版本号（`cl` 首行） | 未采集 |
 | `pdb_missing` / `skipped` 旁注 | 未采集（summary 未列） |
 | X-06 / X-08（可选超大 IGES） | 未跑 |
