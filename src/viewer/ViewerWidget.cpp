@@ -246,7 +246,9 @@ void ViewerWidget::releaseGl() {
     const GlCleanupPlan plan = planGlCleanup(GlCleanupInput{true, contextValid, alreadyCurrent});
     bool madeCurrent = false;
     if (plan.makeCurrent) {
-        madeCurrent = makeCurrent();
+        // QOpenGLWidget::makeCurrent() 返回 void。调完再看是不是已经 current。
+        makeCurrent();
+        madeCurrent = QOpenGLContext::currentContext() == ctx;
     }
     if (plan.releaseResources) {
         releaseScene();
