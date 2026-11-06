@@ -4,7 +4,9 @@
 // 其它模块保持 /EHsc，不能把 /EHa 和 /EHsc 写进同一个编译命令。
 
 #include "core/Result.h"
+#include "core/TaskScheduler.h"
 
+#include <memory>
 #include <string_view>
 
 namespace steplens::occt {
@@ -14,8 +16,10 @@ inline constexpr std::string_view kProcessContaminatedUserMessage = "进程已�
 
 [[nodiscard]] bool processContaminated() noexcept;
 
-// 工作线程里调用 OCCT 的入口。TaskScheduler::onThreadStart 注入本函数。
-// 实现是 OSD::SetThreadLocalSignal(OSD_SignalMode_Set, false)：打开 SEH 转换，不打开浮点异常。
+// 工作线程里调用 OCCT 的入口。实现是 OSD::SetThreadLocalSignal(OSD_SignalMode_Set, false)：
+// 打开 SEH 转换，不打开浮点异常。
+// 跑 OCCT 的线程池必须用 makeOcctTaskScheduler 创建，由它在线程入口调用 armWorkerThread。
+// 不要自己构造 TaskScheduler 再手写这个钩子。core 不链接 OCCT，所以工厂放在这里。
 class OcctBoundary {
 public:
     static void armWorkerThread();
@@ -29,5 +33,10 @@ public:
     // processContaminated()。
     [[nodiscard]] static Result<int> probeNullPointerAccess();
 };
+
+// 唯一允许创建“跑 OCCT 的线程池”的入口。onThreadStart 固定为 OcctBoundary::armWorkerThread。
+// 本 PR 还没有生产调用点。T05 的加载和网格线程池必须走这里，不能自己构造 TaskScheduler。
+[[nodiscard]] std::unique_ptr<TaskScheduler>
+makeOcctTaskScheduler(unsigned threads = TaskScheduler::defaultThreadCount());
 
 } // namespace steplens::occt

@@ -56,6 +56,10 @@ int OcctBoundary::armCountOnThisThread() noexcept {
     return t_armCount;
 }
 
+std::unique_ptr<TaskScheduler> makeOcctTaskScheduler(unsigned threads) {
+    return std::make_unique<TaskScheduler>(threads, [] { OcctBoundary::armWorkerThread(); });
+}
+
 #if defined(_MSC_VER)
 #pragma optimize("", off)
 #endif

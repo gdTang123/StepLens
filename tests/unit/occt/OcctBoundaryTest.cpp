@@ -6,9 +6,9 @@
 #include "occtsupport/OcctBoundary.h"
 
 #include <atomic>
-#include <functional>
 #include <future>
 #include <gtest/gtest.h>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -21,22 +21,21 @@
 namespace {
 
 // 每个工作线程在自己的第一个任务开头记下钩子计数，然后停住，避免一个线程把队列吃完。
-std::vector<int> firstTaskArmCounts(unsigned workers, bool installEntryHook) {
+// useFactory 为真时走生产工厂；为假时用没有钩子的 TaskScheduler，给负对照。
+std::vector<int> firstTaskArmCounts(unsigned workers, bool useFactory) {
     std::atomic<int> entered{0};
     std::atomic<bool> release{false};
     std::mutex mutex;
     std::vector<int> counts;
     counts.reserve(workers);
 
-    std::function<void()> entry;
-    if (installEntryHook) {
-        entry = [] { steplens::occt::OcctBoundary::armWorkerThread(); };
-    }
-    steplens::TaskScheduler scheduler(workers, std::move(entry));
+    std::unique_ptr<steplens::TaskScheduler> scheduler =
+        useFactory ? steplens::occt::makeOcctTaskScheduler(workers)
+                   : std::make_unique<steplens::TaskScheduler>(workers);
     std::vector<std::future<void>> jobs;
     jobs.reserve(workers);
     for (unsigned index = 0; index < workers; ++index) {
-        jobs.push_back(scheduler.submit([&] {
+        jobs.push_back(scheduler->submit([&] {
             int arms = steplens::occt::OcctBoundary::armCountOnThisThread();
             {
                 std::lock_guard lock(mutex);
@@ -67,9 +66,10 @@ TEST(OcctBoundary, NullAccessOnWorkerBecomesInternalAndMarksProcess) {
 
     steplens::Result<int> result{0};
     {
-        // 工作线程入口注入信号转换，再经 OcctBoundary 触发空指针访问。
-        steplens::TaskScheduler scheduler(1, [] { steplens::occt::OcctBoundary::armWorkerThread(); });
-        auto future = scheduler.submit([] { return steplens::occt::OcctBoundary::probeNullPointerAccess(); });
+        // 生产工厂在线程入口注入信号转换，再经 OcctBoundary 触发空指针访问。
+        auto scheduler = steplens::occt::makeOcctTaskScheduler(1);
+        auto future =
+            scheduler->submit([] { return steplens::occt::OcctBoundary::probeNullPointerAccess(); });
         result = future.get();
     }
 
@@ -84,7 +84,7 @@ TEST(OcctBoundary, EntryHookRunsBeforeFirstTaskOnEveryWorker) {
     const std::vector<int> counts = firstTaskArmCounts(kWorkers, true);
     ASSERT_EQ(counts.size(), kWorkers);
     for (int arms : counts) {
-        // 第一个任务开始时钩子已经跑过。这里不调用 probe，避免它自己再 arm 把计数补上。
+        // 工厂在线程入口注入的钩子。不调用 probe，避免它自己再 arm 把计数补上。
         EXPECT_GE(arms, 1);
     }
 }
