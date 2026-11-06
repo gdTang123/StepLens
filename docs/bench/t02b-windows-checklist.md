@@ -55,7 +55,7 @@ git clone https://github.com/gdTang123/StepLens C:\sl\StepLens; cmd /c mklink /J
 通过条件：`C:\sl\vcpkg\vcpkg.exe`、`C:\sl\t02b\vcpkg.json`、`C:\sl\t02b\occt-7.9.3\vcpkg.json` 都存在。方式 B 还要有 `C:\sl\t02b-kit\src\occtsupport\occt_compat.h`，且 `KIT_COMMIT` 与团队给出的完整 SHA 一致。
 
 ### 第 4 步　下载样例并校验（普通权限，约 5–20 分钟，必需 1.06 GB + 可选 0.53 GB）
-做什么：从 PRD 样例清单（`samples.md`）的原始地址下载；X-07 是判定项，X-02/L-03 是 STEP 对比主样例，X-01 补充；X-06/X-08（另两个超大 IGES）可选。
+做什么：从 PRD 样例清单（`samples.md`）的原始地址下载；X-07 是判定项，X-02/L-03 是 STEP 对比主样例，X-01 补充；X-06/X-08（另两个超大 IGES）可选。另外下载 OCCT 自带的小文件 `screw.step`（约 87 KB，88,552 字节），第 8 步用它测「文件夹名里有中文和空格」时能不能打开。
 ```powershell
 New-Item -ItemType Directory -Force C:\sl\samples | Out-Null; Set-Location C:\sl\samples
 $f = @{
@@ -65,11 +65,12 @@ $f = @{
  'Scania-8x4.stp'='https://downloads.steptools.com/docs/stpfiles/bigassy/Scania-8x4.stp|573aa7da05462dee25a430b28a6869906775ae5e0126308956661c1e1da421b7'
  '1026064M.IGS'='https://twindisc.com/downloads/1026064M.IGS|'   # 可选，300,590,516 字节
  '1027247E.IGS'='https://twindisc.com/downloads/1027247E.IGS|'   # 可选，256,710,594 字节
+ 'screw.step'='https://raw.githubusercontent.com/Open-Cascade-SAS/OCCT/V7_9_3/data/step/screw.step|4b3649a4f5c4f05c7a06a402a91fe2fd7e3cba1615520fbd8c62a62610ad3e69'
 }
 foreach ($n in $f.Keys) { $u,$h = $f[$n].Split('|'); if (-not (Test-Path $n)) { curl.exe -L --fail -o $n $u }
   $ok = (-not $h) -or ((Get-FileHash $n -Algorithm SHA256).Hash -eq $h.ToUpper()); "{0,-34} {1,12:N0} 字节  {2}" -f $n,(Get-Item $n).Length,($(if($ok){'OK'}else{'哈希不符!'})) }
 ```
-通过条件：前 4 个文件显示 `OK`（哈希来自团队已下载的同名文件）。可选文件下载失败可以忽略。
+通过条件：前 4 个大文件和 `screw.step` 都显示 `OK`（哈希来自团队已下载的同名文件；`screw.step` 的哈希是 OCCT V7_9_3 这份，和 V8_0_1 里的文件相同）。可选的两个 IGES 下载失败可以忽略。
 
 ### 第 5 步　编译 OCCT 8.0.1 版摸底工具（普通权限，约 20–45 分钟，**估计**）
 做什么：打开 VS 开发环境；CMake 配置时 vcpkg 按 `vcpkg.json`（基线 2026.10.16，不写 overrides = 8.0.1）**只编 Release**（`x64-windows-release` 三元组）的 OCCT 和 FreeType，编完删除中间文件；再编 `spike.exe` 和 `test_compat.exe`（RelWithDebInfo，带 PDB，崩溃栈可显示函数名）。
@@ -89,6 +90,10 @@ Set-Location C:\sl\t02b; powershell -ExecutionPolicy Bypass -File windows\run-t0
 ```
 看结果：`exit=0` 且有 `prototypes=32711` = **不崩**；`exit=-1073741819`（0xC0000005）并打印 `crash_frame_*` = **崩溃**。
 
+开跑前脚本会先看 `spike.pdb` 和 spike 实际会加载的那些 `TK*.pdb` 在不在。窗口如果出现**黄字**「缺少符号文件」，测试**还会继续**，但万一崩溃，调用栈里可能没有函数名。`results\801\env.txt` 里会有一行 `pdb_missing=缺了哪些文件`。pdb 都在的话，不会有这一行。如果 `results\801` 里已经有上次的结果，脚本会先把它整个挪到 `results\archive\801-日期时间`，再新建空的 `results\801`。看结果仍看 `results\801`，不要去翻旧目录，除非要比对上一次。
+
+如果出现**红字**「兼容单测没有通过」，脚本会**立刻停**，X-07 也不会跑。这通常是 OCCT 版本配错了：编译时期望的 8.0.1 或 7.9.3，和实际编进去的不是同一个。请把窗口文字和 `results\801\test_compat.txt` 发回团队，不要自己改配置。
+
 ### 第 7 步　编译 OCCT 7.9.3 版（普通权限，约 20–45 分钟，**估计**）
 做什么：同第 5 步，但用 `occt-7.9.3\vcpkg.json`（同一基线 + `overrides` 锁 `7.9.3#1`），通过 `VCPKG_MANIFEST_DIR` 切换，产物放在 `build793`，两套互不影响。（第 5 步的窗口没关的话前两行可省略。）
 ```powershell
@@ -99,8 +104,16 @@ cmake -S . -B build793 -G "Visual Studio 17 2022" -A x64 -DCMAKE_TOOLCHAIN_FILE=
 cmake --build build793 --config RelWithDebInfo
 ```
 
-### 第 8 步　两个版本的完整测试（普通权限，约 35–45 分钟，无人值守）
-做什么：每个版本依次跑：兼容单测 → X-07 →（可选 X-06/X-08）→ X-02、L-03 各 3 次 → X-01 1 次 → X-02 读取阶段 10/50/90% 取消 → X-02 转换阶段 20/50/80% 取消。每项单独进程、串行，避免互相抢内存。
+### 第 8 步　两个版本的完整测试（普通权限，约 45–70 分钟，无人值守）
+做什么：每个版本依次跑下面这些，每项单独进程、串行，避免互相抢内存。脚本会把 OCCT 的 DLL 目录加进这一次的 PATH，老板不用自己设。
+
+1. 检查 pdb。缺了只出黄字，并在 `results\<版本>\env.txt` 写 `pdb_missing=...`，然后继续。
+2. 兼容单测。退出码不是 0 就红字停下，说明 vcpkg 清单或 CMake 预设里的 OCCT 版本很可能和实际链接的不一致（期望是 8.0.1 或 7.9.3）。后面的测试一项都不跑。
+3. X-07 →（可选 X-06/X-08）→ X-02、L-03 各 3 次 → X-01 1 次。
+4. X-02 读取阶段 10/50/90% 取消。
+5. X-02 解析盲区取消：文件读完、程序还在建模型时，再等 2 秒请求取消。只有取消请求真的赶在 `ReadStream` 返回之前，结果里才是 `cancel_stage=parsing` 和 `cancel_requested=1`。文件太小、读取先结束，则是 `cancel_stage=not_covered`、`cancel_requested=0`，这不是崩溃。读取本身失败时退出码不是 0。
+6. X-02 转换阶段 20/50/80% 取消。用的是第 1 次的 `transfer_time_s`；第 1 次没有这个数（比如崩了）就改用第 2 次、再没有就用第 3 次。三次都没有，就跳过，并在 `env.txt` 写 `skipped=transfer_cancel`。不会因为找不到这个数而自己报错退出。
+7. 把 `screw.step` 复制到 `C:\sl\样例 目录\screw.step`（文件夹名里有中文和空格），再跑一次 bench。成功时这一项的 `exit=0`。样例没下到或哈希不对就跳过，并写 `skipped=cn_path`，不影响前面已经跑完的结果。
 ```powershell
 Set-Location C:\sl\t02b; powershell -ExecutionPolicy Bypass -File windows\run-t02b.ps1 -Tag 801 -Build build801; powershell -ExecutionPolicy Bypass -File windows\run-t02b.ps1 -Tag 793 -Build build793
 ```
@@ -143,11 +156,15 @@ New-Item -ItemType Directory -Force C:\sl\dumps | Out-Null; $k='HKLM:\SOFTWARE\M
 | X-02 峰值工作集 / 峰值提交（MB） | | |
 | 最长 UserBreak 间隔（X-02 / L-03，s） | | |
 | 读取取消 3 次：返回延迟（ms）/ 是否崩溃 | | |
-| 转换取消 3 次：返回延迟（ms）/ 释放（ms）/ 是否崩溃 | | |
+| 解析盲区取消：`cancel_stage`（parsing 或 not_covered）/ `cancel_requested` / 退出码 | | |
+| 转换取消 3 次：返回延迟（ms）/ 释放（ms）/ 是否崩溃；若跳过，写 skipped | | |
+| 中文路径 `C:\sl\样例 目录\screw.step` 的 exit | | |
+| `env.txt` 里的 `pdb_missing`（没有这行就是 pdb 齐全） | | |
+| `env.txt` 里的 `skipped`（没有这行就是都跑了） | | |
 
 ## spike-m0b.md 的格式（团队填写）
 1. **环境**：第 1 步输出原文（CPU、内存、显卡、磁盘、系统版本）；vcpkg 基线 `2026.10.16`；三元组 `x64-windows-release`；MSVC 版本（`cl` 首行）。
-2. **结果表**：`python windows\summarize.py results\801 results\793` 的输出（每个版本一张阶段耗时/内存表 + 一张取消表）。
+2. **结果表**：`python windows\summarize.py results\801 results\793` 的输出（每个版本一张阶段耗时/内存表 + 一张取消表；取消表多一列「阶段」。解析盲区只有 `cancel_stage=parsing` 且 `cancel_requested=1` 才算覆盖到；`not_covered` 在结果列显示「未覆盖」，退出码不是 0 显示「失败」，不要只看进程有没有崩溃。表前面如果有旁注，就是 `env.txt` 里的 `pdb_missing`、`skipped`、`transfer_time_s_from`）。
 3. **崩溃分析**（如有）：调用栈前 15 帧原文、异常码、触发时的阶段；与 Linux 摸底（`IGESCAFControl_Reader::Transfer`，约 50 s）是否一致。
 4. **与 Linux 摸底对比**：系数 k = Windows X-02「读取 + 转换」÷ 53.0 s；内存比 = Windows X-02 峰值提交 ÷ 1,876 MB（Linux 峰值 RSS）。
 5. **定版结论**：按下面规则，写明选哪个版本、依据哪几行数据。
@@ -161,4 +178,6 @@ New-Item -ItemType Directory -Force C:\sl\dumps | Out-Null; $k='HKLM:\SOFTWARE\M
 | 8.0.1 读任一超大 IGES **崩溃**，7.9.3 全部成功 | **用 7.9.3**。若 7.9.3 的 STEP 比 8.0.1 **慢 ≥ 20%**，仍用 7.9.3（IGES 是 P0），但第 6 节时间目标按 7.9.3 的数据重算并报老板 |
 | 两个版本都崩，或 7.9.3 在任一 STEP 样例上失败 | **不定版**，报老板。候选：8.0.1 + 改用 `IGESControl_Reader`（不带 CAF）试 0.5 天；IGES 放到子进程隔离（约 4–5 人天） |
 | 兼容单测 FAIL，或任一取消测试崩溃 | 先修再定版（属于我们的代码问题，不影响版本判断） |
+| `env.txt` 里有 `skipped=transfer_cancel` | X-02 三次都没有转换耗时，转换取消没跑。先看 X-02 是否崩溃或读取失败，不要把它当成两个 OCCT 版本谁快谁慢的依据 |
+| `env.txt` 里有 `pdb_missing` | 测试可以照跑，但崩溃栈可能没有函数名。把缺的 pdb 补上再看崩溃才好查 |
 | 拿到 8.0.1 的崩溃栈 | 团队整理复现材料，**是否向 OCCT 官方报 bug 由老板决定**（对外发帖） |
