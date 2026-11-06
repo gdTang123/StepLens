@@ -6,6 +6,7 @@
   输出：results\<Tag>\<编号>.txt（key=value）、.err（stderr，崩溃栈在这里）、崩溃时 <编号>.dmp
         results\<Tag>\kit_commit.txt（kit_commit= / git_head=）
         results\<Tag>\env.txt（仅在需要时出现：pdb_missing=、skipped=、transfer_time_s_from=）
+  同一个 Tag 再跑时，先把已有 results\<Tag> 挪到 results\archive\<Tag>-时间，再从空目录记。旧的 env.txt 不会混进来。
   开跑前检查 spike.pdb 和 spike 会加载的 TK*.pdb，缺了只警告、不中断。
   test_compat.exe 退出码不是 0 就立刻停止，后面的测试都不跑。
   耗时：每个版本大约 45–70 分钟（X-07 若崩溃会更短；比旧版多一次 X-02 解析取消和一次小文件中文路径）
@@ -33,6 +34,21 @@ function Join-Under([string[]]$parts) {
     $path = Join-Path $path $parts[$i]
   }
   return $path
+}
+
+function Move-PreviousResults([string]$dir, [string]$tag, [string]$rootDir) {
+  if (-not (Test-Path -LiteralPath $dir)) { return }
+  $archive = Join-Under @($rootDir, "results", "archive")
+  New-Item -ItemType Directory -Force -Path $archive | Out-Null
+  $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+  $dest = Join-Path $archive ($tag + "-" + $stamp)
+  $n = 0
+  while (Test-Path -LiteralPath $dest) {
+    $n++
+    $dest = Join-Path $archive ($tag + "-" + $stamp + "-" + $n)
+  }
+  Move-Item -LiteralPath $dir -Destination $dest
+  Write-Host "上一次的结果已挪到 $dest，这次从空目录重新记。"
 }
 
 function Add-EnvLine([string]$line) {
@@ -354,6 +370,7 @@ $exe  = Join-Under @($root, $Build, "RelWithDebInfo", "spike.exe")
 $compatExe = Join-Under @($root, $Build, "RelWithDebInfo", "test_compat.exe")
 $occtBin = Join-Under @($root, $Build, "vcpkg_installed", "x64-windows-release", "bin")
 $out  = Join-Under @($root, "results", $Tag)
+Move-PreviousResults $out $Tag $root
 New-Item -ItemType Directory -Force -Path $out | Out-Null
 Write-KitIdentity
 

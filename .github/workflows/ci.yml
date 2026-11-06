@@ -10,6 +10,10 @@ on:
     # 以该分支为 base 的 PR 才能直接用。合并后这条分支名可以删掉。
     branches: [main, cursor/fix-qt612-ci-873f]
   workflow_dispatch:
+    # suite 默认 occt793，和改之前一样只跑 7.9.3。
+    # 与并行改本文件的 PR 合并时：保留 inputs.suite；
+    # core/windows 的 if 在原条件上或上 event==workflow_dispatch && inputs.suite=='pr'；
+    # windows-occt-7.9.3 的 if 加上 inputs.suite!='pr'。不要改 concurrency 这一段。
     inputs:
       suite:
         description: "occt793 只编 7.9.3（默认，与原来的手动触发相同）；pr 只跑 core 和 windows-build"

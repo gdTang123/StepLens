@@ -17,7 +17,7 @@ export LD_LIBRARY_PATH=/opt/mm/occt/lib
 ./build/spike bench <file> [--no-mesh]
 ./build/spike cancel-read <file> <已读字节比例 0-1>
 ./build/spike cancel-transfer <file> <进度位置 0-1 | 秒数 >1>
-./build/spike cancel-parse <file> [delay_s]   # 流到 EOF 后再等 delay_s（默认 2）请求取消，打印 cancel_stage=parsing
+./build/spike cancel-parse <file> [delay_s]   # EOF 后再等 delay_s（默认 2）才请求取消；赶上了解析才打印 cancel_stage=parsing
 # 环境变量：SPIKE_NO_PROGRESS=1（Transfer 不挂进度）、SPIKE_IGES_NO_ATTRS=1（IGES 不读颜色/名称）
 ```
 

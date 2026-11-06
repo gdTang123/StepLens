@@ -37,6 +37,26 @@ def status(d, err):
     top = next((l.split("=", 1)[1] for l in err.splitlines() if l.startswith("crash_frame_00")), "")
     return ("崩溃 " + code + (" @ " + top if top else "")) if crashed else "成功"
 
+def cancel_result(d, err):
+    """取消行不能只看 exit。parsing 必须有 cancel_requested=1；否则是未覆盖。退出码非 0 另标失败。"""
+    code = d.get("exit", "?")
+    stage = d.get("cancel_stage", "")
+    requested = d.get("cancel_requested", "")
+    covered = stage == "parsing" and requested in ("1", "1.0")
+    not_covered = stage == "not_covered" or (stage == "parsing" and not covered) or (
+        stage == "" and requested in ("0", "0.0")
+    )
+    failed = "crash_frame_00" in err or code not in ("0", "?")
+    if not_covered and failed:
+        return "失败 " + code + "，未覆盖"
+    if not_covered:
+        return "未覆盖"
+    if failed:
+        return status(d, err)
+    if covered:
+        return "成功"
+    return status(d, err)
+
 for tagdir in map(pathlib.Path, sys.argv[1:]):
     tag = tagdir.name
     # kit_commit.txt 只有提交号（kit_commit= / git_head=），不是样例运行。
@@ -74,4 +94,6 @@ for tagdir in map(pathlib.Path, sys.argv[1:]):
         if not k.startswith("cancel"): continue
         lat = d.get("cancel_latency_readstream_return_ms") or d.get("cancel_latency_transfer_return_ms") or "—"
         stage = d.get("cancel_stage") or "—"
-        print(f"| {k} | {status(d, e)} | {stage} | {f(d,'cancel_req_at_s')} | {lat} | {f(d,'cancel_release_ms',0)} | {f(d,'rss_after_release_mb',0)} |")
+        if "cancel_requested" in d:
+            stage = stage + " / req=" + d["cancel_requested"]
+        print(f"| {k} | {cancel_result(d, e)} | {stage} | {f(d,'cancel_req_at_s')} | {lat} | {f(d,'cancel_release_ms',0)} | {f(d,'rss_after_release_mb',0)} |")

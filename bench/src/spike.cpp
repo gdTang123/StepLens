@@ -3,8 +3,11 @@
 //   spike bench  <file> [--no-mesh]             读取→转换→释放读取器→统计→三角化(粗/方案B/细)
 //   spike cancel-read <file> <fraction>         读取阶段在已读字节达到 fraction 时由另一线程请求取消
 //   spike cancel-transfer <file> <fraction>     转换阶段在进度达到 fraction 时由另一线程请求取消
-//   spike cancel-parse <file> [delay_s]         流读到 EOF 后再等 delay_s（默认 2 秒）请求取消，
-//                                               记录 ReadStream 返回延迟，并打印 cancel_stage=parsing
+//   spike cancel-parse <file> [delay_s]         流读到 EOF 后再等 delay_s（默认 2 秒）请求取消。
+//                                               请求赶在 ReadStream
+//                                               返回前：cancel_stage=parsing，cancel_requested=1。
+//                                               读取先结束：cancel_stage=not_covered，cancel_requested=0。读取失败退出码非
+//                                               0。
 // 所有输出为 "key=value" 行，便于汇总。
 // Windows 上用宽字符命令行打开文件，交给 OCCT 的文件名是 UTF-8（7.9.3 / 8.0.1 按 UTF-8 转成宽路径）。
 #include "occtsupport/occt_compat.h"
@@ -265,6 +268,8 @@ struct WatcherJoin {
 // ---------- 取消标志 ----------
 static std::atomic<bool> g_cancel{false};
 static std::atomic<double> g_cancelReqTime{-1};
+// 只有取消线程在 ReadStream 返回之前真正发出请求时才置位。
+static std::atomic<bool> g_cancelIssued{false};
 
 // ---------- 带进度/取消的 streambuf ----------
 class ProgressStreamBuf : public std::streambuf {
@@ -536,7 +541,40 @@ static void meshLevel(std::vector<Proto>& protos, const std::vector<double>& pdi
 }
 
 // ---------- 主流程 ----------
+// 解析盲区取消的收尾：只有请求落在 ReadStream 返回之前才算 cancel_stage=parsing。
+// 读取失败必须非 0 退出，不能被“取消测试”当成成功。
+static int finishCancelParse(double tr0, double tr1, double delay, bool readOk, ProgressStreamBuf* sb) {
+    const double req = g_cancelReqTime.load(std::memory_order_acquire);
+    const bool issued = g_cancelIssued.load(std::memory_order_acquire);
+    const bool duringParse = issued && req >= 0.0 && req <= tr1;
+    kv("cancel_requested", duringParse ? 1.0 : 0.0);
+    kv("cancel_delay_s", delay);
+    if (sb != nullptr && sb->tEof >= 0)
+        kv("read_end_after_eof_s", tr1 - sb->tEof);
+    if (issued && req >= 0.0) {
+        // 相对读完时刻：负数表示请求发生在 ReadStream 返回之前。
+        kv("cancel_req_minus_read_end_s", req - tr1);
+        kv("cancel_req_at_s", req - tr0);
+        if (sb != nullptr && sb->tEof >= 0)
+            kv("cancel_after_eof_s", req - sb->tEof);
+    }
+    if (duringParse) {
+        kvs("cancel_stage", "parsing");
+        kv("cancel_latency_readstream_return_ms", (tr1 - req) * 1000.0);
+    } else {
+        kvs("cancel_stage", "not_covered");
+    }
+    if (!readOk) {
+        kvs("error", "read failed");
+        return 2;
+    }
+    return 0;
+}
+
 static int run(const std::string& mode, const std::filesystem::path& path, double frac, bool doMesh) {
+    g_cancel.store(false, std::memory_order_relaxed);
+    g_cancelReqTime.store(-1.0, std::memory_order_relaxed);
+    g_cancelIssued.store(false, std::memory_order_relaxed);
     const std::string pathUtf8 = utf8FromPath(path);
     kvs("file", pathUtf8);
     kvs("mode", mode);
@@ -545,8 +583,10 @@ static int run(const std::string& mode, const std::filesystem::path& path, doubl
     kv("rss_start_mb", rssMB());
     bool iges = isIges(pathUtf8);
     if (mode == "cancel-parse" && iges) {
-        kvs("cancel_stage", "parsing");
+        kv("cancel_requested", 0);
+        kvs("cancel_stage", "not_covered");
         kvs("error", "cancel-parse requires STEP");
+        kv("read_ok", 0);
         return 2;
     }
     auto doc = newDoc();
@@ -568,6 +608,8 @@ static int run(const std::string& mode, const std::filesystem::path& path, doubl
         if (!sb->ok()) {
             kvs("error", "open failed");
             kv("read_ok", 0);
+            if (mode == "cancel-parse")
+                return finishCancelParse(tr0, now_s(), frac, false, nullptr);
             return 2;
         }
         if (mode == "cancel-read") {
@@ -596,8 +638,10 @@ static int run(const std::string& mode, const std::filesystem::path& path, doubl
                 }
                 if (readDone.load(std::memory_order_acquire))
                     return;
-                g_cancelReqTime = now_s();
-                g_cancel = true;
+                // 先记下请求时刻，再发布“已发出”。读线程用 req<=读完时刻判断是否落在解析期间。
+                g_cancelReqTime.store(now_s(), std::memory_order_relaxed);
+                g_cancelIssued.store(true, std::memory_order_release);
+                g_cancel.store(true, std::memory_order_release);
             });
         }
         std::istream in(sb.get());
@@ -658,25 +702,14 @@ static int run(const std::string& mode, const std::filesystem::path& path, doubl
         return 0;
     }
     if (mode == "cancel-parse") {
-        kvs("cancel_stage", "parsing");
-        kv("cancel_delay_s", frac);
-        double req = g_cancelReqTime.load();
-        if (req >= 0) {
-            kv("cancel_req_at_s", req - tr0);
-            kv("cancel_latency_readstream_return_ms", (tr1 - req) * 1000);
-            if (sb && sb->tEof >= 0)
-                kv("cancel_after_eof_s", req - sb->tEof);
-        }
         double tx0 = now_s();
         sr.reset();
         doc.Nullify();
         malloc_trim(0);
         double tx1 = now_s();
         kv("cancel_release_ms", (tx1 - tx0) * 1000);
-        if (req >= 0)
-            kv("cancel_total_to_released_ms", (tx1 - req) * 1000);
         kv("rss_after_release_mb", rssMB());
-        return 0;
+        return finishCancelParse(tr0, tr1, frac, readOk, sb.get());
     }
     if (!readOk) {
         kvs("error", "read failed");

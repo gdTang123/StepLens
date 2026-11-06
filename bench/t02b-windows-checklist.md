@@ -90,7 +90,7 @@ Set-Location C:\sl\t02b; powershell -ExecutionPolicy Bypass -File windows\run-t0
 ```
 看结果：`exit=0` 且有 `prototypes=32711` = **不崩**；`exit=-1073741819`（0xC0000005）并打印 `crash_frame_*` = **崩溃**。
 
-开跑前脚本会先看 `spike.pdb` 和 spike 实际会加载的那些 `TK*.pdb` 在不在。窗口如果出现**黄字**「缺少符号文件」，测试**还会继续**，但万一崩溃，调用栈里可能没有函数名。`results\801\env.txt` 里会有一行 `pdb_missing=缺了哪些文件`。pdb 都在的话，不会有这一行。
+开跑前脚本会先看 `spike.pdb` 和 spike 实际会加载的那些 `TK*.pdb` 在不在。窗口如果出现**黄字**「缺少符号文件」，测试**还会继续**，但万一崩溃，调用栈里可能没有函数名。`results\801\env.txt` 里会有一行 `pdb_missing=缺了哪些文件`。pdb 都在的话，不会有这一行。如果 `results\801` 里已经有上次的结果，脚本会先把它整个挪到 `results\archive\801-日期时间`，再新建空的 `results\801`。看结果仍看 `results\801`，不要去翻旧目录，除非要比对上一次。
 
 如果出现**红字**「兼容单测没有通过」，脚本会**立刻停**，X-07 也不会跑。这通常是 OCCT 版本配错了：编译时期望的 8.0.1 或 7.9.3，和实际编进去的不是同一个。请把窗口文字和 `results\801\test_compat.txt` 发回团队，不要自己改配置。
 
@@ -111,7 +111,7 @@ cmake --build build793 --config RelWithDebInfo
 2. 兼容单测。退出码不是 0 就红字停下，说明 vcpkg 清单或 CMake 预设里的 OCCT 版本很可能和实际链接的不一致（期望是 8.0.1 或 7.9.3）。后面的测试一项都不跑。
 3. X-07 →（可选 X-06/X-08）→ X-02、L-03 各 3 次 → X-01 1 次。
 4. X-02 读取阶段 10/50/90% 取消。
-5. X-02 解析盲区取消：文件读完、程序还在建模型时，再等 2 秒请求取消。结果文件里应有 `cancel_stage=parsing`，进程不应崩溃。
+5. X-02 解析盲区取消：文件读完、程序还在建模型时，再等 2 秒请求取消。只有取消请求真的赶在 `ReadStream` 返回之前，结果里才是 `cancel_stage=parsing` 和 `cancel_requested=1`。文件太小、读取先结束，则是 `cancel_stage=not_covered`、`cancel_requested=0`，这不是崩溃。读取本身失败时退出码不是 0。
 6. X-02 转换阶段 20/50/80% 取消。用的是第 1 次的 `transfer_time_s`；第 1 次没有这个数（比如崩了）就改用第 2 次、再没有就用第 3 次。三次都没有，就跳过，并在 `env.txt` 写 `skipped=transfer_cancel`。不会因为找不到这个数而自己报错退出。
 7. 把 `screw.step` 复制到 `C:\sl\样例 目录\screw.step`（文件夹名里有中文和空格），再跑一次 bench。成功时这一项的 `exit=0`。样例没下到或哈希不对就跳过，并写 `skipped=cn_path`，不影响前面已经跑完的结果。
 ```powershell
@@ -156,7 +156,7 @@ New-Item -ItemType Directory -Force C:\sl\dumps | Out-Null; $k='HKLM:\SOFTWARE\M
 | X-02 峰值工作集 / 峰值提交（MB） | | |
 | 最长 UserBreak 间隔（X-02 / L-03，s） | | |
 | 读取取消 3 次：返回延迟（ms）/ 是否崩溃 | | |
-| 解析盲区取消：`cancel_stage=parsing` / 返回延迟（ms）/ 是否崩溃 | | |
+| 解析盲区取消：`cancel_stage`（parsing 或 not_covered）/ `cancel_requested` / 退出码 | | |
 | 转换取消 3 次：返回延迟（ms）/ 释放（ms）/ 是否崩溃；若跳过，写 skipped | | |
 | 中文路径 `C:\sl\样例 目录\screw.step` 的 exit | | |
 | `env.txt` 里的 `pdb_missing`（没有这行就是 pdb 齐全） | | |
@@ -164,7 +164,7 @@ New-Item -ItemType Directory -Force C:\sl\dumps | Out-Null; $k='HKLM:\SOFTWARE\M
 
 ## spike-m0b.md 的格式（团队填写）
 1. **环境**：第 1 步输出原文（CPU、内存、显卡、磁盘、系统版本）；vcpkg 基线 `2026.10.16`；三元组 `x64-windows-release`；MSVC 版本（`cl` 首行）。
-2. **结果表**：`python windows\summarize.py results\801 results\793` 的输出（每个版本一张阶段耗时/内存表 + 一张取消表；取消表多一列「阶段」，解析盲区那行应是 `parsing`。表前面如果有旁注，就是 `env.txt` 里的 `pdb_missing`、`skipped`、`transfer_time_s_from`）。
+2. **结果表**：`python windows\summarize.py results\801 results\793` 的输出（每个版本一张阶段耗时/内存表 + 一张取消表；取消表多一列「阶段」。解析盲区只有 `cancel_stage=parsing` 且 `cancel_requested=1` 才算覆盖到；`not_covered` 在结果列显示「未覆盖」，退出码不是 0 显示「失败」，不要只看进程有没有崩溃。表前面如果有旁注，就是 `env.txt` 里的 `pdb_missing`、`skipped`、`transfer_time_s_from`）。
 3. **崩溃分析**（如有）：调用栈前 15 帧原文、异常码、触发时的阶段；与 Linux 摸底（`IGESCAFControl_Reader::Transfer`，约 50 s）是否一致。
 4. **与 Linux 摸底对比**：系数 k = Windows X-02「读取 + 转换」÷ 53.0 s；内存比 = Windows X-02 峰值提交 ÷ 1,876 MB（Linux 峰值 RSS）。
 5. **定版结论**：按下面规则，写明选哪个版本、依据哪几行数据。
