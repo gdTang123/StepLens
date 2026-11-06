@@ -5,7 +5,8 @@ option(STEPLENS_USE_WNT_WINDOW "Bind the 3D view with WNT_Window instead of QOpe
 
 steplens_add_module(viewer
     ViewerWidget.cpp
-    ViewerWidget.h)
+    ViewerWidget.h
+    GlCleanup.h)
 
 # steplens_add_module 在链接 Qt 之前套语言开关。Qt 会再注入 /utf-8、/permissive-、/Zc:__cplusplus。
 # 先去掉我们加的那一组，只留这一次 /EHsc 和警告。不要再手写 /EH*。
