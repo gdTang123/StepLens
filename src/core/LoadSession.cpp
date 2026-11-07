@@ -12,11 +12,21 @@ void LoadSession::cancel() noexcept {
 }
 
 void LoadSession::noteBackgroundReleased() noexcept {
-    m_released.store(true, std::memory_order_release);
+    {
+        std::lock_guard lock(m_mutex);
+        m_released = true;
+    }
+    m_releasedCv.notify_all();
 }
 
 bool LoadSession::backgroundReleased() const noexcept {
-    return m_released.load(std::memory_order_acquire);
+    std::lock_guard lock(m_mutex);
+    return m_released;
+}
+
+bool LoadSession::waitForBackgroundReleased(std::chrono::milliseconds timeout) const {
+    std::unique_lock lock(m_mutex);
+    return m_releasedCv.wait_for(lock, timeout, [this] { return m_released; });
 }
 
 CancelToken LoadSession::token() const noexcept {

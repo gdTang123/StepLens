@@ -1,8 +1,8 @@
 #pragma once
 
-#include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <mutex>
 #include <string_view>
 
 namespace steplens {
@@ -154,8 +154,11 @@ struct ProgressEstimate {
 };
 
 // 工作线程写阶段和 OCCT 给出的位置。没有回调的空档里，fraction() 用阶段开始时间和预估耗时自己往前走。
-// setFraction 用 CAS，只升不降，多个线程一起写也不会倒退。冻结后忽略后续写入。
-// 进度写端只改 ProgressPhase。LoadStage 由 LoadPipeline 调用 setStage，冻结后 setStage 也不再生效。
+// 定时阶段的 band、起点、预估和 timedPhase 必须整组快照。分开的 relaxed 原子量会在
+// Parsing→Transfer、Transfer/Reading→Presenting 两个窗口里被读端拆开，fraction() 就会倒退。
+// 这里用一把 mutex：TSan 认得锁；seqlock 保护普通字段仍会被 TSan 当成数据竞争。
+// fraction() 再对同一次加载上一次返回的比例做单调钳位。reset() 清掉钳位，下一次加载可以从 0 开始。
+// 冻结后忽略后续写入。进度写端只改 ProgressPhase。LoadStage 由 LoadPipeline 调用 setStage。
 class ProgressSink {
 public:
     void reset(std::uint64_t fileBytes, ProgressEstimate estimate = {}) noexcept;
@@ -184,6 +187,7 @@ public:
     [[nodiscard]] double elapsedSinceLoadStart() const noexcept;
     [[nodiscard]] bool overEstimate() const noexcept;
 
+    // 加载线程在 reset 之后独占读取。不要在 GUI 线程和 reset 并发调用。
     [[nodiscard]] std::uint64_t fileBytes() const noexcept {
         return m_fileBytes;
     }
@@ -192,29 +196,31 @@ public:
     }
 
 private:
-    void touch() noexcept;
+    void touchLocked() noexcept;
+    void setFractionLocked(float fraction) noexcept;
+    void enterTimedPhaseLocked(ProgressPhase phase, float bandStart, float bandEnd,
+                               double estimateSeconds) noexcept;
+    [[nodiscard]] float fractionLocked() const noexcept;
 
-    // 以下原子量由加载线程写、GUI 线程读。relaxed 足够：进度是轮询值，不携带其他数据。
-    std::atomic<LoadStage> m_stage{LoadStage::Idle};
-    std::atomic<ProgressPhase> m_phase{ProgressPhase::Idle};
-    std::atomic<float> m_fraction{0.f};
-    std::atomic<bool> m_indeterminate{false};
-    std::atomic<bool> m_frozen{false};
-    std::atomic<bool> m_timedPhase{false};
-    std::atomic<std::int64_t> m_lastChangeNs{0};
-    std::atomic<std::int64_t> m_loadStartNs{0};
-    std::atomic<std::int64_t> m_phaseStartNs{0};
-    std::atomic<float> m_timedBandStart{0.f};
-    std::atomic<float> m_timedBandEnd{0.f};
-    std::atomic<double> m_phaseEstimateSeconds{0.0};
+    // 保护定时阶段快照、已写入比例、阶段、冻结标志，以及同一次加载的已发布比例。
+    mutable std::mutex m_mutex;
+    mutable float m_published = 0.f;
 
-    // reset 之后由加载线程读文件大小和系数。fraction() 不读它们。
+    LoadStage m_stage = LoadStage::Idle;
+    ProgressPhase m_phase = ProgressPhase::Idle;
+    float m_fraction = 0.f;
+    bool m_indeterminate = false;
+    bool m_frozen = false;
+    bool m_timedPhase = false;
+    std::int64_t m_lastChangeNs = 0;
+    std::int64_t m_loadStartNs = 0;
+    std::int64_t m_phaseStartNs = 0;
+    float m_timedBandStart = 0.f;
+    float m_timedBandEnd = 0.f;
+    double m_phaseEstimateSeconds = 0.0;
+
     std::uint64_t m_fileBytes = 0;
     ProgressEstimate m_estimate{};
-
-    void enterTimedPhase(ProgressPhase phase, float bandStart, float bandEnd,
-                         double estimateSeconds) noexcept;
-    [[nodiscard]] float timedFractionNow() const noexcept;
 };
 
 } // namespace steplens

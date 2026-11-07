@@ -12,57 +12,80 @@ constexpr double kNsPerSecond = 1'000'000'000.0;
 
 } // namespace
 
-void ProgressSink::touch() noexcept {
-    m_lastChangeNs.store(steadyNs(), std::memory_order_relaxed);
+void ProgressSink::touchLocked() noexcept {
+    m_lastChangeNs = steadyNs();
+}
+
+void ProgressSink::setFractionLocked(float fraction) noexcept {
+    fraction = clampUnit(fraction);
+    if (m_frozen) {
+        return;
+    }
+    if (fraction > m_fraction) {
+        m_fraction = fraction;
+        touchLocked();
+    }
+}
+
+void ProgressSink::enterTimedPhaseLocked(ProgressPhase phase, float bandStart, float bandEnd,
+                                         double estimateSeconds) noexcept {
+    if (m_frozen) {
+        return;
+    }
+    m_phase = phase;
+    m_timedBandStart = bandStart;
+    m_timedBandEnd = bandEnd;
+    m_phaseEstimateSeconds = estimateSeconds;
+    m_phaseStartNs = steadyNs();
+    m_timedPhase = true;
+    setFractionLocked(bandStart);
+}
+
+float ProgressSink::fractionLocked() const noexcept {
+    float value = m_fraction;
+    if (!m_frozen && m_timedPhase) {
+        const double elapsed = static_cast<double>(steadyNs() - m_phaseStartNs) / kNsPerSecond;
+        const float timed =
+            progressFromTimedBand(m_timedBandStart, m_timedBandEnd, elapsed, m_phaseEstimateSeconds);
+        if (timed > value) {
+            value = timed;
+        }
+    }
+    if (value < m_published) {
+        value = m_published;
+    } else {
+        m_published = value;
+    }
+    return value;
 }
 
 void ProgressSink::reset(std::uint64_t fileBytes, ProgressEstimate estimate) noexcept {
+    std::lock_guard lock(m_mutex);
     m_fileBytes = fileBytes;
     m_estimate = estimate;
-    m_frozen.store(false, std::memory_order_relaxed);
-    m_timedPhase.store(false, std::memory_order_relaxed);
-    m_indeterminate.store(false, std::memory_order_relaxed);
-    m_fraction.store(0.f, std::memory_order_relaxed);
-    m_stage.store(LoadStage::Idle, std::memory_order_relaxed);
-    m_phase.store(ProgressPhase::Idle, std::memory_order_relaxed);
-    m_phaseEstimateSeconds.store(0.0, std::memory_order_relaxed);
+    m_frozen = false;
+    m_timedPhase = false;
+    m_indeterminate = false;
+    m_fraction = 0.f;
+    m_published = 0.f;
+    m_stage = LoadStage::Idle;
+    m_phase = ProgressPhase::Idle;
+    m_phaseEstimateSeconds = 0.0;
+    m_timedBandStart = 0.f;
+    m_timedBandEnd = 0.f;
     const auto now = steadyNs();
-    m_loadStartNs.store(now, std::memory_order_relaxed);
-    m_phaseStartNs.store(now, std::memory_order_relaxed);
-    touch();
-}
-
-void ProgressSink::enterTimedPhase(ProgressPhase phase, float bandStart, float bandEnd,
-                                   double estimateSeconds) noexcept {
-    if (m_frozen.load(std::memory_order_relaxed)) {
-        return;
-    }
-    m_phase.store(phase, std::memory_order_relaxed);
-    m_timedBandStart.store(bandStart, std::memory_order_relaxed);
-    m_timedBandEnd.store(bandEnd, std::memory_order_relaxed);
-    m_phaseEstimateSeconds.store(estimateSeconds, std::memory_order_relaxed);
-    m_phaseStartNs.store(steadyNs(), std::memory_order_relaxed);
-    m_timedPhase.store(true, std::memory_order_relaxed);
-    setFraction(bandStart);
-}
-
-float ProgressSink::timedFractionNow() const noexcept {
-    if (!m_timedPhase.load(std::memory_order_relaxed)) {
-        return 0.f;
-    }
-    const auto start = m_phaseStartNs.load(std::memory_order_relaxed);
-    const double elapsed = static_cast<double>(steadyNs() - start) / kNsPerSecond;
-    return progressFromTimedBand(m_timedBandStart.load(std::memory_order_relaxed),
-                                 m_timedBandEnd.load(std::memory_order_relaxed), elapsed,
-                                 m_phaseEstimateSeconds.load(std::memory_order_relaxed));
+    m_loadStartNs = now;
+    m_phaseStartNs = now;
+    touchLocked();
 }
 
 void ProgressSink::setReadingBytes(std::uint64_t bytesRead) noexcept {
-    if (m_frozen.load(std::memory_order_relaxed)) {
+    std::lock_guard lock(m_mutex);
+    if (m_frozen) {
         return;
     }
-    m_timedPhase.store(false, std::memory_order_relaxed);
-    m_phase.store(ProgressPhase::ReadingBytes, std::memory_order_relaxed);
+    m_timedPhase = false;
+    m_phase = ProgressPhase::ReadingBytes;
     float fileFraction = 1.f;
     if (m_fileBytes > 0) {
         if (bytesRead > m_fileBytes) {
@@ -70,143 +93,139 @@ void ProgressSink::setReadingBytes(std::uint64_t bytesRead) noexcept {
         }
         fileFraction = static_cast<float>(static_cast<double>(bytesRead) / static_cast<double>(m_fileBytes));
     }
-    setFraction(progressFromReadingBytes(fileFraction));
+    setFractionLocked(progressFromReadingBytes(fileFraction));
 }
 
 void ProgressSink::enterParsing() noexcept {
-    enterTimedPhase(ProgressPhase::Parsing, kReadingBandEnd, kParsingBandEnd,
-                    m_estimate.parseSeconds(m_fileBytes));
+    std::lock_guard lock(m_mutex);
+    enterTimedPhaseLocked(ProgressPhase::Parsing, kReadingBandEnd, kParsingBandEnd,
+                          m_estimate.parseSeconds(m_fileBytes));
 }
 
 void ProgressSink::setParsingElapsed(double elapsedSeconds) noexcept {
-    if (m_phase.load(std::memory_order_relaxed) != ProgressPhase::Parsing) {
-        enterParsing();
+    std::lock_guard lock(m_mutex);
+    if (m_phase != ProgressPhase::Parsing) {
+        enterTimedPhaseLocked(ProgressPhase::Parsing, kReadingBandEnd, kParsingBandEnd,
+                              m_estimate.parseSeconds(m_fileBytes));
     }
-    if (m_frozen.load(std::memory_order_relaxed)) {
+    if (m_frozen) {
         return;
     }
-    setFraction(progressFromTimedBand(kReadingBandEnd, kParsingBandEnd, elapsedSeconds,
-                                      m_estimate.parseSeconds(m_fileBytes)));
+    setFractionLocked(progressFromTimedBand(kReadingBandEnd, kParsingBandEnd, elapsedSeconds,
+                                            m_estimate.parseSeconds(m_fileBytes)));
 }
 
 void ProgressSink::enterTransfer() noexcept {
-    enterTimedPhase(ProgressPhase::Transferring, kParsingBandEnd, kTransferBandEnd,
-                    m_estimate.transferSeconds(m_fileBytes));
+    std::lock_guard lock(m_mutex);
+    enterTimedPhaseLocked(ProgressPhase::Transferring, kParsingBandEnd, kTransferBandEnd,
+                          m_estimate.transferSeconds(m_fileBytes));
 }
 
 void ProgressSink::setTransfer(float occtFraction, double elapsedSeconds) noexcept {
-    if (m_phase.load(std::memory_order_relaxed) != ProgressPhase::Transferring) {
-        enterTransfer();
+    std::lock_guard lock(m_mutex);
+    if (m_phase != ProgressPhase::Transferring) {
+        enterTimedPhaseLocked(ProgressPhase::Transferring, kParsingBandEnd, kTransferBandEnd,
+                              m_estimate.transferSeconds(m_fileBytes));
     }
-    if (m_frozen.load(std::memory_order_relaxed)) {
+    if (m_frozen) {
         return;
     }
-    // 存 OCCT 位置。时间推进由 fraction() 在读的时候算，这样没有回调的空档也会往前走。
-    const float fromOcct = progressFromTransfer(occtFraction, 0.0, m_estimate.transferSeconds(m_fileBytes));
-    const float fromCaller =
-        progressFromTransfer(0.f, elapsedSeconds, m_estimate.transferSeconds(m_fileBytes));
-    setFraction(fromOcct > fromCaller ? fromOcct : fromCaller);
+    const double estimateSeconds = m_estimate.transferSeconds(m_fileBytes);
+    const float fromOcct = progressFromTransfer(occtFraction, 0.0, estimateSeconds);
+    const float fromCaller = progressFromTransfer(0.f, elapsedSeconds, estimateSeconds);
+    setFractionLocked(fromOcct > fromCaller ? fromOcct : fromCaller);
 }
 
 void ProgressSink::setPresentFaceFraction(float faceFraction) noexcept {
-    if (m_frozen.load(std::memory_order_relaxed)) {
+    std::lock_guard lock(m_mutex);
+    if (m_frozen) {
         return;
     }
-    m_timedPhase.store(false, std::memory_order_relaxed);
-    m_phase.store(ProgressPhase::Presenting, std::memory_order_relaxed);
-    setFraction(progressFromPresenting(faceFraction));
+    m_timedPhase = false;
+    m_phase = ProgressPhase::Presenting;
+    setFractionLocked(progressFromPresenting(faceFraction));
 }
 
 void ProgressSink::beginCancel() noexcept {
-    m_frozen.store(true, std::memory_order_relaxed);
-    const float written = m_fraction.load(std::memory_order_relaxed);
-    const float timed = timedFractionNow();
-    m_fraction.store(timed > written ? timed : written, std::memory_order_relaxed);
-    m_timedPhase.store(false, std::memory_order_relaxed);
-    m_stage.store(LoadStage::Cancelling, std::memory_order_relaxed);
-    m_phase.store(ProgressPhase::Cancelling, std::memory_order_relaxed);
+    std::lock_guard lock(m_mutex);
+    const float shown = fractionLocked();
+    m_fraction = shown;
+    m_published = shown;
+    m_frozen = true;
+    m_timedPhase = false;
+    m_stage = LoadStage::Cancelling;
+    m_phase = ProgressPhase::Cancelling;
+    touchLocked();
 }
 
 void ProgressSink::setStage(LoadStage stage) noexcept {
-    if (m_frozen.load(std::memory_order_relaxed)) {
+    std::lock_guard lock(m_mutex);
+    if (m_frozen) {
         return;
     }
-    m_stage.store(stage, std::memory_order_relaxed);
+    m_stage = stage;
 }
 
 void ProgressSink::setFraction(float fraction) noexcept {
-    fraction = clampUnit(fraction);
-    float previous = m_fraction.load(std::memory_order_relaxed);
-    while (fraction > previous) {
-        if (m_frozen.load(std::memory_order_relaxed)) {
-            return;
-        }
-        if (m_fraction.compare_exchange_weak(previous, fraction, std::memory_order_relaxed,
-                                             std::memory_order_relaxed)) {
-            touch();
-            return;
-        }
-    }
+    std::lock_guard lock(m_mutex);
+    setFractionLocked(fraction);
 }
 
 void ProgressSink::setIndeterminate(bool indeterminate) noexcept {
-    m_indeterminate.store(indeterminate, std::memory_order_relaxed);
+    std::lock_guard lock(m_mutex);
+    m_indeterminate = indeterminate;
 }
 
 LoadStage ProgressSink::stage() const noexcept {
-    return m_stage.load(std::memory_order_relaxed);
+    std::lock_guard lock(m_mutex);
+    return m_stage;
 }
 
 ProgressPhase ProgressSink::phase() const noexcept {
-    return m_phase.load(std::memory_order_relaxed);
+    std::lock_guard lock(m_mutex);
+    return m_phase;
 }
 
 float ProgressSink::fraction() const noexcept {
-    const float written = m_fraction.load(std::memory_order_relaxed);
-    if (m_frozen.load(std::memory_order_relaxed)) {
-        return written;
-    }
-    const float timed = timedFractionNow();
-    return timed > written ? timed : written;
+    std::lock_guard lock(m_mutex);
+    return fractionLocked();
 }
 
 bool ProgressSink::indeterminate() const noexcept {
-    return m_indeterminate.load(std::memory_order_relaxed);
+    std::lock_guard lock(m_mutex);
+    return m_indeterminate;
 }
 
 bool ProgressSink::cancelFrozen() const noexcept {
-    return m_frozen.load(std::memory_order_relaxed);
+    std::lock_guard lock(m_mutex);
+    return m_frozen;
 }
 
 bool ProgressSink::unchangedFor(std::chrono::milliseconds budget) const noexcept {
-    const auto changedAt = m_lastChangeNs.load(std::memory_order_relaxed);
-    if (changedAt == 0 || budget.count() <= 0) {
+    std::lock_guard lock(m_mutex);
+    if (m_lastChangeNs == 0 || budget.count() <= 0) {
         return false;
     }
-    const auto elapsedNs = steadyNs() - changedAt;
+    const auto elapsedNs = steadyNs() - m_lastChangeNs;
     const auto budgetNs = std::chrono::duration_cast<std::chrono::nanoseconds>(budget).count();
     return elapsedNs >= budgetNs;
 }
 
 double ProgressSink::elapsedSinceLoadStart() const noexcept {
-    const auto start = m_loadStartNs.load(std::memory_order_relaxed);
-    if (start == 0) {
+    std::lock_guard lock(m_mutex);
+    if (m_loadStartNs == 0) {
         return 0.0;
     }
-    return static_cast<double>(steadyNs() - start) / kNsPerSecond;
+    return static_cast<double>(steadyNs() - m_loadStartNs) / kNsPerSecond;
 }
 
 bool ProgressSink::overEstimate() const noexcept {
-    if (!m_timedPhase.load(std::memory_order_relaxed)) {
+    std::lock_guard lock(m_mutex);
+    if (!m_timedPhase || !(m_phaseEstimateSeconds > 0.0)) {
         return false;
     }
-    const double estimate = m_phaseEstimateSeconds.load(std::memory_order_relaxed);
-    if (!(estimate > 0.0)) {
-        return false;
-    }
-    const auto start = m_phaseStartNs.load(std::memory_order_relaxed);
-    const double elapsed = static_cast<double>(steadyNs() - start) / kNsPerSecond;
-    return elapsed > estimate;
+    const double elapsed = static_cast<double>(steadyNs() - m_phaseStartNs) / kNsPerSecond;
+    return elapsed > m_phaseEstimateSeconds;
 }
 
 } // namespace steplens
