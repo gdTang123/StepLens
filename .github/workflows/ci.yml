@@ -1,26 +1,33 @@
 name: ci
 
-# PR，以及推送到 main 或 v* 标签。私有仓库的 Windows 分钟数按倍率计费，不设矩阵、不设 schedule。
-# 二进制缓存未命中时会从源码编译 OCCT 8.0.1，第一次大约两个半小时，超时留到四小时，避免缓存上传被掐掉。
-# 只改文档时不触发：docs/**（含图片等非 Markdown），以及任意位置的 .md。
-# bench 清单因此跳过。bench 的代码、脚本和 CMake 不匹配这些模式，改了仍会跑。
-# workflow、vcpkg 清单、packaging 脚本和 CMake 逻辑同样不在忽略列表里。
-# 标签推送不做路径过滤（GitHub 不对 tag 计算 paths-ignore），v* 总会跑，并在 Windows 作业里打 zip。
+# 2026-11：gdTang123 本月 Actions 免费分钟已用完，12/1 才重置。在此之前不随 push / pull_request 跑重型作业。
+# 作业都保留。Actions 页手动 Run workflow：
+#   suite=occt793（默认）只跑 windows-occt-7.9.3
+#   suite=pr 跑 core-tests-tsan（TSan）和 windows-build（Windows 上编 OCCT 8.0.1）
+# 二进制缓存未命中时 Windows 作业仍会从源码编译 OCCT，超时仍是 240 分钟。
+# 私有仓库的 Windows 分钟数按倍率计费，不设矩阵、不设 schedule。
+# 12/1 恢复：只把 on: 换回 pull_request / push，workflow_dispatch 的 inputs 保持不动。job 的 if 不用改。
+# 恢复后，非手动事件跑 core 和 windows-build；7.9.3 仍只在手动且 suite 不是 pr 时跑。
+# 路径过滤与暂停前相同：docs/** 和任意 .md 不触发；v* 标签不做路径过滤，并在 Windows 作业里打 zip。
+# 恢复用的 on: 如下（inputs 用本文件里现在的 suite，不要删）：
+# on:
+#   pull_request:
+#     paths-ignore:
+#       - 'docs/**'
+#       - '*.md'
+#       - '**.md'
+#       - '**/*.md'
+#   push:
+#     branches: [main]
+#     tags: ['v*']
+#     paths-ignore:
+#       - 'docs/**'
+#       - '*.md'
+#       - '**.md'
+#       - '**/*.md'
+#   workflow_dispatch:
+#     inputs 保持本文件里现有的 suite，不要另写一份。
 on:
-  pull_request:
-    paths-ignore:
-      - 'docs/**'
-      - '*.md'
-      - '**.md'
-      - '**/*.md'
-  push:
-    branches: [main]
-    tags: ['v*']
-    paths-ignore:
-      - 'docs/**'
-      - '*.md'
-      - '**.md'
-      - '**/*.md'
   workflow_dispatch:
     inputs:
       suite:

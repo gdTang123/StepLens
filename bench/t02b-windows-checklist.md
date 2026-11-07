@@ -4,6 +4,8 @@
 > 目的：① 8.0.1 在 Windows + vcpkg 下读超大 IGES（X-07）还崩不崩；② 两个版本 STEP 的速度和内存；③ Windows 内存口径与取消行为。**GPU 帧率不在这里测**（需要 Qt 和显示代码），挪到 T19 在团队电脑上测。
 > 约定：每一步是**一条**可单独批准的命令（PowerShell）。🔒 = 需要管理员（UAC 弹窗）；其余普通权限。耗时都是估计值，未实测。
 
+老板这台电脑请改看 [Windows 本地构建](../docs/bench/windows-local-build.md)：本机是 VS 2026（`D:\others\VS`，生成器 `Visual Studio 18 2026`），访问不了 github.com，不要用第 2、5、7 步里的 VS 2022 BuildTools 路径和 `Visual Studio 17 2022`。
+
 ## 老板提前准备
 
 | 项 | 要求 |
