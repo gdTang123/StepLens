@@ -1,28 +1,24 @@
 name: occt-contract
 
 # G1-7：Linux 无头 OCCT 内核契约单测。独立于 ci.yml，周严接入主流程时可以整份搬。
+# 只在契约测试、occtsupport、cmake 或本 workflow 变化时跑，避免每个 PR 都装两套 OCCT。
 # 预编译包没有插桩。ASan 覆盖本仓库的测试代码，看不到 TK* 内部的数据竞争。
-# 矩阵会装 OCCT 8.0.1 和 7.9.3，属于重型作业。2026-11 分钟用尽，12/1 前只允许手动触发。
-# 手动 Run workflow 会把矩阵里的两个版本都跑完。作业没有删，timeout 仍是 45 分钟。
-# 12/1 恢复：把 on: 换回下面的 pull_request / push（paths 与暂停前相同），并保留 workflow_dispatch。
-# on:
-#   pull_request:
-#     paths:
-#       - "tests/**"
-#       - "src/occtsupport/**"
-#       - "cmake/**"
-#       - "CMakeLists.txt"
-#       - ".github/workflows/occt-contract.yml"
-#   push:
-#     branches: [main]
-#     paths:
-#       - "tests/**"
-#       - "src/occtsupport/**"
-#       - "cmake/**"
-#       - "CMakeLists.txt"
-#       - ".github/workflows/occt-contract.yml"
-#   workflow_dispatch:
 on:
+  pull_request:
+    paths:
+      - "tests/**"
+      - "src/occtsupport/**"
+      - "cmake/**"
+      - "CMakeLists.txt"
+      - ".github/workflows/occt-contract.yml"
+  push:
+    branches: [main]
+    paths:
+      - "tests/**"
+      - "src/occtsupport/**"
+      - "cmake/**"
+      - "CMakeLists.txt"
+      - ".github/workflows/occt-contract.yml"
   workflow_dispatch:
 
 permissions:
