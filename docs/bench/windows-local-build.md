@@ -1,6 +1,6 @@
 # 老板电脑：Windows 本地构建与 T02b
 
-本月 GitHub Actions 分钟用完。下面第 0 到第 5 段只在这台电脑上跑 T02b 摸底（`bench/`）。**VS 2026 本地跑的 T02b 不能替代 windows-2022 / VS 2022 / MSVC 14.44 的 CI 回执，主工程未被覆盖。** 这几段编出来的是 `spike.exe` 和 `test_compat.exe`，没有主工程的 `StepLens.exe`，也没有 `msvc-occt793` 的配置输出、Ninja 全量构建日志和 `ctest` 结果。主工程要另在完整源码树上按文末「后续验收证据清单」留证；那一份证据仍要写明实际工具链，不能当成上述 CI 回执。
+CI 已恢复。本地构建只作为备用方案，例如 CI 不可用，或老板想在本机复现时。下面第 0 到第 5 段只在这台电脑上跑 T02b 摸底（`bench/`）。**VS 2026 本地跑的 T02b 不能替代 windows-2022 / VS 2022 / MSVC 14.44 的 CI 回执，主工程未被覆盖。** 这几段编出来的是 `spike.exe` 和 `test_compat.exe`，没有主工程的 `StepLens.exe`，也没有 `msvc-occt793` 的配置输出、Ninja 全量构建日志和 `ctest` 结果。主工程要另在完整源码树上按文末「后续验收证据清单」留证；那一份证据仍要写明实际工具链，不能当成上述 CI 回执。
 
 下面每一段用 **Windows PowerShell 5.1** 整段粘贴（开始菜单里的「Windows PowerShell」，不是 PowerShell 7）。先粘「0. 准备环境」，然后按顺序粘，**不要关这个窗口**。某一段报错就停在那一段，把窗口里从第一条 `error` / `fatal` 开始的原文发回团队。
 
