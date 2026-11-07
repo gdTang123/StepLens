@@ -1,8 +1,10 @@
 # 老板电脑：Windows 本地构建与 T02b
 
-本月 GitHub Actions 分钟用完，Windows 构建改在这台电脑上跑。下面每一段用 **Windows PowerShell 5.1** 整段粘贴（开始菜单里的「Windows PowerShell」，不是 PowerShell 7）。先粘「0. 准备环境」，然后按顺序粘，**不要关这个窗口**。某一段报错就停在那一段，把窗口里从第一条 `error` / `fatal` 开始的原文发回团队。
+本月 GitHub Actions 分钟用完。下面第 0 到第 5 段只在这台电脑上跑 T02b 摸底（`bench/`）。**VS 2026 本地跑的 T02b 不能替代 windows-2022 / VS 2022 / MSVC 14.44 的 CI 回执，主工程未被覆盖。** 这几段编出来的是 `spike.exe` 和 `test_compat.exe`，没有主工程的 `StepLens.exe`，也没有 `msvc-occt793` 的配置输出、Ninja 全量构建日志和 `ctest` 结果。主工程要另在完整源码树上按文末「后续验收证据清单」留证；那一份证据仍要写明实际工具链，不能当成上述 CI 回执。
 
-这是 `bench/` 摸底工具，不是主工程。不要用仓库根上的 CMake 预设 `msvc` 或 `msvc-occt793`：那两个预设的三元组是 `x64-windows`，给 CI 里的主工程用。`bench/windows/run-t02b.ps1` 只到 `vcpkg_installed\x64-windows-release\bin` 找 OCCT 的 DLL。
+下面每一段用 **Windows PowerShell 5.1** 整段粘贴（开始菜单里的「Windows PowerShell」，不是 PowerShell 7）。先粘「0. 准备环境」，然后按顺序粘，**不要关这个窗口**。某一段报错就停在那一段，把窗口里从第一条 `error` / `fatal` 开始的原文发回团队。
+
+现有 kit（`scripts/make_t02b_kit.py` 打出来的那份）只有 `KIT_COMMIT`、`bench\`、`src\occtsupport\`。不要在这份只含 bench 的 kit 上直接跑主工程预设 `msvc`、`msvc-occt793`、`release-occt793`、`unit-occt793`。这些预设写在仓库根的 `CMakePresets.json` 里，生成器是 Ninja Multi-Config，三元组是 `x64-windows`，还要仓库根的 `CMakeLists.txt`、`vcpkg-configs/occt-7.9.3`、Qt 和 `scripts\`。`bench/windows/run-t02b.ps1` 只到 `vcpkg_installed\x64-windows-release\bin` 找 OCCT 的 DLL。
 
 清单 `t02b-windows-checklist.md` 第 2、5、7 步写的是 VS 2022 BuildTools 和生成器 `Visual Studio 17 2022`。这台机器不要用那三步。
 
@@ -146,7 +148,11 @@ Write-Host '依赖源码已解压。不要关掉 X_VCPKG_ASSET_SOURCES。回到�
 
 `-Quick` 先看 8.0.1 的 X-07 崩不崩。完整测试不带 `-Quick`：兼容单测、X-07、可选的 X-06/X-08、X-02 与 L-03 各 3 次、X-01、取消、中文路径。同一 `Tag` 再跑时，脚本先把已有的 `results\<Tag>` 挪到 `results\archive\<Tag>-时间`。所以完整测试跑完之后，要看的是新的 `results\801` 和 `results\793`，不是 archive 里 Quick 那次。
 
-X-07 用的大文件是 `C:\sl\samples\PX13226.IGS`。没有样例就不要跑。`screw.step` 下不到时，脚本在 `env.txt` 写 `skipped=cn_path` 并继续，这不是崩溃。
+X-07 用的大文件是 `C:\sl\samples\PX13226.IGS`。没有样例就不要跑。
+
+完整跑（不带 `-Quick`）走到中文路径时，`run-t02b.ps1` 的 `Get-ScrewStep` 会检查 `C:\sl\samples\screw.step`（默认 `-Samples C:\sl\samples`，文件名必须是 `screw.step`）。文件不在，或 SHA256 不是 `4B3649A4F5C4F05C7A06A402A91FE2FD7E3CBA1615520FBD8C62A62610AD3E69`（OCCT V7_9_3 这份，88,552 字节）时，脚本会执行 `curl.exe -L --fail --retry 2`，地址是 `https://raw.githubusercontent.com/Open-Cascade-SAS/OCCT/V7_9_3/data/step/screw.step`。`GIT_NO_LAZY_FETCH` 和 `X_VCPKG_ASSET_SOURCES` 管的是 git 和 vcpkg，管不到这一步。`-Quick` 在 X-07 之后就返回，不会下载这个文件。
+
+预先放到 `C:\sl\samples\screw.step`，文件名就是 `screw.step`，并用上面的 SHA256 核对通过，完整跑才不会去访问 raw.githubusercontent.com。脚本自己会把它复制到 `C:\sl\样例 目录\screw.step`。curl 失败或下下来的哈希不对时，才在 `env.txt` 写 `skipped=cn_path` 并继续，这不是崩溃。
 
 先看崩不崩：
 
@@ -171,6 +177,8 @@ powershell -ExecutionPolicy Bypass -File windows\run-t02b.ps1 -Tag 793 -Build bu
 黄字「缺少符号文件」只说明 pdb 不齐，测试还会继续。`results\<Tag>\env.txt` 里会有 `pdb_missing=`。
 
 ## 4. 结果放在哪
+
+下面这些文件只是 T02b 摸底结果。它们不是 windows-2022 / VS 2022 / MSVC 14.44 的 CI 回执，也不覆盖主工程。主工程的验收证据见第 6 节，而且不要拿 `C:\sl\t02b` 这份 kit 去跑。
 
 都在 `$Bench\results\` 下（`$Bench` 是 `C:\sl\t02b` 时就是 `C:\sl\t02b\results`；kit 原样解压时是 `C:\sl\t02b\bench\results`）。
 
@@ -228,3 +236,46 @@ X-07 不崩的看 txt：`exit=0`，并且有 `prototypes=32711`。
 ### 找不到 occt_compat.h
 
 cmake 停在「找不到 occtsupport/occt_compat.h」。说明 `$Bench` 的上一级没有 `src\occtsupport\occt_compat.h`，bench 目录里也没有扁平的 `occtsupport\occt_compat.h`。看第 0 段打印的 `Bench=`。kit 原样解压时 bench 是 `C:\sl\t02b\bench`，头文件应在 `C:\sl\t02b\src\occtsupport\occt_compat.h`。不要把 `cmake -S` 指到 `C:\sl\t02b` 的 zip 根上（那里没有 `CMakeLists.txt`，除非第 0 段已经把 `$Bench` 判成 `C:\sl\t02b`）。
+
+## 6. 后续验收证据清单
+
+这一节不在第 0 到第 5 段里做。现有 kit 只有 bench，没有仓库根的 `CMakeLists.txt`、`CMakePresets.json`、`vcpkg-configs\occt-7.9.3` 和 `scripts\`。不要在 `C:\sl\t02b` 上直接跑下面三个预设。
+
+等有完整源码树时，在仓库根做。预设名以 `CMakePresets.json` 为准：
+
+- 配置预设 `msvc-occt793`：继承 `base`，生成器 Ninja Multi-Config，构建目录 `build/msvc-occt793`，三元组 `x64-windows`，`VCPKG_MANIFEST_DIR` 指向 `${sourceDir}/vcpkg-configs/occt-7.9.3`，`STEPLENS_EXPECTED_OCCT` 为 `7.9.3`。需要环境变量 `VCPKG_ROOT` 和 `QTDIR`。
+- 构建预设 `release-occt793`：配置类型 RelWithDebInfo，对应上面的配置预设。
+- 测试预设 `unit-occt793`：同一构建目录，排除标签 `bench|large`。
+
+先 `Set-Location` 到仓库根（这一层要有 `CMakePresets.json`），再删掉旧的 `build\msvc-occt793`，然后配置、全量构建。这样 `build-occt793.log` 才是干净的 Ninja 全量日志。命令和 CI 里 `windows-occt-7.9.3` 作业相同；本机没有 `pwsh` 时用 Windows PowerShell 5.1 的 `powershell -File`。脚本参数以仓库为准：`scripts/check_build_log.ps1` 只有必填参数 `-Log`；`scripts/verify_occt_link.ps1` 必填 `-BuildDir`，链接报告用 `-Report`。
+
+```powershell
+git rev-parse HEAD
+cmake --version
+ninja --version
+cmd /c "cl 2>&1" | Select-Object -First 2
+if (Test-Path build\msvc-occt793) { Remove-Item -Recurse -Force build\msvc-occt793 }
+cmake --preset msvc-occt793
+if ($LASTEXITCODE -ne 0) { throw "cmake --preset msvc-occt793 失败，退出码 $LASTEXITCODE" }
+cmd /c "cmake --build --preset release-occt793 > build-occt793.log 2>&1"
+$buildCode = $LASTEXITCODE
+Get-Content -LiteralPath build-occt793.log
+if ($buildCode -ne 0) { throw "cmake --build --preset release-occt793 失败，退出码 $buildCode" }
+powershell -ExecutionPolicy Bypass -File scripts\check_build_log.ps1 -Log build-occt793.log
+if ($LASTEXITCODE -ne 0) { throw "check_build_log.ps1 未通过，退出码 $LASTEXITCODE" }
+ctest --preset unit-occt793
+if ($LASTEXITCODE -ne 0) { throw "ctest --preset unit-occt793 失败，退出码 $LASTEXITCODE" }
+powershell -ExecutionPolicy Bypass -File scripts\verify_occt_link.ps1 -BuildDir build\msvc-occt793 -Report build\msvc-occt793\occt-link-report.txt
+if ($LASTEXITCODE -ne 0) { throw "verify_occt_link.ps1 未通过，退出码 $LASTEXITCODE" }
+```
+
+把下面六项原文留下。VS 2026 上跑的，在工具链那一项写明 `cl` 首行；不要把这份记录标成 windows-2022 / VS 2022 / MSVC 14.44 的 CI 回执。
+
+| 证据 | 从哪来 | 留下什么 |
+|---|---|---|
+| 源码 SHA 和工具链版本 | `git rev-parse HEAD`、`cmake --version`、`ninja --version`、`cl` 首行 | 四条原文，并写明机器和 Visual Studio 版本 |
+| configure 输出里的 7.9.3 版本行 | `cmake --preset msvc-occt793` 的输出 | `OpenCASCADE 7.9.3` 这一行。它来自仓库根 `CMakeLists.txt` 的 `message(STATUS "OpenCASCADE ${OpenCASCADE_VERSION}")` |
+| 干净的 Ninja 全量构建日志 | 删除 `build\msvc-occt793` 之后的 `build-occt793.log` | 整份日志。预设生成器是 Ninja Multi-Config，这次是全量，不是增量 |
+| ctest 用例数量 | `ctest --preset unit-occt793` 的结尾汇总 | 含用例总数的那一行（`tests passed` 里的总数），不要只写「通过」 |
+| `check_build_log.ps1` 的结果里 D9025=0 | `scripts\check_build_log.ps1 -Log build-occt793.log` | 通过时打印「构建日志里的编译器命令行覆盖警告: 0」，退出码 0。脚本统计的就是日志里的 `D9025`，这一行即 D9025=0 |
+| `verify_occt_link.ps1` 的报告 | `-BuildDir build\msvc-occt793 -Report build\msvc-occt793\occt-link-report.txt` | 脚本打印的 `---- occt-link-report ----` 整段，以及最后一行 `dumpbin: 除 StepLens.exe 外没有 TKOpenGl.dll`。报告文件是 `build\msvc-occt793\occt-link-report.txt` |
