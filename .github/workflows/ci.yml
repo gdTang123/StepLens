@@ -191,18 +191,11 @@ jobs:
           New-Item -ItemType Directory -Force -Path $dir | Out-Null
           $zip = Join-Path $env:RUNNER_TEMP "ninja-win-1.13.1.zip"
           $url = "https://github.com/ninja-build/ninja/releases/download/v1.13.1/ninja-win.zip"
-          $downloaded = $false
-          foreach ($attempt in 1..5) {
-            try {
-              Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
-              $downloaded = $true
-              break
-            } catch {
-              Write-Host "ninja download failed (attempt ${attempt}): $_"
-              if ($attempt -lt 5) { Start-Sleep -Seconds (10 * $attempt) }
-            }
+          & curl.exe -fL --retry 8 --retry-all-errors --retry-delay 5 -o $zip $url
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $zip)) {
+            Write-Host "ninja 1.13.1 没下下来，继续。vcpkg 会再试一次。"
+            exit 0
           }
-          if (-not $downloaded) { throw "下载 ninja 1.13.1 失败" }
           Expand-Archive -LiteralPath $zip -DestinationPath $dir -Force
           $ninja = Join-Path $dir "ninja.exe"
           if (-not (Test-Path -LiteralPath $ninja)) { throw "解压后没有 $ninja" }
