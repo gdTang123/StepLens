@@ -184,6 +184,31 @@ jobs:
         with:
           arch: x64
 
+      # 镜像自带的 ninja 是 1.12.1。vcpkg 要求 1.13.1，不够就会自己下载，GitHub releases 现在会 504。
+      - name: Put ninja 1.13.1 on PATH
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP "ninja-1.13.1"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $zip = Join-Path $env:RUNNER_TEMP "ninja-win-1.13.1.zip"
+          $url = "https://github.com/ninja-build/ninja/releases/download/v1.13.1/ninja-win.zip"
+          $downloaded = $false
+          foreach ($attempt in 1..5) {
+            try {
+              Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
+              $downloaded = $true
+              break
+            } catch {
+              Write-Host "ninja download failed (attempt ${attempt}): $_"
+              if ($attempt -lt 5) { Start-Sleep -Seconds (10 * $attempt) }
+            }
+          }
+          if (-not $downloaded) { throw "下载 ninja 1.13.1 失败" }
+          Expand-Archive -LiteralPath $zip -DestinationPath $dir -Force
+          $ninja = Join-Path $dir "ninja.exe"
+          if (-not (Test-Path -LiteralPath $ninja)) { throw "解压后没有 $ninja" }
+          & $ninja --version
+          Add-Content -Path $env:GITHUB_PATH -Encoding utf8NoBOM -Value $dir
+
       - name: Configure, build, test
         run: |
           Write-Host "VCPKG_ROOT=$env:VCPKG_ROOT"
