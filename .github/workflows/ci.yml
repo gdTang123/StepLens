@@ -119,8 +119,20 @@ jobs:
 
       - name: Bootstrap vcpkg
         run: |
-          & .\vcpkg\bootstrap-vcpkg.bat -disableMetrics
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # vcpkg.exe 的发布下载偶发 504。多试几次，最后一次的退出码仍会失败。
+          $bootstrapped = $false
+          foreach ($attempt in 1..4) {
+            & .\vcpkg\bootstrap-vcpkg.bat -disableMetrics
+            if ($LASTEXITCODE -eq 0) {
+              $bootstrapped = $true
+              break
+            }
+            Write-Host "bootstrap-vcpkg failed with exit $LASTEXITCODE (attempt $attempt)"
+            if ($attempt -lt 4) {
+              Start-Sleep -Seconds (15 * $attempt)
+            }
+          }
+          if (-not $bootstrapped) { exit 1 }
           New-Item -ItemType Directory -Force -Path .vcpkg-binary-cache | Out-Null
           $cache = (Join-Path (Get-Location) ".vcpkg-binary-cache") -replace '\\', '/'
           $root = Join-Path (Get-Location) "vcpkg"
