@@ -30,7 +30,7 @@ get_filename_component(STEPLENS_OCCTSUPPORT_INCLUDE "${_steplens_occt_dir}" DIRE
 message(STATUS "occtsupport: ${_steplens_occt_header}")
 
 find_package(OpenCASCADE REQUIRED)
-set(STEPLENS_EXPECTED_OCCT "" CACHE STRING "期望的 OCCT 版本（如 8.0.1 / 7.9.3），用于 test_compat 防止配错 vcpkg 清单")
+set(STEPLENS_EXPECTED_OCCT "" CACHE STRING "期望的 OCCT 版本。产品默认 7.9.3；8.0.1 只作对照。用于 test_compat 防止配错 vcpkg 清单")
 
 add_executable(spike src/spike.cpp)
 target_include_directories(spike PRIVATE ${OpenCASCADE_INCLUDE_DIR} "${STEPLENS_OCCTSUPPORT_INCLUDE}")

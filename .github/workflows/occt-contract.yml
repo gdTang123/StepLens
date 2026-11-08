@@ -1,7 +1,8 @@
 name: occt-contract
 
 # G1-7：Linux 无头 OCCT 内核契约单测。独立于 ci.yml，周严接入主流程时可以整份搬。
-# 只在契约测试、occtsupport、cmake 或本 workflow 变化时跑，避免每个 PR 都装两套 OCCT。
+# 主路径是产品锁定的 7.9.3。8.0.1 留在矩阵里做对照（conda 预编译包），不是默认依赖。
+# 只在契约测试、occtsupport、cmake 或本 workflow 变化时跑，避免每个 PR 都装 OCCT。
 # 预编译包没有插桩。ASan 覆盖本仓库的测试代码，看不到 TK* 内部的数据竞争。
 on:
   pull_request:
@@ -31,13 +32,17 @@ concurrency:
 
 jobs:
   contract:
-    name: occt-${{ matrix.occt }}-asan
+    name: occt-${{ matrix.occt }}-${{ matrix.role }}-asan
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        occt: ["8.0.1", "7.9.3"]
+        include:
+          - occt: "7.9.3"
+            role: default
+          - occt: "8.0.1"
+            role: comparison
     steps:
       - name: Checkout
         uses: actions/checkout@v4

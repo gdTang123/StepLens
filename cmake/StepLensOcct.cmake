@@ -1,4 +1,4 @@
-# OCCT 7.9.3 / 8.0.1 按用途拆成三个 INTERFACE 库。
+# OCCT 按用途拆成三个 INTERFACE 库。产品默认 7.9.3；8.0.1 只作对照。
 # kernel：建模与网格。io：STEP/IGES/XCAF。vis：显示，含 TKOpenGl。
 # TKOpenGl 只放在 vis。viewer 用 PRIVATE 链接 vis，不传给其它目标。
 # 配置结束时 steplens_audit_occt_link() 写 ${CMAKE_BINARY_DIR}/occt-link-report.txt。

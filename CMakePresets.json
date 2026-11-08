@@ -21,14 +21,15 @@
         "VCPKG_TARGET_TRIPLET": "x64-windows",
         "VCPKG_HOST_TRIPLET": "x64-windows",
         "VCPKG_MANIFEST_FEATURES": "",
+        "VCPKG_MANIFEST_DIR": "${sourceDir}/vcpkg-configs/occt-7.9.3",
         "CMAKE_PREFIX_PATH": "$env{QTDIR}",
-        "STEPLENS_EXPECTED_OCCT": "8.0.1"
+        "STEPLENS_EXPECTED_OCCT": "7.9.3"
       }
     },
     {
       "name": "msvc",
       "inherits": "base",
-      "displayName": "MSVC 2022 x64",
+      "displayName": "MSVC 2022 x64（OCCT 7.9.3）",
       "vendor": {
         "microsoft.com/VisualStudioSettings/CMake/1.0": {
           "hostOS": ["Windows"],
@@ -39,7 +40,7 @@
     {
       "name": "msvc-asan",
       "inherits": "base",
-      "displayName": "MSVC 2022 x64 ASan",
+      "displayName": "MSVC 2022 x64 ASan（OCCT 7.9.3）",
       "cacheVariables": {
         "STEPLENS_ASAN": "ON"
       }
@@ -47,18 +48,18 @@
     {
       "name": "msvc-tbb",
       "inherits": "base",
-      "displayName": "MSVC 2022 x64 with TBB",
+      "displayName": "MSVC 2022 x64 with TBB（OCCT 7.9.3）",
       "cacheVariables": {
         "VCPKG_MANIFEST_FEATURES": "tbb"
       }
     },
     {
-      "name": "msvc-occt793",
+      "name": "msvc-occt801",
       "inherits": "base",
-      "displayName": "MSVC + OCCT 7.9.3（双版本过渡期）",
+      "displayName": "MSVC + OCCT 8.0.1（对照，非默认；X-07 会崩溃）",
       "cacheVariables": {
-        "VCPKG_MANIFEST_DIR": "${sourceDir}/vcpkg-configs/occt-7.9.3",
-        "STEPLENS_EXPECTED_OCCT": "7.9.3"
+        "VCPKG_MANIFEST_DIR": "${sourceDir}",
+        "STEPLENS_EXPECTED_OCCT": "8.0.1"
       }
     }
   ],
@@ -67,16 +68,6 @@
       "name": "debug",
       "configurePreset": "msvc",
       "configuration": "Debug",
-      "condition": {
-        "type": "equals",
-        "lhs": "${hostSystemName}",
-        "rhs": "Windows"
-      }
-    },
-    {
-      "name": "release-occt793",
-      "configurePreset": "msvc-occt793",
-      "configuration": "RelWithDebInfo",
       "condition": {
         "type": "equals",
         "lhs": "${hostSystemName}",
@@ -98,24 +89,6 @@
     {
       "name": "unit",
       "configurePreset": "msvc",
-      "configuration": "RelWithDebInfo",
-      "condition": {
-        "type": "equals",
-        "lhs": "${hostSystemName}",
-        "rhs": "Windows"
-      },
-      "filter": {
-        "exclude": {
-          "label": "bench|large"
-        }
-      },
-      "output": {
-        "outputOnFailure": true
-      }
-    },
-    {
-      "name": "unit-occt793",
-      "configurePreset": "msvc-occt793",
       "configuration": "RelWithDebInfo",
       "condition": {
         "type": "equals",

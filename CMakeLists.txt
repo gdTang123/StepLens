@@ -20,8 +20,9 @@ set(CMAKE_MAP_IMPORTED_CONFIG_MINSIZEREL Release)
 
 include(StepLensOptions)
 
-# 预设 msvc 保持默认 8.0.1。msvc-occt793 覆盖成 7.9.3。版本单测拿它和 OCC_VERSION_COMPLETE 比对。
-set(STEPLENS_EXPECTED_OCCT "8.0.1" CACHE STRING "本构建必须对应的 OCCT 版本")
+# 预设 msvc / ci 默认 7.9.3，清单在 vcpkg-configs/occt-7.9.3。对照预设 msvc-occt801 覆盖成 8.0.1。
+# 版本单测拿它和 OCC_VERSION_COMPLETE 比对。
+set(STEPLENS_EXPECTED_OCCT "7.9.3" CACHE STRING "本构建必须对应的 OCCT 版本")
 
 if(STEPLENS_CORE_ONLY)
     include(FetchContent)
