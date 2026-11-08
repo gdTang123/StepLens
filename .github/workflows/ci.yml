@@ -1,7 +1,7 @@
 name: ci
 
 # PR，以及推送到 main 或 v* 标签。仓库已公开，标准托管 runner 不限分钟；仍不设矩阵、不设 schedule。
-# 二进制缓存未命中时会从源码编译 OCCT 8.0.1，第一次大约两个半小时，超时留到四小时，避免缓存上传被掐掉。
+# 二进制缓存未命中时会从源码编译 OCCT 7.9.3，第一次大约两个半小时，超时留到四小时，避免缓存上传被掐掉。
 # 只改文档时不触发：docs/**（含图片等非 Markdown），以及任意位置的 .md。
 # bench 清单因此跳过。bench 的代码、脚本和 CMake 不匹配这些模式，改了仍会跑。
 # workflow、vcpkg 清单、packaging 脚本和 CMake 逻辑同样不在忽略列表里。
@@ -22,31 +22,21 @@ on:
       - '**.md'
       - '**/*.md'
   workflow_dispatch:
-    inputs:
-      suite:
-        description: "occt793 只编 7.9.3（默认，与原来的手动触发相同）；pr 只跑 core 和 windows-build"
-        type: choice
-        default: occt793
-        options:
-          - occt793
-          - pr
 
 permissions:
   contents: read
   actions: write
 
 # 同一 PR 的新推送才取消旧运行。push 和 workflow_dispatch 不取消。
-# group 带上事件名和 suite，所以 main 上的 push 与手动的 occt793 / pr 各占一组。
+# group 带上事件名，所以 main 上的 push 与手动触发各占一组。
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}-${{ inputs.suite }}
+  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # Linux 托管 runner 比 Windows 便宜。只编 core，不下载 Qt、不编 OCCT。
   core:
     name: core-tests-tsan
-    # 手动触发默认只跑 7.9.3。suite=pr 时改跑 core 和 windows-build。
-    if: github.event_name != 'workflow_dispatch' || inputs.suite == 'pr'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -81,8 +71,6 @@ jobs:
 
   windows:
     name: windows-build
-    # 手动触发默认只跑 7.9.3。suite=pr 时改跑 core 和 windows-build。
-    if: github.event_name != 'workflow_dispatch' || inputs.suite == 'pr'
     runs-on: windows-2022
     timeout-minutes: 240
     env:
@@ -125,9 +113,9 @@ jobs:
           path: |
             .vcpkg-binary-cache
             vcpkg/downloads
-          key: vcpkg-${{ runner.os }}-x64-windows-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
+          key: vcpkg-occt793-${{ runner.os }}-x64-windows-${{ hashFiles('vcpkg-configs/occt-7.9.3/vcpkg.json', 'vcpkg-configs/occt-7.9.3/vcpkg-configuration.json') }}
           restore-keys: |
-            vcpkg-${{ runner.os }}-x64-windows-
+            vcpkg-occt793-${{ runner.os }}-x64-windows-
 
       - name: Bootstrap vcpkg
         run: |
@@ -216,7 +204,7 @@ jobs:
       - name: Build bench tools against the installed OCCT
         run: |
           $prefix = Join-Path (Get-Location) "build\msvc\vcpkg_installed\x64-windows"
-          cmd /c "cmake -S bench -B build/bench -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_PREFIX_PATH=`"$prefix`" -DSTEPLENS_EXPECTED_OCCT=8.0.1 > build-bench-config.log 2>&1"
+          cmd /c "cmake -S bench -B build/bench -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_PREFIX_PATH=`"$prefix`" -DSTEPLENS_EXPECTED_OCCT=7.9.3 > build-bench-config.log 2>&1"
           $configCode = $LASTEXITCODE
           Get-Content -LiteralPath build-bench-config.log
           if ($configCode -ne 0) { exit $configCode }
@@ -304,118 +292,4 @@ jobs:
             --extra-arg=-Wno-unused-command-line-argument `
             --extra-arg=/w `
             @cpp
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-  # 不加矩阵。只在手动触发且 suite 不是 pr 时编 7.9.3，避免每个 PR 都再编一遍 OCCT。
-  # 手动作业已成功过一次（run 41769758492）。
-  windows-occt793:
-    name: windows-occt-7.9.3
-    if: github.event_name == 'workflow_dispatch' && inputs.suite != 'pr'
-    runs-on: windows-2022
-    timeout-minutes: 240
-    env:
-      PYTHONUTF8: "1"
-      PYTHONIOENCODING: utf-8
-    defaults:
-      run:
-        shell: pwsh
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Checkout vcpkg 2026.10.16
-        uses: actions/checkout@v4
-        with:
-          repository: microsoft/vcpkg
-          ref: 9eec002df1cd109f8f104cd966a763daf9751489
-          path: vcpkg
-          fetch-depth: 1
-
-      - name: Restore vcpkg binaries for 7.9.3
-        id: vcpkg-cache
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            .vcpkg-binary-cache
-            vcpkg/downloads
-          key: vcpkg-occt793-${{ runner.os }}-x64-windows-${{ hashFiles('vcpkg-configs/occt-7.9.3/vcpkg.json', 'vcpkg-configs/occt-7.9.3/vcpkg-configuration.json') }}
-
-      - name: Bootstrap vcpkg
-        run: |
-          & .\vcpkg\bootstrap-vcpkg.bat -disableMetrics
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          New-Item -ItemType Directory -Force -Path .vcpkg-binary-cache | Out-Null
-          $cache = (Join-Path (Get-Location) ".vcpkg-binary-cache") -replace '\\', '/'
-          $root = Join-Path (Get-Location) "vcpkg"
-          Add-Content -Path $env:GITHUB_ENV -Encoding utf8NoBOM -Value "VCPKG_ROOT=$root"
-          Add-Content -Path $env:GITHUB_ENV -Encoding utf8NoBOM -Value "VCPKG_DISABLE_METRICS=1"
-          Add-Content -Path $env:GITHUB_ENV -Encoding utf8NoBOM -Value "VCPKG_BINARY_SOURCES=clear;files,$cache,readwrite"
-
-      - name: Restore Qt 6.12.0
-        id: qt-cache
-        uses: actions/cache/restore@v4
-        with:
-          path: C:\Qt\6.12.0\msvc2022_64
-          key: qt-6.12.0-win64_msvc2022_64-base
-
-      - name: Install Qt 6.12.0 from download.qt.io
-        if: steps.qt-cache.outputs.cache-hit != 'true'
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install "git+https://github.com/miurahr/aqtinstall.git@8c3695d4a4e1ceabf6a74dc6c79681656dc6b74b"
-          python -m aqt install-qt windows desktop 6.12.0 win64_msvc2022_64 `
-            --outputdir C:\Qt --base https://download.qt.io
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Point CMake at Qt
-        run: |
-          $qtDir = "C:\Qt\6.12.0\msvc2022_64"
-          $qmake = Join-Path $qtDir "bin\qmake.exe"
-          if (-not (Test-Path -LiteralPath $qmake)) { throw "Qt 安装后未找到 $qmake" }
-          Add-Content -Path $env:GITHUB_ENV -Encoding utf8NoBOM -Value "QTDIR=$qtDir"
-          Add-Content -Path $env:GITHUB_PATH -Encoding utf8NoBOM -Value (Join-Path $qtDir "bin")
-
-      - name: MSVC x64 environment
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
-
-      - name: Configure OCCT 7.9.3
-        run: |
-          cmake --preset msvc-occt793
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Save vcpkg binary cache for 7.9.3
-        if: success() && steps.vcpkg-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            .vcpkg-binary-cache
-            vcpkg/downloads
-          key: ${{ steps.vcpkg-cache.outputs.cache-primary-key }}
-
-      - name: Build and test OCCT 7.9.3
-        run: |
-          cmd /c "cmake --build --preset release-occt793 > build-occt793.log 2>&1"
-          $buildCode = $LASTEXITCODE
-          Get-Content -LiteralPath build-occt793.log
-          if ($buildCode -ne 0) { exit $buildCode }
-          pwsh -File scripts/check_build_log.ps1 -Log build-occt793.log
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          ctest --preset unit-occt793
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          pwsh -File scripts/verify_occt_link.ps1 -BuildDir build/msvc-occt793 -Report build/msvc-occt793/occt-link-report.txt
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Build bench tools against OCCT 7.9.3
-        run: |
-          cmake -S bench -B build/bench793 -G Ninja `
-            -DCMAKE_BUILD_TYPE=RelWithDebInfo `
-            -DCMAKE_PREFIX_PATH="$pwd\build\msvc-occt793\vcpkg_installed\x64-windows" `
-            "-DSTEPLENS_EXPECTED_OCCT=7.9.3"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cmake --build build/bench793
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $env:PATH = "$pwd\build\msvc-occt793\vcpkg_installed\x64-windows\bin;$env:PATH"
-          & "$pwd\build\bench793\test_compat.exe"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

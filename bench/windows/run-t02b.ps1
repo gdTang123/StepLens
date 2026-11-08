@@ -415,8 +415,8 @@ foreach ($line in $compatLines) { Write-Host $line }
 if ($null -eq $compatCode -or $compatCode -ne 0) {
   Write-Host "兼容单测 test_compat.exe 没有通过，已停止。后面的读取、取消和中文路径测试都不会跑。" -ForegroundColor Red
   Write-Host "退出码：$compatCode 。多半是 OCCT 的 vcpkg 清单或 CMake 预设配错了。" -ForegroundColor Red
-  Write-Host "test_compat 对比的是编译时期望的版本（-DSTEPLENS_EXPECTED_OCCT，8.0.1 或 7.9.3）和实际链接到的 OCCT 版本，对不上就会失败。" -ForegroundColor Red
-  Write-Host "请核对这一次用的 vcpkg.json（8.0.1）或 occt-7.9.3\vcpkg.json（7.9.3），以及 cmake 的 -DSTEPLENS_EXPECTED_OCCT、-DVCPKG_MANIFEST_DIR 是不是同一套，然后重新编译。不要改别的配置。" -ForegroundColor Red
+  Write-Host "test_compat 对比的是编译时期望的版本（-DSTEPLENS_EXPECTED_OCCT）和实际链接到的 OCCT 版本，对不上就会失败。产品默认是 7.9.3；8.0.1 只是对照。" -ForegroundColor Red
+  Write-Host "请核对这一次用的是 occt-7.9.3\vcpkg.json（默认 7.9.3）还是根 vcpkg.json（对照 8.0.1），以及 cmake 的 -DSTEPLENS_EXPECTED_OCCT、-DVCPKG_MANIFEST_DIR 是不是同一套，然后重新编译。不要改别的配置。" -ForegroundColor Red
   if ($compatLines.Count -gt 0) {
     Write-Host "test_compat 输出里应有 occt_version=实际版本 expected=期望版本，把 results\$Tag\test_compat.txt 发回团队。" -ForegroundColor Red
   }

@@ -4,7 +4,7 @@
 
 程序能打开一个空窗口，状态栏写着「尚未打开文件」，还不能读 STEP/IGES。core 里已经有结果类型、软取消、进度、线程池、日志和 Windows 崩溃转储。
 
-架构文档是 v1.2。摸底报告在 `docs/bench/spike-m0.md`，Windows 复测清单在 `docs/bench/t02b-windows-checklist.md`。根 `vcpkg.json` 不写 overrides，默认 OCCT 8.0.1。预设 `msvc-occt793` 用 `vcpkg-configs/occt-7.9.3` 切到 7.9.3。版本差异只在 `src/occtsupport/occt_compat.h`。老板在自己电脑上跑的工具在 `bench/`。
+架构文档是 v1.2。摸底报告在 `docs/bench/spike-m0.md`，Windows 复测清单在 `docs/bench/t02b-windows-checklist.md`。产品锁定 **OCCT 7.9.3**（2026-11-08；T02b 结论是 8.0.1 在 X-07 崩溃）。默认预设 `msvc` / `ci` 使用 `vcpkg-configs/occt-7.9.3`（overrides 锁 `7.9.3#1`），`STEPLENS_EXPECTED_OCCT=7.9.3`。根 `vcpkg.json` 不写 overrides，只给对照预设 `msvc-occt801`（基线端口当前是 8.0.1，不是默认）。版本差异只在 `src/occtsupport/occt_compat.h`。老板在自己电脑上跑的工具在 `bench/`。
 
 ## 文档
 
@@ -30,7 +30,7 @@
 | vcpkg | 设置 `VCPKG_ROOT`。端口锁在基线 `2026.10.16`（`9eec002df1cd109f8f104cd966a763daf9751489`），工具本身可以用这个标签或更新的版本 |
 | Qt | **6.12.0** 官方预编译包 `msvc2022_64`，不走 vcpkg。组件要有 Core、Gui、Widgets、OpenGL、OpenGLWidgets、Concurrent、Test，以及 Linguist（qttools）。把安装目录设为 `QTDIR`，例如 `C:\Qt\6.12.0\msvc2022_64` |
 
-第一次配置会按清单编译 OCCT 8.0.1 和 GoogleTest。OCCT 编译很久，编完后 vcpkg 的二进制缓存会让下次快很多。
+第一次配置会按 `vcpkg-configs/occt-7.9.3` 编译 OCCT 7.9.3 和 GoogleTest。OCCT 编译很久，编完后 vcpkg 的二进制缓存会让下次快很多。对照预设 `msvc-occt801` 才使用根清单里的基线端口（当前 8.0.1），不进默认 workflow。
 
 只编 core 并跑单元测试（不需要 Qt、OCCT、MSVC），可以加 `-DSTEPLENS_CORE_ONLY=ON`。CI 的 Ubuntu 任务用这个选项，并打开 ThreadSanitizer。
 
@@ -68,7 +68,7 @@ cmake --install build\msvc --config RelWithDebInfo --prefix dist-stage
 python scripts\package.py --prefix dist-stage --qt-dir $env:QTDIR --output dist\StepLens-0.1.0-windows-x64.zip
 ```
 
-其他预设：`msvc-asan`（AddressSanitizer）、`msvc-tbb`（给 OCCT 打开 oneTBB，默认构建不启用）。日常用 `msvc`。
+其他预设：`msvc-asan`（AddressSanitizer）、`msvc-tbb`（给 OCCT 打开 oneTBB，默认构建不启用），都继承 7.9.3。`msvc-occt801` 是 OCCT 8.0.1 对照，不是默认。日常用 `msvc` 或 `cmake --workflow --preset ci`。
 
 ## 目录
 

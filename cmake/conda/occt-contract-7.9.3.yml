@@ -1,4 +1,4 @@
-# 无头契约测试。novtk 与 all 都是 OCCT 7.9.3；all 的 build number 更高，
+# 无头契约测试，产品默认 OCCT 7.9.3。novtk 与 all 都是 7.9.3；all 的 build number 更高，
 # 不写 build 时求解器会选中带 VTK 的 all。本作业不打开视口，锁 novtk。
 name: occt-contract
 channels:
