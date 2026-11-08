@@ -14,8 +14,7 @@
 int main(int argc, char* argv[]) {
     try {
         // Interface_Static 只允许在 main() 的这个位置、单线程初始化一次。
-        // 现在还没有 T05 读取器，不会调用 Interface_Static 的 SetIVal / SetCVal。
-        // XCAFApp NewDocument / Close 必须走 xcafDocumentMutex()，见 OcctLoadContract.h。
+        // T05 的加载器不调用 SetIVal / SetCVal。XCAFApp NewDocument / Close 走 xcafDocumentMutex()。
         steplens::initializeInterfaceStaticOnMainThread();
         steplens::Log::initialize(steplens::defaultWritableDirectory("logs"));
         // 链上 OCCT 之后，OSD::SetSignal 可能也会换掉未处理异常过滤器。

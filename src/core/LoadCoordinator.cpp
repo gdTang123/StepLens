@@ -84,8 +84,8 @@ void LoadCoordinator::threadMain() {
 
         m_live.fetch_add(1, std::memory_order_acq_rel);
         try {
-            // 这里不执行 OCCT。core 不链接 OCCT，线程入口因此不调用 OcctBoundary::armWorkerThread。
-            // T05 若要在这条线程里读 STEP，必须改走 makeOcctTaskScheduler，或在调用 OCCT 之前先 arm。
+            // core 不链接 OCCT，这条线程的入口不能调用 OcctBoundary::armWorkerThread。
+            // 在这里跑 STEP/IGES 的加载器会在调用 OCCT 之前自己 arm。
             if (job.run) {
                 job.run(session);
             }

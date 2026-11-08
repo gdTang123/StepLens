@@ -9,8 +9,7 @@ namespace steplens {
 // Interface_Static：
 // 全局静态参数只能在 main() 里、任何工作线程出现之前初始化一次。
 // initializeInterfaceStaticOnMainThread() 再调用一次就抛 std::logic_error。
-// 当前还没有读取器，不会在这里调用 Interface_Static::SetIVal / SetCVal。
-// T05 的加载线程禁止再改 Interface_Static。
+// 这里不调用 Interface_Static::SetIVal / SetCVal。加载线程也不许改这些全局参数。
 //
 // XCAFApp：
 // XCAFApp_Application::GetApplication()->NewDocument 和 Close 必须串行，
