@@ -139,6 +139,8 @@ jobs:
           Add-Content -Path $env:GITHUB_ENV -Encoding utf8NoBOM -Value "VCPKG_ROOT=$root"
           Add-Content -Path $env:GITHUB_ENV -Encoding utf8NoBOM -Value "VCPKG_DISABLE_METRICS=1"
           Add-Content -Path $env:GITHUB_ENV -Encoding utf8NoBOM -Value "VCPKG_BINARY_SOURCES=clear;files,$cache,readwrite"
+          # 镜像里已经有 ninja。不要再从 GitHub releases 下载，那边现在会 504。
+          Add-Content -Path $env:GITHUB_ENV -Encoding utf8NoBOM -Value "VCPKG_FORCE_SYSTEM_BINARIES=1"
 
       # Qt 6.11 起 Windows 仓库按编译器拆目录：qt6_6120/qt6_6120_msvc2022_64/Updates.xml。
       # PyPI 上的 aqtinstall 3.3.0 仍去找 qt6_6120/qt6_6120/Updates.xml（404）。
