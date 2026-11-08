@@ -1,0 +1,99 @@
+﻿dpi_tag=dpi100
+AppliedDPI=96
+commit=c22bbbe480637cd574f074c8d740f69f7f56f489
+exe_sha256=335552132F0C3CD037C7F6BEF4245D5138E0839CDE01A3EE97F04239BA7C28B4
+window_path=see_CMakeCache_below
+time_shanghai=2026-11-08 19:36:10 +08:00
+
+
+Name          : NVIDIA GeForce RTX 4070
+DriverVersion : 32.0.16.1088
+
+Name          : Intel(R) UHD Graphics 770
+DriverVersion : 32.0.101.7088
+
+
+
+
+CMAKE_CONFIGURATION_TYPES:STRING=Debug;Release;RelWithDebInfo
+STEPLENS_EXPECTED_OCCT:STRING=7.9.3
+STEPLENS_USE_WNT_WINDOW:BOOL=OFF
+VCPKG_TARGET_TRIPLET:STRING=x64-windows
+CMAKE_GENERATOR:INTERNAL=Ninja Multi-Config
+PASS resize1 ok
+PASS resize2 ok
+PASS resize3 ok
+PASS resize4 ok
+PASS resize5 ok
+PASS resize6 ok
+PASS resize7 ok
+PASS resize8 ok
+PASS resize9 ok
+PASS resize10 ok
+PASS resize11 ok
+PASS resize12 ok
+PASS resize13 ok
+PASS resize14 ok
+PASS resize15 ok
+PASS resize16 ok
+PASS resize17 ok
+PASS resize18 ok
+PASS resize19 ok
+PASS resize20 ok
+PASS resize21 ok
+PASS resize22 ok
+PASS resize23 ok
+PASS resize24 ok
+PASS resize25 ok
+PASS resize26 ok
+PASS resize27 ok
+PASS resize28 ok
+PASS resize29 ok
+PASS resize30 ok
+PASS resize31 ok
+PASS resize32 ok
+PASS resize33 ok
+PASS resize34 ok
+PASS resize35 ok
+PASS resize36 ok
+PASS resize37 ok
+PASS resize38 ok
+PASS resize39 ok
+PASS resize40 ok
+PASS resize41 ok
+PASS resize42 ok
+PASS resize43 ok
+PASS resize44 ok
+PASS resize45 ok
+PASS resize46 ok
+PASS resize47 ok
+PASS resize48 ok
+PASS resize49 ok
+PASS resize50 ok
+PASS max1 ok
+PASS restore1 ok
+PASS max2 ok
+PASS restore2 ok
+PASS max3 ok
+PASS restore3 ok
+PASS max4 ok
+PASS restore4 ok
+PASS max5 ok
+PASS restore5 ok
+PASS max6 ok
+PASS restore6 ok
+PASS max7 ok
+PASS restore7 ok
+PASS max8 ok
+PASS restore8 ok
+PASS max9 ok
+PASS restore9 ok
+PASS max10 ok
+PASS restore10 ok
+frames=70
+fails=0
+visual_confirm=yes
+ERROR=人工画面确认未通过。即使 fails=0，也不能视为本轮通过。
+incomplete_or_failed=true
+frames_so_far=70
+failed_frames_so_far=0
