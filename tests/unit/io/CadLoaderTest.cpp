@@ -223,23 +223,26 @@ TEST(ProgressStreamBuf, CancelBetweenChunksReturnsEof) {
     steplens::ProgressSink sink;
     sink.reset(bytes);
     steplens::CancelSource source;
-    steplens::io::ProgressStreamBuf buffer(path, bytes, sink, source.token());
-    ASSERT_TRUE(buffer.isOpen());
-    std::istream input(&buffer);
-    std::vector<char> chunk(steplens::io::ProgressStreamBuf::kChunkBytes);
-    input.read(chunk.data(), static_cast<std::streamsize>(chunk.size()));
-    ASSERT_EQ(input.gcount(), static_cast<std::streamsize>(chunk.size()));
-    EXPECT_GT(sink.fraction(), 0.f);
-    EXPECT_LT(sink.fraction(), steplens::kReadingBandEnd);
-    EXPECT_EQ(sink.phase(), steplens::ProgressPhase::ReadingBytes);
+    {
+        // Windows 在句柄还开着时删不掉文件。先析构流，再断言读完已释放。
+        steplens::io::ProgressStreamBuf buffer(path, bytes, sink, source.token());
+        ASSERT_TRUE(buffer.isOpen());
+        std::istream input(&buffer);
+        std::vector<char> chunk(steplens::io::ProgressStreamBuf::kChunkBytes);
+        input.read(chunk.data(), static_cast<std::streamsize>(chunk.size()));
+        ASSERT_EQ(input.gcount(), static_cast<std::streamsize>(chunk.size()));
+        EXPECT_GT(sink.fraction(), 0.f);
+        EXPECT_LT(sink.fraction(), steplens::kReadingBandEnd);
+        EXPECT_EQ(sink.phase(), steplens::ProgressPhase::ReadingBytes);
 
-    source.requestStop();
-    input.clear();
-    input.read(chunk.data(), static_cast<std::streamsize>(chunk.size()));
-    EXPECT_EQ(input.gcount(), 0);
-    EXPECT_TRUE(buffer.wasCancelled());
-    EXPECT_LT(sink.fraction(), 1.f);
-    EXPECT_EQ(sink.phase(), steplens::ProgressPhase::ReadingBytes);
+        source.requestStop();
+        input.clear();
+        input.read(chunk.data(), static_cast<std::streamsize>(chunk.size()));
+        EXPECT_EQ(input.gcount(), 0);
+        EXPECT_TRUE(buffer.wasCancelled());
+        EXPECT_LT(sink.fraction(), 1.f);
+        EXPECT_EQ(sink.phase(), steplens::ProgressPhase::ReadingBytes);
+    }
     expectRemoved(path);
 }
 
