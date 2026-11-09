@@ -31,8 +31,12 @@
 #include <filesystem>
 #include <gtest/gtest.h>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <string>
+#if defined(_WIN32)
+#include <windows.h>
+#endif
 
 namespace {
 
@@ -88,6 +92,25 @@ void expectNearBox(const Bnd_Box& box, double xmin, double ymin, double zmin, do
     EXPECT_NEAR(x1, xmax, 1.0e-5);
     EXPECT_NEAR(y1, ymax, 1.0e-5);
     EXPECT_NEAR(z1, zmax, 1.0e-5);
+}
+
+std::optional<std::filesystem::path> samplesDirectory() {
+#if defined(_WIN32)
+    // getenv 在 MSVC /WX 下是 C4996。宽字符也躲开中文路径。
+    constexpr DWORD kCapacity = 32767;
+    wchar_t buffer[kCapacity];
+    const DWORD length = GetEnvironmentVariableW(L"STEPLENS_SAMPLES", buffer, kCapacity);
+    if (length == 0 || length >= kCapacity) {
+        return std::nullopt;
+    }
+    return std::filesystem::path{buffer};
+#else
+    const char* root = std::getenv("STEPLENS_SAMPLES");
+    if (root == nullptr || root[0] == '\0') {
+        return std::nullopt;
+    }
+    return std::filesystem::path{root};
+#endif
 }
 
 std::shared_ptr<const steplens::model::DocumentModel>
@@ -401,11 +424,11 @@ TEST(DocumentModel, StepRoundTripKeepsInstanceCount) {
 }
 
 TEST(DocumentModel, SampleStepCountsWhenPresent) {
-    const char* root = std::getenv("STEPLENS_SAMPLES");
-    if (root == nullptr || root[0] == '\0') {
+    const auto root = samplesDirectory();
+    if (!root) {
         GTEST_SKIP() << "STEPLENS_SAMPLES 未设置";
     }
-    const std::filesystem::path dir{root};
+    const std::filesystem::path& dir = *root;
     const auto screw = dir / "screw.step";
     const auto assembly = dir / "as1-ac-214.stp";
     if (!std::filesystem::exists(screw) || !std::filesystem::exists(assembly)) {
