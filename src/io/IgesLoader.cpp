@@ -42,7 +42,8 @@ Result<LoadedDocument> readIges(const std::filesystem::path& file, const LoadOpt
         return detail::cancelledError("cancelled before IGES ReadFile");
     }
 
-    // ReadFile 没有字节回调。先进入解析段，这段时间靠 ProgressSink 的时间估算前进。
+    // ReadFile 没有字节回调，也没有中途取消检查点。先进入解析段，这段时间靠
+    // ProgressSink 的时间估算前进。取消标志只在这次调用返回之后再看。
     progress.enterParsing();
 
     ReaderSlot<IGESCAFControl_Reader> slot;

@@ -2,7 +2,7 @@
 
 内部使用的 STEP/IGES 轻量查看器。技术栈是 C++20、Qt 6.12、Open CASCADE Technology、CMake。平台是 Windows 10/11 x64，发布形式是绿色版 zip。
 
-程序能打开一个空窗口，状态栏写着「尚未打开文件」，还不能读 STEP/IGES。core 里已经有结果类型、软取消、进度、线程池、日志和 Windows 崩溃转储。
+窗口仍是空的：状态栏写着「尚未打开文件」，界面还没有接到打开文件。后台已经能读 STEP/IGES。`LoadSession` / `LoadCoordinator` 调用 `io` 的 `StepLoader` 和 `IgesLoader`，带进度和软取消，读完释放读取器。装配树、网格和三维场景还没有做。core 里有结果类型、软取消、进度、线程池、日志和 Windows 崩溃转储。
 
 架构文档是 v1.2。摸底报告在 `docs/bench/spike-m0.md`，Windows 复测清单在 `docs/bench/t02b-windows-checklist.md`。产品锁定 **OCCT 7.9.3**（2026-11-08；T02b 结论是 8.0.1 在 X-07 崩溃）。默认预设 `msvc` / `ci` 使用 `vcpkg-configs/occt-7.9.3`（overrides 锁 `7.9.3#1`），`STEPLENS_EXPECTED_OCCT=7.9.3`。根 `vcpkg.json` 不写 overrides，只给对照预设 `msvc-occt801`（基线端口当前是 8.0.1，不是默认）。版本差异只在 `src/occtsupport/occt_compat.h`。老板在自己电脑上跑的工具在 `bench/`。
 
@@ -81,7 +81,7 @@ tools/  bench、stepgen（尚未实现）
 scripts/  package.py；fetch_samples.py 仍是占位
 ```
 
-模块依赖以架构文档第 4 节为准：`core`、`io`、`model`、`mesh` 不依赖 Qt GUI；只有 `scene`、`viewer`、`measure` 会碰 OCCT 的显示类。T01 里除 `app` 和 `core` 之外的库只有一个占位翻译单元，避免空的静态库。
+模块依赖以架构文档第 4 节为准：`core`、`io`、`model`、`mesh` 不依赖 Qt GUI；只有 `scene`、`viewer`、`measure` 会碰 OCCT 的显示类。`io` 已实现 STEP/IGES 后台读取。`model`、`mesh`、`scene`、`measure`、`ui`、`pipeline` 仍是占位翻译单元。
 
 ## 许可证
 

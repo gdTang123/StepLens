@@ -35,7 +35,8 @@ public:
 };
 
 // 唯一允许创建“跑 OCCT 的线程池”的入口。onThreadStart 固定为 OcctBoundary::armWorkerThread。
-// 本 PR 还没有生产调用点。T05 的加载和网格线程池必须走这里，不能自己构造 TaskScheduler。
+// 网格线程池必须走这里，不能自己构造 TaskScheduler。
+// T05 的加载不进这个池：LoadCoordinator 的工作线程在调用 OCCT 之前，由加载器调用 armWorkerThread()。
 [[nodiscard]] std::unique_ptr<TaskScheduler>
 makeOcctTaskScheduler(unsigned threads = TaskScheduler::defaultThreadCount());
 
