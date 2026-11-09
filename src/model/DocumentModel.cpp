@@ -7,9 +7,10 @@
 
 #include <BRepBndLib.hxx>
 #include <BRep_Builder.hxx>
+#include <NCollection_Sequence.hxx>
 #include <TCollection_AsciiString.hxx>
 #include <TCollection_ExtendedString.hxx>
-#include <TDF_LabelSequence.hxx>
+#include <TDF_Label.hxx>
 #include <TDF_Tool.hxx>
 #include <TDataStd_Name.hxx>
 #include <TopExp_Explorer.hxx>
@@ -31,6 +32,9 @@
 
 namespace steplens::model {
 namespace {
+
+// 8.0 弃用了 TDF_LabelSequence 这个名字。7.9.3 里它就是这个序列。
+using LabelSequence = NCollection_Sequence<TDF_Label>;
 
 struct ColorKey {
     bool colored = false;
@@ -257,7 +261,7 @@ private:
 [[nodiscard]] Bnd_Box boundOf(const TopoDS_Shape& shape) {
     Bnd_Box box;
     if (!shape.IsNull()) {
-        BRepBndLib::Add(shape, box, Standard_False);
+        BRepBndLib::Add(shape, box, false);
     }
     return box;
 }
@@ -404,7 +408,7 @@ public:
                const opencascade::handle<XCAFDoc_ColorTool>& colors, CancelGate& gate)
         : m_shapes(shapes), m_colors(colors), m_gate(gate) {}
 
-    [[nodiscard]] BuiltModel run(const TDF_LabelSequence& roots) {
+    [[nodiscard]] BuiltModel run(const LabelSequence& roots) {
         BuiltModel built;
         if (roots.IsEmpty()) {
             built.error =
@@ -479,7 +483,7 @@ private:
                 m_nodes[parentId].children.push_back(id);
             }
             m_stack.push_back(key);
-            TDF_LabelSequence components;
+            LabelSequence components;
             if (!m_shapes.IsNull()) {
                 m_shapes->GetComponents(definition, components);
             }
@@ -602,7 +606,7 @@ void collectEntities(const TopoDS_Shape& shape, const TDF_Label& label,
 }
 
 [[nodiscard]] BuiltModel buildIges(const opencascade::handle<XCAFDoc_ColorTool>& colors,
-                                   const TDF_LabelSequence& roots, CancelGate& gate) {
+                                   const LabelSequence& roots, CancelGate& gate) {
     BuiltModel built;
     std::vector<SourceEntity> entities;
     for (int index = 1; index <= roots.Length(); ++index) {
@@ -725,7 +729,7 @@ void collectEntities(const TopoDS_Shape& shape, const TDF_Label& label,
         built.error = makeFailure(ErrorCode::Internal, "ShapeTool missing", "没有可读取的文档");
         return built;
     }
-    TDF_LabelSequence roots;
+    LabelSequence roots;
     shapes->GetFreeShapes(roots);
     if (roots.IsEmpty()) {
         built.error =

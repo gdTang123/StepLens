@@ -75,12 +75,12 @@ int faceCountOf(const TopoDS_Shape& shape) {
 void expectNearBox(const Bnd_Box& box, double xmin, double ymin, double zmin, double xmax, double ymax,
                    double zmax) {
     ASSERT_FALSE(box.IsVoid());
-    Standard_Real x0 = 0.0;
-    Standard_Real y0 = 0.0;
-    Standard_Real z0 = 0.0;
-    Standard_Real x1 = 0.0;
-    Standard_Real y1 = 0.0;
-    Standard_Real z1 = 0.0;
+    double x0 = 0.0;
+    double y0 = 0.0;
+    double z0 = 0.0;
+    double x1 = 0.0;
+    double y1 = 0.0;
+    double z1 = 0.0;
     box.Get(x0, y0, z0, x1, y1, z1);
     EXPECT_NEAR(x0, xmin, 1.0e-5);
     EXPECT_NEAR(y0, ymin, 1.0e-5);
@@ -110,9 +110,8 @@ TEST(DocumentModel, StepAssemblyDedupsPrototypeAndKeepsWorldBoxes) {
     ASSERT_FALSE(shapes.IsNull());
 
     const TopoDS_Shape partShape = BRepPrimAPI_MakeBox(10.0, 20.0, 30.0).Shape();
-    const TDF_Label part = shapes->AddShape(partShape, Standard_False);
-    const Standard_ExtCharacter boltChars[] = {static_cast<Standard_ExtCharacter>(0x87BA),
-                                               static_cast<Standard_ExtCharacter>(0x6813), 0};
+    const TDF_Label part = shapes->AddShape(partShape, false);
+    const char16_t boltChars[] = {static_cast<char16_t>(0x87BA), static_cast<char16_t>(0x6813), u'\0'};
     TDataStd_Name::Set(part, TCollection_ExtendedString{boltChars});
 
     const TDF_Label sub = shapes->NewShape();
@@ -196,7 +195,7 @@ TEST(DocumentModel, StepFacesGroupByColor) {
     auto shapes = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
     auto colors = XCAFDoc_DocumentTool::ColorTool(doc->Main());
     const TopoDS_Shape box = BRepPrimAPI_MakeBox(10.0, 10.0, 10.0).Shape();
-    shapes->AddShape(box, Standard_False);
+    shapes->AddShape(box, false);
     const Quantity_Color red{1.0, 0.0, 0.0, Quantity_TOC_RGB};
     const Quantity_Color blue{0.0, 0.0, 1.0, Quantity_TOC_RGB};
     int index = 0;
@@ -232,7 +231,7 @@ TEST(DocumentModel, StepFreeShapesStaySeparate) {
     auto doc = newDocument();
     auto shapes = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
     for (int index = 0; index < 5; ++index) {
-        shapes->AddShape(boxAt(index * 40.0, 0.0, 0.0, 1.0, 1.0, 1.0), Standard_False);
+        shapes->AddShape(boxAt(index * 40.0, 0.0, 0.0, 1.0, 1.0, 1.0), false);
     }
     steplens::ProgressSink sink;
     sink.reset(1);
@@ -259,7 +258,7 @@ TEST(DocumentModel, IgesFewEntitiesKeepOneRootAndSeparatePrototypes) {
         Quantity_Color{0.0, 0.0, 1.0, Quantity_TOC_RGB},
     };
     for (int index = 0; index < 3; ++index) {
-        const TDF_Label label = shapes->AddShape(boxAt(index * 100.0, 0.0, 0.0), Standard_False);
+        const TDF_Label label = shapes->AddShape(boxAt(index * 100.0, 0.0, 0.0), false);
         colors->SetColor(label, palette[index], XCAFDoc_ColorGen);
     }
     steplens::ProgressSink sink;
@@ -279,8 +278,8 @@ TEST(DocumentModel, IgesFewEntitiesKeepOneRootAndSeparatePrototypes) {
         faces += static_cast<int>(info.faceCount);
     }
     EXPECT_EQ(faces, 18);
-    Standard_Real xmax = 0.0;
-    Standard_Real ignored = 0.0;
+    double xmax = 0.0;
+    double ignored = 0.0;
     model->worldBox().Get(ignored, ignored, ignored, xmax, ignored, ignored);
     EXPECT_GT(xmax, 200.0);
     model.reset();
@@ -298,7 +297,7 @@ TEST(DocumentModel, IgesChunkingCapsVirtualPrototypes) {
         const int gy = (index / 16) % 16;
         const int gz = index / 256;
         const TDF_Label label =
-            shapes->AddShape(boxAt(gx * 10.0, gy * 10.0, gz * 10.0, 1.0, 1.0, 1.0), Standard_False);
+            shapes->AddShape(boxAt(gx * 10.0, gy * 10.0, gz * 10.0, 1.0, 1.0, 1.0), false);
         const double red = static_cast<double>(index % 251) / 250.0;
         const double green = static_cast<double>((index * 3) % 251) / 250.0;
         const double blue = static_cast<double>((index * 7) % 251) / 250.0;
@@ -339,7 +338,7 @@ TEST(DocumentModel, CancelDuringBuildReleasesDocument) {
     auto doc = newDocument();
     auto shapes = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
     for (int index = 0; index < 40; ++index) {
-        shapes->AddShape(boxAt(index * 3.0, 0.0, 0.0, 1.0, 1.0, 1.0), Standard_False);
+        shapes->AddShape(boxAt(index * 3.0, 0.0, 0.0, 1.0, 1.0, 1.0), false);
     }
     steplens::ProgressSink sink;
     sink.reset(8);
@@ -358,7 +357,7 @@ TEST(DocumentModel, StepRoundTripKeepsInstanceCount) {
     const int before = documentCount();
     auto doc = newDocument();
     auto shapes = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
-    const TDF_Label part = shapes->AddShape(BRepPrimAPI_MakeBox(2.0, 2.0, 2.0).Shape(), Standard_False);
+    const TDF_Label part = shapes->AddShape(BRepPrimAPI_MakeBox(2.0, 2.0, 2.0).Shape(), false);
     TDataStd_Name::Set(part, TCollection_ExtendedString{"Peg"});
     const TDF_Label root = shapes->NewShape();
     gp_Trsf left;
