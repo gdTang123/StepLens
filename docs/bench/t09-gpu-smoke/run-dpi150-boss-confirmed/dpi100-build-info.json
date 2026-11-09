@@ -1,0 +1,8 @@
+﻿{
+    "Commit":  "c22bbbe480637cd574f074c8d740f69f7f56f489",
+    "QtDir":  "D:\\others\\QT\\6.12.0\\msvc2022_64",
+    "OcctPrefix":  "C:\\sl\\StepLens\\build\\msvc\\vcpkg_installed\\x64-windows",
+    "Exe":  "C:\\sl\\StepLens\\build\\msvc\\RelWithDebInfo\\StepLens.exe",
+    "ExeSHA256":  "335552132F0C3CD037C7F6BEF4245D5138E0839CDE01A3EE97F04239BA7C28B4",
+    "WindowPath":  "请对照 CMakeCache 中 STEPLENS_USE_WNT_WINDOW，默认 OFF"
+}

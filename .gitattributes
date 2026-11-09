@@ -14,6 +14,9 @@
 *.iges binary
 *.igs binary
 *.png binary
+# T09 实机日志和构建信息保持老板机上的原始字节（UTF-8 BOM + CRLF）。
+docs/bench/t09-gpu-smoke/**/*.txt binary
+docs/bench/t09-gpu-smoke/**/*.json binary
 *.jpg binary
 *.jpeg binary
 *.ico binary

@@ -2,6 +2,10 @@
 
 G1-5 的像素验收在这台机器上做。CI 只保证编译，并且在 `QT_QPA_PLATFORM=offscreen` 下确认进程还活着。无头 runner 没有可判定的 GPU 帧缓冲，**缺画面不得让 CI 变红**。
 
+| 编号 | 状态 | 结果 |
+|---|---|---|
+| G1-5 | 通过（老板实机确认） | [T09 独显冒烟结果](t09-gpu-smoke/README.md) |
+
 默认路径：`QOpenGLWidget` + `Aspect_NeutralWindow` + `OpenGl_FrameBuffer::InitWrapper`，中央控件里一个旋转的方块（蓝灰底，不是纯黑）。窗口尺寸取 FBO 视口，单位是物理像素，所以 100% 和 150% DPI 都按帧缓冲大小送给 OCCT。
 
 备选路径：CMake `-DSTEPLENS_USE_WNT_WINDOW=ON`，改用 `WNT_Window` 包住 `winId()`。实现和默认路径在同一个 `ViewerWidget` 里，编译期切换。
