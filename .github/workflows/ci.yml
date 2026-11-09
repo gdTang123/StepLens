@@ -119,14 +119,28 @@ jobs:
 
       - name: Bootstrap vcpkg
         run: |
-          & .\vcpkg\bootstrap-vcpkg.bat -disableMetrics
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # vcpkg.exe 的发布下载偶发 504。多试几次，最后一次的退出码仍会失败。
+          $bootstrapped = $false
+          foreach ($attempt in 1..4) {
+            & .\vcpkg\bootstrap-vcpkg.bat -disableMetrics
+            if ($LASTEXITCODE -eq 0) {
+              $bootstrapped = $true
+              break
+            }
+            Write-Host "bootstrap-vcpkg failed with exit $LASTEXITCODE (attempt $attempt)"
+            if ($attempt -lt 4) {
+              Start-Sleep -Seconds (15 * $attempt)
+            }
+          }
+          if (-not $bootstrapped) { exit 1 }
           New-Item -ItemType Directory -Force -Path .vcpkg-binary-cache | Out-Null
           $cache = (Join-Path (Get-Location) ".vcpkg-binary-cache") -replace '\\', '/'
           $root = Join-Path (Get-Location) "vcpkg"
           Add-Content -Path $env:GITHUB_ENV -Encoding utf8NoBOM -Value "VCPKG_ROOT=$root"
           Add-Content -Path $env:GITHUB_ENV -Encoding utf8NoBOM -Value "VCPKG_DISABLE_METRICS=1"
           Add-Content -Path $env:GITHUB_ENV -Encoding utf8NoBOM -Value "VCPKG_BINARY_SOURCES=clear;files,$cache,readwrite"
+          # 镜像里已经有 ninja。不要再从 GitHub releases 下载，那边现在会 504。
+          Add-Content -Path $env:GITHUB_ENV -Encoding utf8NoBOM -Value "VCPKG_FORCE_SYSTEM_BINARIES=1"
 
       # Qt 6.11 起 Windows 仓库按编译器拆目录：qt6_6120/qt6_6120_msvc2022_64/Updates.xml。
       # PyPI 上的 aqtinstall 3.3.0 仍去找 qt6_6120/qt6_6120/Updates.xml（404）。
@@ -169,6 +183,24 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
+
+      # 镜像自带的 ninja 是 1.12.1。vcpkg 要求 1.13.1，不够就会自己下载，GitHub releases 现在会 504。
+      - name: Put ninja 1.13.1 on PATH
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP "ninja-1.13.1"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $zip = Join-Path $env:RUNNER_TEMP "ninja-win-1.13.1.zip"
+          $url = "https://github.com/ninja-build/ninja/releases/download/v1.13.1/ninja-win.zip"
+          & curl.exe -fL --retry 8 --retry-all-errors --retry-delay 5 -o $zip $url
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $zip)) {
+            Write-Host "ninja 1.13.1 没下下来，继续。vcpkg 会再试一次。"
+            exit 0
+          }
+          Expand-Archive -LiteralPath $zip -DestinationPath $dir -Force
+          $ninja = Join-Path $dir "ninja.exe"
+          if (-not (Test-Path -LiteralPath $ninja)) { throw "解压后没有 $ninja" }
+          & $ninja --version
+          Add-Content -Path $env:GITHUB_PATH -Encoding utf8NoBOM -Value $dir
 
       - name: Configure, build, test
         run: |
