@@ -1,4 +1,5 @@
-# 核对 TKOpenGl 没有链进 viewer / app 以外的目标。
+# 核对 TKOpenGl 没有链进 viewer、app、场景测试以外的目标。
+# scene 静态库不链 TKOpenGl。steplens_scene_tests 要建视图，所以单独允许。
 #
 # 1. 读 CMake 写出的 occt-link-report.txt（链接闭包，不依赖 dumpbin）。
 # 2. 对构建目录里我们自己的 exe/dll 跑 dumpbin /dependents。
@@ -27,7 +28,7 @@ if ($Report -ne "") {
     }
     Write-Host "---- occt-link-report ----"
     Get-Content -LiteralPath $Report | ForEach-Object { Write-Host $_ }
-    $allowed = @("steplens_occt_vis", "steplens_viewer", "StepLens")
+    $allowed = @("steplens_occt_vis", "steplens_viewer", "StepLens", "steplens_scene_tests")
     $viewerOk = $false
     $visOk = $false
     foreach ($line in Get-Content -LiteralPath $Report) {
@@ -79,7 +80,7 @@ foreach ($bin in $bins) {
     $rel = $bin.FullName.Substring($root.Length).TrimStart('\', '/')
     if ($hit) {
         Write-Host "TKOpenGl.dll  YES  $rel"
-        if ($bin.Name -ne "StepLens.exe") {
+        if ($bin.Name -ne "StepLens.exe" -and $bin.Name -ne "steplens_scene_tests.exe") {
             $bad += $rel
         }
     } else {
@@ -92,5 +93,5 @@ if ($bad.Count -gt 0) {
     exit 1
 }
 
-Write-Host "dumpbin: 除 StepLens.exe 外没有 TKOpenGl.dll"
+Write-Host "dumpbin: 除 StepLens.exe 和 steplens_scene_tests.exe 外没有 TKOpenGl.dll"
 exit 0

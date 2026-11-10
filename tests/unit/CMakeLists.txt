@@ -68,6 +68,22 @@ if(STEPLENS_OCCT_CONTRACT)
         PROPERTIES
             LABELS "unit;occt-contract"
             ENVIRONMENT "ASAN_OPTIONS=halt_on_error=1:detect_leaks=0")
+
+    # T08 场景。和 mesh 同一个无头作业。要链 TKOpenGl 才能建视图，所以不放进 steplens_tests
+    # （那份可执行文件用来确认 io/mesh 没有把 TKOpenGl 带进来）。
+    add_executable(steplens_scene_tests scene/SceneBuilderTest.cpp)
+    target_include_directories(steplens_scene_tests PRIVATE "${CMAKE_SOURCE_DIR}/src")
+    target_link_libraries(steplens_scene_tests PRIVATE steplens::scene steplens::occt_vis GTest::gtest_main)
+    target_compile_definitions(steplens_scene_tests PRIVATE
+        "STEPLENS_EXPECTED_OCCT=\"${STEPLENS_EXPECTED_OCCT}\"")
+    steplens_apply_warnings(steplens_scene_tests)
+    steplens_apply_exceptions(steplens_scene_tests OFF)
+    set_target_properties(steplens_scene_tests PROPERTIES FOLDER "tests")
+    gtest_discover_tests(steplens_scene_tests
+        DISCOVERY_MODE PRE_TEST
+        PROPERTIES
+            LABELS "unit;occt-contract"
+            ENVIRONMENT "ASAN_OPTIONS=halt_on_error=1:detect_leaks=0;LIBGL_ALWAYS_SOFTWARE=1")
     return()
 endif()
 
@@ -96,6 +112,22 @@ if(NOT STEPLENS_CORE_ONLY)
     # mesh 公开链 TKV3d（FillTriangles），不链 vis，所以 TKOpenGl 仍然进不来。
     target_link_libraries(steplens_tests PRIVATE steplens::occtsupport steplens::mesh)
     target_compile_definitions(steplens_tests PRIVATE "STEPLENS_EXPECTED_OCCT=\"${STEPLENS_EXPECTED_OCCT}\"")
+
+    # 场景测试单独成可执行文件：它要链 TKOpenGl，不能并进上面这份。
+    add_executable(steplens_scene_tests scene/SceneBuilderTest.cpp)
+    target_include_directories(steplens_scene_tests PRIVATE "${CMAKE_SOURCE_DIR}/src")
+    target_link_libraries(steplens_scene_tests PRIVATE
+        steplens::scene
+        steplens::occt_vis
+        GTest::gtest_main)
+    target_compile_definitions(steplens_scene_tests PRIVATE
+        "STEPLENS_EXPECTED_OCCT=\"${STEPLENS_EXPECTED_OCCT}\"")
+    steplens_apply_warnings(steplens_scene_tests)
+    steplens_apply_exceptions(steplens_scene_tests OFF)
+    set_target_properties(steplens_scene_tests PROPERTIES FOLDER "tests")
+    gtest_discover_tests(steplens_scene_tests
+        DISCOVERY_MODE PRE_TEST
+        PROPERTIES LABELS unit)
 endif()
 steplens_apply_warnings(steplens_tests)
 steplens_apply_exceptions(steplens_tests OFF)

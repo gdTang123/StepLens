@@ -35,7 +35,7 @@ if(STEPLENS_CORE_ONLY)
     FetchContent_MakeAvailable(googletest)
 elseif(STEPLENS_OCCT_CONTRACT)
     # 无头契约测试：conda-forge 的 OpenCASCADE + GTest，不配置 Qt，不编查看器。
-    # 同时编 io、model、mesh，让 7.9.3（默认）和 8.0.1（对照）都能编译加载器和单级网格。
+    # 同时编 io、model、mesh、scene，让 7.9.3（默认）和 8.0.1（对照）都能编译加载器、网格和场景。
     include(StepLensOcct)
     find_package(OpenCASCADE CONFIG REQUIRED)
     find_package(GTest CONFIG REQUIRED)
@@ -82,6 +82,7 @@ elseif(STEPLENS_OCCT_CONTRACT)
     add_subdirectory(src/io)
     add_subdirectory(src/model)
     add_subdirectory(src/mesh)
+    add_subdirectory(src/scene)
 else()
     add_subdirectory(src)
 endif()
