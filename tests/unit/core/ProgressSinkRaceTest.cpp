@@ -21,16 +21,18 @@ void spinPause() noexcept {
     }
 }
 
-long dropsWithinOneLoad(double parseSecondsPerMib, double transferSecondsPerMib, long* readsOut) {
+// long 在 Windows 上是 32 位。读线程空转一两分钟就会绕回负数，EXPECT_GT(reads, 0) 失败。
+std::int64_t dropsWithinOneLoad(double parseSecondsPerMib, double transferSecondsPerMib,
+                                std::int64_t* readsOut) {
     steplens::ProgressSink sink;
     steplens::ProgressEstimate estimate;
     estimate.parseSecondsPerMib = parseSecondsPerMib;
     estimate.transferSecondsPerMib = transferSecondsPerMib;
 
     std::atomic<bool> stop{false};
-    std::atomic<long> seq{0};
-    std::atomic<long> drops{0};
-    std::atomic<long> reads{0};
+    std::atomic<std::int64_t> seq{0};
+    std::atomic<std::int64_t> drops{0};
+    std::atomic<std::int64_t> reads{0};
 
     std::thread writer([&]() {
         for (int load = 0; load < kLoadsPerCase; ++load) {
@@ -48,13 +50,13 @@ long dropsWithinOneLoad(double parseSecondsPerMib, double transferSecondsPerMib,
 
     std::thread reader([&]() {
         float previous = -1.f;
-        long currentSeq = -1;
+        std::int64_t currentSeq = -1;
         while (!stop.load()) {
-            const long before = seq.load();
+            const std::int64_t before = seq.load();
             const float fraction = sink.fraction();
-            const long after = seq.load();
+            const std::int64_t after = seq.load();
             reads.fetch_add(1);
-            if (before != after || (before & 1L) != 0L) {
+            if (before != after || (before & 1) != 0) {
                 currentSeq = -1;
                 continue;
             }
@@ -78,8 +80,8 @@ long dropsWithinOneLoad(double parseSecondsPerMib, double transferSecondsPerMib,
 }
 
 void expectNoDrops(double parseSecondsPerMib, double transferSecondsPerMib) {
-    long reads = 0;
-    const long drops = dropsWithinOneLoad(parseSecondsPerMib, transferSecondsPerMib, &reads);
+    std::int64_t reads = 0;
+    const std::int64_t drops = dropsWithinOneLoad(parseSecondsPerMib, transferSecondsPerMib, &reads);
     EXPECT_GT(reads, 0);
     EXPECT_EQ(drops, 0) << "parse_est=" << parseSecondsPerMib << " transfer_est=" << transferSecondsPerMib
                         << " reads=" << reads << " drops_within_one_load=" << drops;
