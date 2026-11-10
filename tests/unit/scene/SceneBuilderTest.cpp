@@ -93,12 +93,20 @@ std::vector<steplens::mesh::MeshBatch> tessellate(const steplens::model::Documen
     steplens::mesh::Tessellator tessellator(*scheduler, steplens::mesh::MeshPolicy{});
     steplens::ProgressSink sink;
     sink.reset(1);
+    // onBatch 在工作线程上调用，vector 的 push 必须自己加锁。
+    std::mutex batchesMutex;
     std::vector<steplens::mesh::MeshBatch> batches;
     const auto result = tessellator.run(
         model, steplens::mesh::MeshLevel::SchemeB,
-        [&](steplens::mesh::MeshBatch&& batch) { batches.push_back(std::move(batch)); }, sink,
-        steplens::CancelToken{});
+        [&](steplens::mesh::MeshBatch&& batch) {
+            std::lock_guard lock(batchesMutex);
+            batches.push_back(std::move(batch));
+        },
+        sink, steplens::CancelToken{});
     EXPECT_TRUE(result.ok()) << result.error().message;
+    if (result.ok()) {
+        EXPECT_EQ(batches.size(), result.value().prototypesMeshed);
+    }
     return batches;
 }
 
