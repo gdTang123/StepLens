@@ -96,6 +96,7 @@ jobs:
             exit 1
           fi
           # 场景测试要建 AIS 视图。软件光栅在 xvfb 里提供 OpenGL，不改默认 OCCT 版本。
+          # T08：src/scene 的改动必须走到这里，否则契约作业不会编 AIS。
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends xvfb libgl1-mesa-dri libglx-mesa0 libx11-6
           export LIBGL_ALWAYS_SOFTWARE=1
