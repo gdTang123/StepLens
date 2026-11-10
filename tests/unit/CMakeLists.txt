@@ -53,6 +53,21 @@ if(STEPLENS_OCCT_CONTRACT)
         PROPERTIES
             LABELS "unit;occt-contract"
             ENVIRONMENT "ASAN_OPTIONS=halt_on_error=1:detect_leaks=0")
+
+    # T07 单级网格。和 model 同一个无头作业。OCCT 静态分配仍关掉泄漏检查。
+    add_executable(steplens_mesh_tests mesh/TessellatorTest.cpp)
+    target_include_directories(steplens_mesh_tests PRIVATE "${CMAKE_SOURCE_DIR}/src")
+    target_link_libraries(steplens_mesh_tests PRIVATE steplens::mesh GTest::gtest_main)
+    target_compile_definitions(steplens_mesh_tests PRIVATE
+        "STEPLENS_EXPECTED_OCCT=\"${STEPLENS_EXPECTED_OCCT}\"")
+    steplens_apply_warnings(steplens_mesh_tests)
+    steplens_apply_exceptions(steplens_mesh_tests OFF)
+    set_target_properties(steplens_mesh_tests PROPERTIES FOLDER "tests")
+    gtest_discover_tests(steplens_mesh_tests
+        DISCOVERY_MODE PRE_TEST
+        PROPERTIES
+            LABELS "unit;occt-contract"
+            ENVIRONMENT "ASAN_OPTIONS=halt_on_error=1:detect_leaks=0")
     return()
 endif()
 
@@ -75,10 +90,11 @@ if(NOT STEPLENS_CORE_ONLY)
         occt/OcctKernelContractTest.cpp
         occt/OcctBoundaryTest.cpp
         io/CadLoaderTest.cpp
-        model/DocumentModelTest.cpp)
+        model/DocumentModelTest.cpp
+        mesh/TessellatorTest.cpp)
     # io 把数据交换工具包拉进测试进程，用来确认这条链上没有 TKOpenGl。
-    # model 沿 io 公开传递，不另外链 vis。契约单测用到 StdPrs（TKV3d）。只链 TKV3d，不链 vis。
-    target_link_libraries(steplens_tests PRIVATE steplens::occtsupport steplens::model TKV3d)
+    # mesh 公开链 TKV3d（FillTriangles），不链 vis，所以 TKOpenGl 仍然进不来。
+    target_link_libraries(steplens_tests PRIVATE steplens::occtsupport steplens::mesh)
     target_compile_definitions(steplens_tests PRIVATE "STEPLENS_EXPECTED_OCCT=\"${STEPLENS_EXPECTED_OCCT}\"")
 endif()
 steplens_apply_warnings(steplens_tests)
