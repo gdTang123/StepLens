@@ -2,7 +2,7 @@
 
 内部使用的 STEP/IGES 轻量查看器。技术栈是 C++20、Qt 6.12、Open CASCADE Technology、CMake。平台是 Windows 10/11 x64，发布形式是绿色版 zip。
 
-窗口仍是空的：状态栏写着「尚未打开文件」，界面还没有接到打开文件。后台已经能读 STEP/IGES。`LoadSession` / `LoadCoordinator` 调用 `io` 的 `StepLoader` 和 `IgesLoader`，带进度和软取消，读完释放读取器。`model` 的 DocumentModel 已经实现（装配树、原型去重、实例、颜色分组、IGES 分块）。还没做的是装配树界面（T10）、网格（T07）和三维场景（T08）。core 里有结果类型、软取消、进度、线程池、日志和 Windows 崩溃转储。
+窗口仍是空的：状态栏写着「尚未打开文件」，界面还没有接到打开文件。后台已经能读 STEP/IGES。`LoadSession` / `LoadCoordinator` 调用 `io` 的 `StepLoader` 和 `IgesLoader`，带进度和软取消，读完释放读取器。`model` 的 DocumentModel 已经实现（装配树、原型去重、实例、颜色分组、IGES 分块）。`mesh` 的 Tessellator 已经实现 T07 单级网格（方案 B，弦高系数 c = 0.002）：按原型并行三角化，每个原型只做一次，颜色组调用 `FillTriangles` / `FillFaceBoundaries`。还没做的是粗/细两级网格（T07+）、三维场景 SceneBuilder / AIS（T08）和装配树界面（T10）。core 里有结果类型、软取消、进度、线程池、日志和 Windows 崩溃转储。
 
 架构文档是 v1.2。摸底报告在 `docs/bench/spike-m0.md`，Windows 复测清单在 `docs/bench/t02b-windows-checklist.md`。产品锁定 **OCCT 7.9.3**（2026-11-08；T02b 结论是 8.0.1 在 X-07 崩溃）。默认预设 `msvc` / `ci` 使用 `vcpkg-configs/occt-7.9.3`（overrides 锁 `7.9.3#1`），`STEPLENS_EXPECTED_OCCT=7.9.3`。根 `vcpkg.json` 不写 overrides，只给对照预设 `msvc-occt801`（基线端口当前是 8.0.1，不是默认）。版本差异只在 `src/occtsupport/occt_compat.h`。老板在自己电脑上跑的工具在 `bench/`。
 
@@ -18,6 +18,12 @@
 | 样例扫描脚本和结果 | [docs/design/data/](docs/design/data/) |
 
 样例文件不要提交。GrabCAD 和 Twin Disc 的模型有版权和转贴限制，下载到本地目录，用环境变量 `STEPLENS_SAMPLES` 告诉测试程序。`scripts/fetch_samples.py` 要到 T03 才实现。
+
+`STEPLENS_SAMPLES` 里如果有 X-02（`Scania-Engine-V8-XT-Turbo.step`），网格测试 `Tessellator.X02InstanceTrianglesStayWithinBudget` 会加载并要求按实例展开的三角形数 ≤ 5,000,000。没有这份文件时该测试跳过，并写出跳过原因，不会假装已经量过。有样例时可以只跑这一条：
+
+```bash
+STEPLENS_SAMPLES=/path/to/samples ctest --test-dir build/occt-contract -R 'Tessellator.X02' --output-on-failure
+```
 
 ## 环境
 
@@ -81,7 +87,7 @@ tools/  bench、stepgen（尚未实现）
 scripts/  package.py；fetch_samples.py 仍是占位
 ```
 
-模块依赖以架构文档第 4 节为准：`core`、`io`、`model`、`mesh` 不依赖 Qt GUI；只有 `scene`、`viewer`、`measure` 会碰 OCCT 的显示类。`io` 已实现 STEP/IGES 后台读取。`model` 已实现 DocumentModel（装配树、原型去重、实例、颜色分组、IGES 分块）。`mesh`、`scene`、`measure`、`ui`、`pipeline` 仍是占位翻译单元。
+模块依赖以架构文档第 4 节为准：`core`、`io`、`model`、`mesh` 不依赖 Qt GUI；只有 `scene`、`viewer`、`measure` 会碰 OCCT 的显示类。`io` 已实现 STEP/IGES 后台读取。`model` 已实现 DocumentModel（装配树、原型去重、实例、颜色分组、IGES 分块）。`mesh` 已实现 T07 单级 Tessellator（方案 B，c = 0.002），不是占位。T07+ 的粗细两级和 T08 的 SceneBuilder / AIS 不在这一版。`scene`、`measure`、`ui`、`pipeline` 仍是占位翻译单元。
 
 ## 许可证
 

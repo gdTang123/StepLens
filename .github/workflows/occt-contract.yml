@@ -2,7 +2,7 @@ name: occt-contract
 
 # G1-7：Linux 无头 OCCT 内核契约单测。独立于 ci.yml，周严接入主流程时可以整份搬。
 # 主路径是产品锁定的 7.9.3。8.0.1 留在矩阵里做对照（conda 预编译包），不是默认依赖。
-# 只在契约测试、io、model、occtsupport、cmake 或本 workflow 变化时跑，避免每个 PR 都装 OCCT。
+# 只在契约测试、io、model、mesh、occtsupport、cmake 或本 workflow 变化时跑，避免每个 PR 都装 OCCT。
 # 预编译包没有插桩。ASan 覆盖本仓库的测试代码，看不到 TK* 内部的数据竞争。
 on:
   pull_request:
@@ -10,6 +10,7 @@ on:
       - "tests/**"
       - "src/io/**"
       - "src/model/**"
+      - "src/mesh/**"
       - "src/occtsupport/**"
       - "cmake/**"
       - "CMakeLists.txt"
@@ -20,6 +21,7 @@ on:
       - "tests/**"
       - "src/io/**"
       - "src/model/**"
+      - "src/mesh/**"
       - "src/occtsupport/**"
       - "cmake/**"
       - "CMakeLists.txt"
