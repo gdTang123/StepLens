@@ -125,9 +125,6 @@ if(NOT STEPLENS_CORE_ONLY)
     steplens_apply_warnings(steplens_scene_tests)
     steplens_apply_exceptions(steplens_scene_tests OFF)
     set_target_properties(steplens_scene_tests PROPERTIES FOLDER "tests")
-    gtest_discover_tests(steplens_scene_tests
-        DISCOVERY_MODE PRE_TEST
-        PROPERTIES LABELS unit)
 endif()
 steplens_apply_warnings(steplens_tests)
 steplens_apply_exceptions(steplens_tests OFF)
@@ -137,3 +134,9 @@ include(GoogleTest)
 gtest_discover_tests(steplens_tests
     DISCOVERY_MODE PRE_TEST
     PROPERTIES LABELS unit)
+if(NOT STEPLENS_CORE_ONLY)
+    # include(GoogleTest) 在上面。提前调用 gtest_discover_tests 时 MSVC 配置会报未知命令。
+    gtest_discover_tests(steplens_scene_tests
+        DISCOVERY_MODE PRE_TEST
+        PROPERTIES LABELS unit)
+endif()
