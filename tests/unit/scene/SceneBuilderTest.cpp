@@ -11,6 +11,7 @@
 #include "io/ILoader.h"
 #include "mesh/Tessellator.h"
 #include "model/DocumentModel.h"
+#include "model/DocumentRelease.h"
 #include "occtsupport/OcctBoundary.h"
 #include "occtsupport/occt_compat.h"
 #include "scene/SceneBuilder.h"
@@ -50,6 +51,11 @@ namespace {
 int documentCount() {
     std::lock_guard lock(steplens::xcafDocumentMutex());
     return XCAFApp_Application::GetApplication()->NbDocuments();
+}
+
+void expectDocumentsReleased(int before) {
+    ASSERT_TRUE(steplens::model::waitForDocumentRelease(std::chrono::seconds(30)));
+    EXPECT_EQ(documentCount(), before);
 }
 
 opencascade::handle<TDocStd_Document> newDocument() {
@@ -364,7 +370,7 @@ TEST(SceneBuilder, SamePrototypeIsPresentedOnceAndPickReturnsInstance) {
 
     builder.reset(nullptr);
     model.reset();
-    EXPECT_EQ(documentCount(), before);
+    expectDocumentsReleased(before);
 }
 
 TEST(SceneBuilder, FrameBudgetKeepsStallUnderLimit) {
@@ -444,7 +450,7 @@ TEST(SceneBuilder, FrameBudgetKeepsStallUnderLimit) {
 
     builder.reset(nullptr);
     model.reset();
-    EXPECT_EQ(documentCount(), before);
+    expectDocumentsReleased(before);
 }
 
 TEST(SceneBuilder, InstanceColorUsesItsOwnPrototypeAndSharesArrays) {
@@ -506,7 +512,7 @@ TEST(SceneBuilder, InstanceColorUsesItsOwnPrototypeAndSharesArrays) {
 
     builder.reset(nullptr);
     model.reset();
-    EXPECT_EQ(documentCount(), before);
+    expectDocumentsReleased(before);
 }
 
 TEST(SceneBuilder, ColorGroupsFollowMeshBatch) {
@@ -557,5 +563,5 @@ TEST(SceneBuilder, ColorGroupsFollowMeshBatch) {
 
     builder.reset(nullptr);
     model.reset();
-    EXPECT_EQ(documentCount(), before);
+    expectDocumentsReleased(before);
 }
