@@ -187,6 +187,11 @@ public:
     [[nodiscard]] double elapsedSinceLoadStart() const noexcept;
     [[nodiscard]] bool overEstimate() const noexcept;
 
+    // 阶段变化时调用。持有内部锁，钩子不得再进入 ProgressSink，也不得抛异常。
+    // 同一阶段重复写入不会再次调用。bench 用它切分读取、解析、转换的耗时。
+    using PhaseHook = void (*)(ProgressPhase phase, void* user) noexcept;
+    void setPhaseHook(PhaseHook hook, void* user) noexcept;
+
     // 加载线程在 reset 之后独占读取。不要在 GUI 线程和 reset 并发调用。
     [[nodiscard]] std::uint64_t fileBytes() const noexcept {
         return m_fileBytes;
@@ -198,6 +203,7 @@ public:
 private:
     void touchLocked() noexcept;
     void setFractionLocked(float fraction) noexcept;
+    void publishPhaseLocked(ProgressPhase phase) noexcept;
     void enterTimedPhaseLocked(ProgressPhase phase, float bandStart, float bandEnd,
                                double estimateSeconds) noexcept;
     [[nodiscard]] float fractionLocked() const noexcept;
@@ -221,6 +227,8 @@ private:
 
     std::uint64_t m_fileBytes = 0;
     ProgressEstimate m_estimate{};
+    PhaseHook m_phaseHook = nullptr;
+    void* m_phaseHookUser = nullptr;
 };
 
 } // namespace steplens

@@ -1,4 +1,30 @@
 # 无头契约测试单独成可执行文件，带 occt-contract 标签。完整 MSVC 构建仍把同一份源码编进 steplens_tests。
+
+# steplens-bench 的 CLI 合同。可执行文件在 tools/bench，这里只跑它。
+# gtest_discover_tests 由调用方在 include(GoogleTest) 之后执行。
+function(steplens_add_bench_cli_test)
+    if(NOT TARGET steplens_bench)
+        message(FATAL_ERROR "steplens_bench 还没有加入构建")
+    endif()
+    add_executable(steplens_bench_tests bench/BenchCliTest.cpp)
+    target_include_directories(steplens_bench_tests PRIVATE
+        "${CMAKE_SOURCE_DIR}/src"
+        "${CMAKE_CURRENT_BINARY_DIR}/bench_cli/$<CONFIG>")
+    target_link_libraries(steplens_bench_tests PRIVATE steplens::io GTest::gtest_main)
+    target_compile_definitions(steplens_bench_tests PRIVATE
+        "STEPLENS_EXPECTED_OCCT=\"${STEPLENS_EXPECTED_OCCT}\"")
+    steplens_apply_warnings(steplens_bench_tests)
+    steplens_apply_exceptions(steplens_bench_tests OFF)
+    add_dependencies(steplens_bench_tests steplens_bench)
+    set_target_properties(steplens_bench_tests PROPERTIES FOLDER "tests")
+    file(GENERATE
+        OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/bench_cli/$<CONFIG>/steplens_bench_exe.h"
+        CONTENT "#pragma once
+inline constexpr char kSteplensBenchExe[] = R\"bench($<TARGET_FILE:steplens_bench>)bench\";
+inline constexpr char kSteplensSourceDir[] = R\"bench(${CMAKE_SOURCE_DIR})bench\";
+")
+endfunction()
+
 if(STEPLENS_OCCT_CONTRACT)
     add_executable(steplens_occt_contract occt/OcctKernelContractTest.cpp)
     target_include_directories(steplens_occt_contract PRIVATE "${CMAKE_SOURCE_DIR}/src")
@@ -84,6 +110,14 @@ if(STEPLENS_OCCT_CONTRACT)
         PROPERTIES
             LABELS "unit;occt-contract"
             ENVIRONMENT "ASAN_OPTIONS=halt_on_error=1:detect_leaks=0;LIBGL_ALWAYS_SOFTWARE=1")
+
+    steplens_add_bench_cli_test()
+    gtest_discover_tests(steplens_bench_tests
+        DISCOVERY_MODE PRE_TEST
+        PROPERTIES
+            TIMEOUT 180
+            LABELS "unit;occt-contract"
+            ENVIRONMENT "ASAN_OPTIONS=halt_on_error=1:detect_leaks=0;LIBGL_ALWAYS_SOFTWARE=1")
     return()
 endif()
 
@@ -125,6 +159,8 @@ if(NOT STEPLENS_CORE_ONLY)
     steplens_apply_warnings(steplens_scene_tests)
     steplens_apply_exceptions(steplens_scene_tests OFF)
     set_target_properties(steplens_scene_tests PROPERTIES FOLDER "tests")
+
+    steplens_add_bench_cli_test()
 endif()
 steplens_apply_warnings(steplens_tests)
 steplens_apply_exceptions(steplens_tests OFF)
@@ -139,4 +175,10 @@ if(NOT STEPLENS_CORE_ONLY)
     gtest_discover_tests(steplens_scene_tests
         DISCOVERY_MODE PRE_TEST
         PROPERTIES LABELS unit)
+    gtest_discover_tests(steplens_bench_tests
+        DISCOVERY_MODE PRE_TEST
+        PROPERTIES
+            TIMEOUT 180
+            LABELS unit
+            ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1")
 endif()

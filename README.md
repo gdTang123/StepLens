@@ -17,13 +17,25 @@
 | T02b Windows 复测清单 | [docs/bench/t02b-windows-checklist.md](docs/bench/t02b-windows-checklist.md) |
 | 样例扫描脚本和结果 | [docs/design/data/](docs/design/data/) |
 
-样例文件不要提交。GrabCAD 和 Twin Disc 的模型有版权和转贴限制，下载到本地目录，用环境变量 `STEPLENS_SAMPLES` 告诉测试程序。`scripts/fetch_samples.py` 要到 T03 才实现。
+样例文件不要提交。GrabCAD 和 Twin Disc 的模型有版权和转贴限制，下载到本地目录，用环境变量 `STEPLENS_SAMPLES` 告诉测试程序。一条命令拉齐 `docs/prd/samples.md` 并做 sha256 校验：
+
+```bash
+STEPLENS_SAMPLES=/path/to/samples python3 scripts/fetch_samples.py
+```
 
 `STEPLENS_SAMPLES` 里如果有 X-02（`Scania-Engine-V8-XT-Turbo.step`），网格测试 `Tessellator.X02InstanceTrianglesStayWithinBudget` 会加载并要求按实例展开的三角形数 ≤ 5,000,000。没有这份文件时该测试跳过，并写出跳过原因，不会假装已经量过。有样例时可以只跑这一条：
 
 ```bash
 STEPLENS_SAMPLES=/path/to/samples ctest --test-dir build/occt-contract -R 'Tessellator.X02' --output-on-failure
 ```
+
+基准命令（不带界面）。`--repeat 3` 对每次的耗时、计数和可重置的内存峰值取中位数。T07 只有方案 B 一级网格，JSON 里 `fine_triangle_count` 为 0。
+
+```bash
+steplens-bench --file X-02 --stages all --repeat 3 --json out.json
+```
+
+特大档用 `scripts/make_big_step.py` 把现有 STEP 拼成约 500 MiB 和约 1 GiB 的文件，写到 `local/bench/`，不要提交。超大文件只在团队机器上跑，不进托管 CI。
 
 ## 环境
 
@@ -83,8 +95,8 @@ src/    core io model mesh scene viewer measure ui pipeline app
 tests/  unit（GoogleTest）以及以后的 integration / ui / data
 cmake/  编译选项、OCCT 工具包列表、安装规则、overlay ports
 docs/   prd、design、adr、bench
-tools/  bench、stepgen（尚未实现）
-scripts/  package.py；fetch_samples.py 仍是占位
+tools/  bench（steplens-bench）、stepgen（尚未实现，T24 / v0.2）
+scripts/  package.py、fetch_samples.py、make_big_step.py
 ```
 
 模块依赖以架构文档第 4 节为准：`core`、`io`、`model`、`mesh` 不依赖 Qt GUI；只有 `scene`、`viewer`、`measure` 会碰 OCCT 的显示类。`io` 已实现 STEP/IGES 后台读取。`model` 已实现 DocumentModel（装配树、原型去重、实例、颜色分组、IGES 分块）。`mesh` 已实现 T07 单级 Tessellator（方案 B，c = 0.002），不是占位。`scene` 已实现 T08（SceneBuilder、PrototypePrs、SelectionMap），不是占位。T07+ 的粗细两级和 T08+ 的 `replaceMesh` 不在这一版。`measure`、`ui`、`pipeline` 仍是占位翻译单元。`SceneBuilder` 不继承 `QObject`：无头契约测试不链 Qt，GUI 线程的调用方每个事件循环调用一次 `pump()`。

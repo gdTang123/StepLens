@@ -1,0 +1,269 @@
+{
+  "source": "docs/prd/samples.md",
+  "note": "sha256 是这些 URL 在 2026-11-11 下载结果。样例文件不进仓库。",
+  "archives": {
+    "nist-pmi": {
+      "filename": "NIST-PMI-STEP-Files.zip",
+      "url": "https://www.nist.gov/system/files/documents/noindex/2024/06/19/NIST-PMI-STEP-Files.zip",
+      "bytes": 13976599,
+      "sha256": "8fa78429e6d8d9b0d7681d223b6aa9ec98c3772185c55b1a0e3679b21c181911"
+    }
+  },
+  "samples": [
+    {
+      "id": "S-01",
+      "filename": "screw.step",
+      "bytes": 88552,
+      "sha256": "4b3649a4f5c4f05c7a06a402a91fe2fd7e3cba1615520fbd8c62a62610ad3e69",
+      "url": "https://raw.githubusercontent.com/Open-Cascade-SAS/OCCT/master/data/step/screw.step"
+    },
+    {
+      "id": "S-02",
+      "filename": "linkrods.step",
+      "bytes": 1793282,
+      "sha256": "3674e4b01ee0e983c81ed170f0574cda201ad08e0f7b46e05e4f4613400fd5f7",
+      "url": "https://raw.githubusercontent.com/Open-Cascade-SAS/OCCT/master/data/step/linkrods.step"
+    },
+    {
+      "id": "S-03",
+      "filename": "as1-ac-214.stp",
+      "bytes": 83424,
+      "sha256": "1bb1a0e55dc4a0169e329529eb520596690f8745077c1bdd2f9fa41fa5a2aa95",
+      "url": "https://raw.githubusercontent.com/FreeCAD/FreeCAD/main/data/tests/Step/as1-ac-214.stp"
+    },
+    {
+      "id": "S-04",
+      "filename": "Schenkel.stp",
+      "bytes": 590055,
+      "sha256": "69df4cb83831b2e0b9e9d7a04c72c893c6dcc82f2c18c4dd2f3280144a6c8088",
+      "url": "https://raw.githubusercontent.com/FreeCAD/FreeCAD/main/data/examples/Schenkel.stp"
+    },
+    {
+      "id": "S-05",
+      "filename": "as1_pe.stp",
+      "bytes": 78666,
+      "sha256": "34139ba9867e56cfeef1d128231ddda076218f5e0f1c09830b7dd66a6e0dd35e",
+      "url": "https://downloads.steptools.com/docs/stpfiles/ap203/as1_pe.stp"
+    },
+    {
+      "id": "S-06",
+      "filename": "moon_buggy_asm.stp",
+      "bytes": 322217,
+      "sha256": "2afaaf50cd7ec15e36367be0a1e41730e7af5440ed974b62a0a21cf6346289dd",
+      "url": "https://downloads.steptools.com/docs/stpfiles/ap203/moon_buggy_asm.stp"
+    },
+    {
+      "id": "S-07",
+      "filename": "123Block_Color.stp",
+      "bytes": 9756,
+      "sha256": "4bbdd752fd3c4e7ebfee633da210b9e3df62c583a604e874ca5e9c36545d2be4",
+      "url": "https://downloads.steptools.com/docs/stpfiles/ap203e2/123Block_Color.stp"
+    },
+    {
+      "id": "S-08",
+      "filename": "nist_ctc_02_asme1_ap242-e2.stp",
+      "bytes": 1981342,
+      "sha256": "99a0a2079ddeb64d05c2432cbe931fa17c89da60d8b0bcb0b11bd0ed94fa2e68",
+      "archive": "nist-pmi",
+      "member": "NIST-PMI-STEP-Files/nist_ctc_02_asme1_ap242-e2.stp"
+    },
+    {
+      "id": "S-09",
+      "filename": "nist_ftc_09_asme1_ap242-e1.stp",
+      "bytes": 6109836,
+      "sha256": "f1215fe15a78085a9fa78dd81714caf774b59071be92580b04ebfdc19f52a1bd",
+      "archive": "nist-pmi",
+      "member": "NIST-PMI-STEP-Files/nist_ftc_09_asme1_ap242-e1.stp"
+    },
+    {
+      "id": "S-10",
+      "filename": "nist_stc_10_asme1_ap242-e2.stp",
+      "bytes": 4875056,
+      "sha256": "fba4f46cab1ce1402362038036884631b4a41afe1c9efc5681d358c39db7ed5f",
+      "archive": "nist-pmi",
+      "member": "NIST-PMI-STEP-Files/nist_stc_10_asme1_ap242-e2.stp"
+    },
+    {
+      "id": "S-11",
+      "filename": "ROTOR-201NAL-Z7.STEP",
+      "bytes": 6947174,
+      "sha256": "b5c4f9c0676f675b32ea425e5bc624c01296d9ef26e939eb87cd335ac81866ed",
+      "url": "https://downloads.steptools.com/docs/stpfiles/bigassy/ROTOR-201NAL-Z7.STEP"
+    },
+    {
+      "id": "S-12",
+      "filename": "bearing.iges",
+      "bytes": 1284903,
+      "sha256": "e148b6f4240694049c8a2b894dc9f7c74113bb8991e5a12a5dead160fb9f0106",
+      "url": "https://raw.githubusercontent.com/Open-Cascade-SAS/OCCT/master/data/iges/bearing.iges"
+    },
+    {
+      "id": "S-13",
+      "filename": "hammer.iges",
+      "bytes": 1038825,
+      "sha256": "b62fb4823e109737b56ba2fd18e2d10ecd988776cb16262d59f3e1784feb0a65",
+      "url": "https://raw.githubusercontent.com/Open-Cascade-SAS/OCCT/master/data/iges/hammer.iges"
+    },
+    {
+      "id": "S-14",
+      "filename": "1030490B.igs",
+      "bytes": 7340148,
+      "sha256": "c341ef0e17c9227be45d4d67812264fa2cb6ae7acfa7d0f3bd1051cf7ab19718",
+      "url": "https://twindisc.com/downloads/1030490B.igs"
+    },
+    {
+      "id": "M-01",
+      "filename": "Rocky_House.stp",
+      "bytes": 18205387,
+      "sha256": "8f6fb618cfa0495f3e625c36eb7d7613bf0d77c67dcff34af8e7f29c62d04535",
+      "url": "https://downloads.steptools.com/docs/stpfiles/bigassy/Rocky_House.stp"
+    },
+    {
+      "id": "M-02",
+      "filename": "SO101 Assembly.step",
+      "bytes": 20496014,
+      "sha256": "f754be35708382b05ce65768ae33c612f91dca11ad19d14807dc637eb944ba3d",
+      "url": "https://raw.githubusercontent.com/TheRobotStudio/SO-ARM100/main/STEP/SO101/SO101%20Assembly.step"
+    },
+    {
+      "id": "M-03",
+      "filename": "YARR_assembly.STEP",
+      "bytes": 30215028,
+      "sha256": "8fa71c53c6ebe6340f956e154c583f07a9b05d9465438b592e20a71866226e90",
+      "url": "https://raw.githubusercontent.com/ledsandchips/YARR/master/cad_models/YARR_assembly.STEP"
+    },
+    {
+      "id": "M-04",
+      "filename": "Cruise_Assembly.stp",
+      "bytes": 41900470,
+      "sha256": "497797dfbc90c8518be8823c4ef7cfe8b40ff4750877c844147ebaf5a617a94f",
+      "url": "https://downloads.steptools.com/docs/stpfiles/bigassy/Cruise_Assembly.stp"
+    },
+    {
+      "id": "M-05",
+      "filename": "SP218P001.IGS",
+      "bytes": 13907036,
+      "sha256": "5b2e7183966628da5490686c0333a962f8f0847e8bbe371e99785caa3301982c",
+      "url": "https://twindisc.com/downloads/SP218P001.IGS"
+    },
+    {
+      "id": "M-06",
+      "filename": "1026868C.IGS",
+      "bytes": 33251410,
+      "sha256": "2ccb510806b3c8eb043ad6f1514ecd2ad477866157cdec38426ba6feabc69b8d",
+      "url": "https://twindisc.com/downloads/1026868C.IGS"
+    },
+    {
+      "id": "M-07",
+      "filename": "PX13298F.IGS",
+      "bytes": 40098574,
+      "sha256": "67a3b0c02df453744f80990e1132362dcda62463454686f013c848f705893e99",
+      "url": "https://twindisc.com/downloads/PX13298F.IGS"
+    },
+    {
+      "id": "L-01",
+      "filename": "UMC-500_SS_Solid_Model_2019-06_r1.stp",
+      "bytes": 61791813,
+      "sha256": "d56273f5c7a013b2c7860d287e0f31acc7a14a81868ffabfe35fca1fc49cac76",
+      "url": "https://downloads.steptools.com/docs/stpfiles/bigassy/UMC-500_SS_Solid_Model_2019-06_r1.stp"
+    },
+    {
+      "id": "L-02",
+      "filename": "Ai-14R.stp",
+      "bytes": 103810142,
+      "sha256": "abfd0a013eac5c2136814ee343ed7bba9dd6008a78a0577b10aa0ec197497110",
+      "url": "https://downloads.steptools.com/docs/stpfiles/bigassy/Ai-14R.stp"
+    },
+    {
+      "id": "L-03",
+      "filename": "NissanGT-R.STEP",
+      "bytes": 174757885,
+      "sha256": "c64a4ad7540ab80f7db072781e8eab034bdbe8f0506a2421dbdf139a5f9e998c",
+      "url": "https://downloads.steptools.com/docs/stpfiles/bigassy/NissanGT-R.STEP"
+    },
+    {
+      "id": "L-04",
+      "filename": "PX12820C.igs",
+      "bytes": 80694314,
+      "sha256": "c80e5f24416da4c5d8ec72ef2cabcf89a23900221c5708d9cb92449072b54a70",
+      "url": "https://twindisc.com/downloads/PX12820C.igs"
+    },
+    {
+      "id": "L-05",
+      "filename": "1025454D.IGS",
+      "bytes": 122320138,
+      "sha256": "2c8af33cf2099bba0772e275f96b6302091b7cb10e891f7c5441ce8e5fe01195",
+      "url": "https://twindisc.com/downloads/1025454D.IGS"
+    },
+    {
+      "id": "L-06",
+      "filename": "1028862.IGS",
+      "bytes": 142792340,
+      "sha256": "c294728d345a6f9f72cd8cc943a6fe18318f9f2eee010f12a559211800fa7944",
+      "url": "https://twindisc.com/downloads/1028862.IGS"
+    },
+    {
+      "id": "L-07",
+      "filename": "1028499B.IGS",
+      "bytes": 204027398,
+      "sha256": "9ee797bae76a519c632991f7f53ec0beef9b83e44eff8e8741d0cfce55a902ac",
+      "url": "https://twindisc.com/downloads/1028499B.IGS"
+    },
+    {
+      "id": "X-01",
+      "filename": "Scania-8x4.stp",
+      "bytes": 294668730,
+      "sha256": "573aa7da05462dee25a430b28a6869906775ae5e0126308956661c1e1da421b7",
+      "url": "https://downloads.steptools.com/docs/stpfiles/bigassy/Scania-8x4.stp"
+    },
+    {
+      "id": "X-02",
+      "filename": "Scania-Engine-V8-XT-Turbo.step",
+      "bytes": 374345560,
+      "sha256": "3b02d0b151aa393db2a9c741b243ca34b05b973619cbe638f9a1d00cffede818",
+      "url": "https://downloads.steptools.com/docs/stpfiles/bigassy/Scania-Engine-V8-XT-Turbo.step"
+    },
+    {
+      "id": "X-03",
+      "filename": "LUPA-A1000.STEP",
+      "bytes": 276203264,
+      "sha256": "607b5ed5f23f5c0f605af1ca98a9640062d965096b0322911f5d758e1e93d4c3",
+      "url": "https://zenodo.org/records/8156350/files/LUPA-A1000.STEP?download=1"
+    },
+    {
+      "id": "X-04",
+      "filename": "1026064M.STEP",
+      "bytes": 315405258,
+      "sha256": "e2e8dca8c63427ad7c2d65a95f9abb5571f5012bea28a2baa78361b8b12e4e23",
+      "url": "https://twindisc.com/downloads/1026064M.STEP"
+    },
+    {
+      "id": "X-05",
+      "filename": "1027247E.STEP",
+      "bytes": 236271558,
+      "sha256": "b57557447436a6f5bd0395b62cffae64283ceb847b27b2818e985478a3cc8491",
+      "url": "https://twindisc.com/downloads/1027247E.STEP"
+    },
+    {
+      "id": "X-06",
+      "filename": "1026064M.IGS",
+      "bytes": 300590516,
+      "sha256": "56ed6cb5e45928b368d6afefb9dd63eae36d5d3d248b289d13b1558323e4e26e",
+      "url": "https://twindisc.com/downloads/1026064M.IGS"
+    },
+    {
+      "id": "X-07",
+      "filename": "PX13226.IGS",
+      "bytes": 266541902,
+      "sha256": "0b4e8039a6612c003f38ca3e36f645dfede2f56aa0ba4623b1e0557182cb9a9b",
+      "url": "https://twindisc.com/downloads/PX13226.IGS"
+    },
+    {
+      "id": "X-08",
+      "filename": "1027247E.IGS",
+      "bytes": 256710594,
+      "sha256": "529e88c403991b74e8c34c8402f7601b5c299860c82c707357753b1c490589d4",
+      "url": "https://twindisc.com/downloads/1027247E.IGS"
+    }
+  ]
+}
