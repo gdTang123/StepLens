@@ -11,6 +11,7 @@
 #include <IMeshTools_Parameters.hxx>
 #include <Message_ProgressIndicator.hxx>
 #include <Message_ProgressScope.hxx>
+#include <NCollection_Vec3.hxx>
 #include <Poly_Triangle.hxx>
 #include <Poly_Triangulation.hxx>
 #include <Standard_ProgramError.hxx>
@@ -21,7 +22,6 @@
 #include <TopoDS_Compound.hxx>
 #include <TopoDS_Face.hxx>
 #include <gp_Pnt.hxx>
-#include <gp_Vec3f.hxx>
 
 #include <algorithm>
 #include <atomic>
@@ -330,7 +330,8 @@ struct MeshJob {
 struct TriSnapshot {
     std::vector<gp_Pnt> nodes;
     std::vector<Poly_Triangle> triangles;
-    std::vector<gp_Vec3f> normals;
+    // 8.0.1 把 gp_Vec3f 标成弃用，/Werror 下不能写这个名字。两边都是 NCollection_Vec3<float>。
+    std::vector<NCollection_Vec3<float>> normals;
     bool hasNormals = false;
 };
 
