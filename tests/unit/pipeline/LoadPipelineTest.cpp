@@ -451,26 +451,11 @@ TEST(LoadPipeline, OpenReplacesQueuedModelOffGuiThread) {
 #if defined(STEPLENS_HAS_APP)
 
 int runAppUntilReady(const std::filesystem::path& file, std::chrono::milliseconds timeout) {
-    const std::string path = pathUtf8(file);
 #if defined(_WIN32)
     SetEnvironmentVariableW(L"QT_QPA_PLATFORM", L"offscreen");
     SetEnvironmentVariableW(L"STEPLENS_QUIT_WHEN_READY", L"1");
-    const std::wstring exe = [] {
-        const int needed = MultiByteToWideChar(CP_UTF8, 0, kStepLensExe, -1, nullptr, 0);
-        std::wstring wide(static_cast<std::size_t>(needed > 0 ? needed - 1 : 0), L'\0');
-        if (needed > 1) {
-            MultiByteToWideChar(CP_UTF8, 0, kStepLensExe, -1, wide.data(), needed);
-        }
-        return wide;
-    }();
-    const std::wstring argument = [&] {
-        const int needed = MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, nullptr, 0);
-        std::wstring wide(static_cast<std::size_t>(needed > 0 ? needed - 1 : 0), L'\0');
-        if (needed > 1) {
-            MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, wide.data(), needed);
-        }
-        return wide;
-    }();
+    const std::wstring exe = std::filesystem::path(kStepLensExe).wstring();
+    const std::wstring argument = file.wstring();
     std::wstring command = L"\"" + exe + L"\" \"" + argument + L"\"";
     STARTUPINFOW startup{};
     startup.cb = sizeof(startup);
@@ -491,6 +476,7 @@ int runAppUntilReady(const std::filesystem::path& file, std::chrono::millisecond
     CloseHandle(process.hProcess);
     return static_cast<int>(code);
 #else
+    const std::string path = pathUtf8(file);
     const pid_t pid = fork();
     if (pid < 0) {
         return -1;
