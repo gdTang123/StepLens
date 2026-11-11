@@ -4,6 +4,7 @@
 #include "pipeline/SceneHost.h"
 #include "scene/SceneBuilder.h"
 #include "viewer/GlCleanup.h"
+#include "viewer/SceneHostBinding.h"
 
 #include <QDebug>
 #include <QDragEnterEvent>
@@ -175,10 +176,20 @@ public:
     }
 
     void clear() override {
-        if (m_builder) {
-            m_builder->reset(nullptr);
-        }
+        releaseBuilder();
         m_widget.restoreIdlePresentation();
+    }
+
+    void releaseBuilder() {
+        m_builder.reset();
+        m_context.Nullify();
+    }
+
+    void rebind(const opencascade::handle<AIS_InteractiveContext>& context) {
+        if (m_builder) {
+            m_builder.reset();
+        }
+        m_context = context;
     }
 
     void fitAll() override {
@@ -196,6 +207,7 @@ private:
     scene::SceneBuilder& builder();
 
     ViewerWidget& m_widget;
+    opencascade::handle<AIS_InteractiveContext> m_context;
     std::unique_ptr<scene::SceneBuilder> m_builder;
 };
 
@@ -207,6 +219,7 @@ struct ViewerWidget::State {
     Handle(AIS_Shape) box;
     OrbitInput input;
     std::unique_ptr<ViewerSceneHost> scene;
+    SceneHostBinding binding;
     double angle = 0.0;
     bool paintReady = false;
     bool fboWarned = false;
@@ -219,8 +232,13 @@ struct ViewerWidget::State {
 
 scene::SceneBuilder& ViewerSceneHost::builder() {
     if (!m_builder) {
+        opencascade::handle<AIS_InteractiveContext> context = m_context;
+        if (context.IsNull()) {
+            context = m_widget.m_state->context;
+        }
         // 等到第一次把模型交进来再绑上下文。构造视图时上下文可能还没有窗口。
-        m_builder = std::make_unique<scene::SceneBuilder>(m_widget.m_state->context);
+        m_builder = std::make_unique<scene::SceneBuilder>(context);
+        m_context = context;
         m_builder->setFirstFrameCallback([this] { m_widget.fitAll(); });
     }
     return *m_builder;
@@ -300,6 +318,10 @@ void ViewerWidget::createScene() {
     m_state->view->SetBackgroundColor(Quantity_TOC_RGB, 0.16, 0.18, 0.22);
     m_state->context = new AIS_InteractiveContext(m_state->viewer);
     m_state->box = new AIS_Shape(BRepPrimAPI_MakeBox(100.0, 50.0, 90.0).Shape());
+    m_state->binding.bind(m_state->context.get());
+    if (m_state->scene) {
+        m_state->scene->rebind(m_state->context);
+    }
 }
 
 void ViewerWidget::displayBox() {
@@ -334,8 +356,12 @@ void ViewerWidget::releaseScene() {
     if (m_state->timer != nullptr) {
         m_state->timer->stop();
     }
-    // SceneBuilder 析构会 RemoveAll。这时上下文还在，不能先把它丢掉。
-    m_state->scene.reset();
+    // 只拆 SceneBuilder，让它在上下文还活着时 RemoveAll。宿主留着，LoadPipeline 的引用不悬空。
+    // 文档的最后一份 Close 由 SceneBuilder 析构交给后台，不在这里做。
+    if (m_state->scene) {
+        m_state->scene->releaseBuilder();
+    }
+    m_state->binding.releaseScene();
     m_state->box.Nullify();
     m_state->context.Nullify();
     m_state->view.Nullify();

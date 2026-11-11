@@ -53,6 +53,8 @@ public:
 
     // 测试缝。在模型交给界面之前、仍在加载线程上调用。可以看 CancelToken，不要碰 SceneHost。
     void setBeforePublishForTest(std::function<void(const CancelToken&)> probe);
+    // 测试缝。模型已经放进队列之后、三角化之前，把这次加载记成失败。用来覆盖失败路径的后台释放。
+    void setFailAfterPublishForTest(bool fail);
 
 private:
     struct State;

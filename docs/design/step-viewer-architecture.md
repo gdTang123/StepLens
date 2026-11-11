@@ -875,7 +875,7 @@ public:
 2. `opencascade::handle` 的引用计数是原子的，可以跨线程传递；但**被指向的对象本身不保证线程安全**。跨线程传递的数据包（`MeshBatch`、`shared_ptr<const DocumentModel>`）在交出后，生产者不再修改。
 3. `TopoDS_Shape` 在加载完成后视为只读。**唯一例外**：三角化会把 `Poly_Triangulation` 写进面的 `BRep_TFace`。规则是：同一个原型（同一个 `TShape`）同一时间只允许一个三角化任务；三角化进行中的原型，GUI 线程不得为它计算子形状选择（测量模式下点到这个原型时，提示"正在细化，请稍候"，或等它完成）。原型状态机：`NoMesh → Coarse → Refining → Fine`，用原子变量保存。
 4. STEP 读取器每个线程一个（OCCT 8 发布说明的并发前提；7.9.3 不保证并发安全——v1.2 双版本期间按 7.9.3 的保守规则写，MVP 一次只读一个文件，不受影响）；**IGES 读取不保证并发安全，全局互斥串行化**（同样来自 OCCT 8 发布说明）。MVP 一次只打开一个文件，实际上不会并发，但约定先写清楚。
-5. 工作线程到 GUI 线程的数据传递统一走 `QMetaObject::invokeMethod(obj, lambda, Qt::QueuedConnection)`；进度只写原子量（CAS 单调），由 GUI 定时器拉取，时间估算在读端算（6.5）。
+5. 工作线程到 GUI 线程的数据传递，草案写的是 `QMetaObject::invokeMethod(obj, lambda, Qt::QueuedConnection)`。T11 实际改成带锁的队列：加载线程只把 `MeshBatch` 推进队列，GUI 每 16 ms 调一次 `LoadPipeline::tick()` 再 `SceneBuilder::pump()`。进度仍只写原子量（CAS 单调），由同一次拉取读出来，时间估算在读端算（6.5）。最后一份 `DocumentModel` 的 `Close` 也不在 GUI 上做，交给后台释放线程，并用 `documentsPendingRelease()` 计入还没关完的文档。
 6. 软取消期间 GUI 与后台共享的状态只放在 `LoadSession` 里（`shared_ptr` 共持，4.3.1），后台线程不持有任何 GUI 对象的引用。
 6. 每个工作线程入口调用 `OSD::SetThreadLocalSignal(...)`，把访问违例等转成 OCCT 异常，防止坏文件直接让进程闪退（需要 `/EHa` 还是 `/EHsc` 配合，**需 spike 确认**；当前默认 `/EHsc`）。
 
@@ -932,13 +932,13 @@ stateDiagram-v2
     MeshingCoarse --> Cancelling: cancel
     Presenting --> Cancelling: cancel
     Refining --> Ready: cancel（细化阶段取消=保留粗网格）
-    Cancelling --> Idle: 界面立即恢复，后台释放
+    Cancelling --> Idle: 回到空闲方块，文档在后台 Close
     Reading --> Failed
     Transferring --> Failed
     Failed --> Idle: 中文错误提示
 ```
 
-取舍：**细化阶段的取消只停止细化、保留已经显示的粗网格**，因为此时用户已经能看模型了，回到空白反而不符合预期；其他阶段的取消一律回到打开前的状态（符合 P0-11 ③）。如果打开新文件时旧文件还在后台释放，新加载要等释放完成再开始读取（避免两份内存叠加），界面显示"正在释放上一个文件"。
+取舍：**这次加载如果已经把新模型显示出来，再取消就回到空闲方块，不保留上一个文件**（省内存；细化阶段才保留已经显示的粗网格，那是 v0.2）。取消发生在新模型还没交给视图之前时，视图里原来的东西不动。已经替换掉的文档，最后一次 `Close` 放到后台线程，不在 GUI 上做。如果打开新文件时旧文件还在后台释放，新加载要等 `documentsPendingRelease()` 归零再开始读取（避免两份内存叠加），界面显示"正在后台释放上一个文件…"。
 
 ---
 
@@ -1012,7 +1012,7 @@ stateDiagram-v2
 **(2) 转换阶段**：`Transfer(doc, progress)` + `OcctProgressBridge`（`UserBreak()` 返回取消标志）。实测：X-02 在转换的 20%/50%/80% 取消分别 3/10/17 ms 返回，`Transfer` 返回 false、无异常；取消后关闭文档 + 释放读取器 + 回收堆用 1.2–1.9 s，内存回到约 41 MB。**注意**：取消后 OCCT 进度会跳到 100%，界面必须忽略这次跳变。两次 `UserBreak()` 之间的最长间隔：X-01 1.85 s、X-02 1.13 s、X-03 2.63 s、X-04 1.18 s、X-05 1.45 s，**L-03 13.73 s**（转换开始后约 26–40 s，进度停在 12.6%）——这是目前实测的最坏取消延迟。
 
 **(3) 软取消（MVP 的取消语义，定义与指标见 6.6 节）**：用户点"取消"后——
-1. GUI 线程**立即**（同一事件循环内）：调用 `LoadSession::cancel()`（请求停止 + 冻结进度 + 记录取消时刻，4.3.1）、断开 `SceneBuilder` 队列、`ctx->RemoveAll(false)`、清空树模型、恢复到打开前的界面；状态栏显示"正在后台释放上一个文件…"；
+1. GUI 线程**立即**（同一事件循环内）：调用 `LoadSession::cancel()`（请求停止 + 冻结进度 + 记录取消时刻，4.3.1）、断开 `SceneBuilder` 队列、`ctx->RemoveAll(false)`、清空树模型。这次打开若已经显示了新模型，界面回到空闲方块，不保留上一个文件；还没显示就把队列里的文档交出去，视图保持原样。状态栏显示"正在后台释放上一个文件…"。`RemoveAll` 只摘掉 AIS 对象；最后一份 `DocumentModel` 的 `Close` 交给后台线程（`retireDocument`），不在 GUI 上做，避免 X-02 上 1.2–1.9 s 卡住界面；
 2. 加载线程在**下一个检查点**退出（流读取中：下一次 `underflow()`；转换中：下一次 `UserBreak()`；网格中：下一个原型任务或 `BRepMesh` 进度检查）；若处在无检查点的盲区，就等这段跑完；
 3. 退出后，加载线程负责**丢弃全部结果**（文档、网格），释放内存并回收堆，最后调用 `LoadSession::noteBackgroundReleased()` 并丢掉自己持有的 `shared_ptr`（GUI 早已丢掉自己那份，会话对象在最后一个持有者释放时销毁）；
 4. 后台释放期间用户可以选择新文件，新加载**排队等释放完成**（上一个会话 `released()` 为 true）再开始（避免两份内存叠加）；

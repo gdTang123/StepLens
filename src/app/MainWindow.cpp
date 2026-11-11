@@ -2,6 +2,7 @@
 
 #include "core/ProgressSink.h"
 #include "core/Version.h"
+#include "model/DocumentRelease.h"
 #include "pipeline/LoadPipeline.h"
 #include "pipeline/SceneHost.h"
 #include "ui/LoadingOverlay.h"
@@ -124,14 +125,16 @@ const char* viewName(StandardView view) {
 class MainWindow::NullSceneHost final : public SceneHost {
 public:
     void reset(std::shared_ptr<const model::DocumentModel> model) override {
+        auto previous = std::move(m_model);
         m_model = std::move(model);
+        model::retireDocument(std::move(previous));
     }
     void enqueue(mesh::MeshBatch batch) override {
         static_cast<void>(batch);
     }
     void pump() override {}
     void clear() override {
-        m_model.reset();
+        model::retireDocument(std::move(m_model));
     }
     void fitAll() override {}
     [[nodiscard]] int pending() const override {

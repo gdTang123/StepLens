@@ -1,5 +1,6 @@
 #include "../core/TempDir.h"
 #include "core/OcctLoadContract.h"
+#include "model/DocumentRelease.h"
 #include "pipeline/LoadPipeline.h"
 
 #include <BRepPrimAPI_MakeBox.hxx>
@@ -11,6 +12,7 @@
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <gtest/gtest.h>
 #include <mutex>
@@ -45,7 +47,9 @@ public:
     void reset(std::shared_ptr<const steplens::model::DocumentModel> model) override {
         expectGui();
         ++m_resets;
+        auto previous = std::move(m_model);
         m_model = std::move(model);
+        steplens::model::retireDocument(std::move(previous));
     }
 
     void enqueue(steplens::mesh::MeshBatch batch) override {
@@ -62,7 +66,7 @@ public:
     void clear() override {
         expectGui();
         ++m_clears;
-        m_model.reset();
+        steplens::model::retireDocument(std::move(m_model));
     }
 
     void fitAll() override {
@@ -131,9 +135,17 @@ bool driveUntil(steplens::LoadPipeline& pipeline,
     return false;
 }
 
+struct ReleaseProbeGuard {
+    ~ReleaseProbeGuard() {
+        steplens::model::setDocumentReleaseProbe({});
+        static_cast<void>(steplens::model::waitForDocumentRelease(std::chrono::seconds(30)));
+    }
+};
+
 } // namespace
 
 TEST(LoadPipeline, CancelThenOpenAgainReleasesDocuments) {
+    ASSERT_TRUE(steplens::model::waitForDocumentRelease(std::chrono::seconds(30)));
     steplens::test::TempDir dir;
     const std::filesystem::path file = dir.path() / "box.step";
     ASSERT_TRUE(writeBoxStep(file));
@@ -172,8 +184,14 @@ TEST(LoadPipeline, CancelThenOpenAgainReleasesDocuments) {
     EXPECT_GE(host.enqueued(), 1);
     EXPECT_GE(host.pumps(), 1);
     EXPECT_GE(host.fits(), 1);
-    EXPECT_EQ(documentCount(), baseline + 1);
 
+    std::thread::id releaseThread;
+    std::atomic<bool> sawRelease{false};
+    ReleaseProbeGuard probeGuard;
+    steplens::model::setDocumentReleaseProbe([&](std::thread::id id) {
+        releaseThread = id;
+        sawRelease.store(true, std::memory_order_release);
+    });
     pipeline.open(file);
     ASSERT_TRUE(driveUntil(
         pipeline,
@@ -181,7 +199,161 @@ TEST(LoadPipeline, CancelThenOpenAgainReleasesDocuments) {
             return shot.activity == steplens::LoadActivity::Ready;
         },
         std::chrono::seconds(60)));
-    EXPECT_EQ(documentCount(), baseline + 1);
+    ASSERT_TRUE(pipeline.waitUntilSettled(std::chrono::seconds(30)));
+    ASSERT_TRUE(sawRelease.load(std::memory_order_acquire));
+    EXPECT_NE(releaseThread, std::this_thread::get_id());
+    static_cast<void>(probeGuard);
+}
+
+TEST(LoadPipeline, CancelAfterModelShownReleasesOffGuiThread) {
+    ASSERT_TRUE(steplens::model::waitForDocumentRelease(std::chrono::seconds(30)));
+    steplens::test::TempDir dir;
+    const std::filesystem::path file = dir.path() / "box.step";
+    ASSERT_TRUE(writeBoxStep(file));
+    const int baseline = documentCount();
+
+    RecordingHost host(std::this_thread::get_id());
+    steplens::LoadPipeline pipeline(host);
+    pipeline.open(file);
+    ASSERT_TRUE(driveUntil(
+        pipeline,
+        [](const steplens::LoadPipeline::Snapshot& shot) {
+            return shot.activity == steplens::LoadActivity::Ready;
+        },
+        std::chrono::seconds(60)));
+
+    std::atomic<bool> hold{true};
+    std::thread::id releaseThread;
+    ReleaseProbeGuard probeGuard;
+    steplens::model::setDocumentReleaseProbe([&](std::thread::id id) {
+        releaseThread = id;
+        while (hold.load(std::memory_order_acquire)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    });
+    pipeline.cancel();
+    pipeline.tick();
+    EXPECT_EQ(pipeline.snapshot().activity, steplens::LoadActivity::Releasing);
+    EXPECT_GT(steplens::model::documentsPendingRelease(), 0);
+    hold.store(false, std::memory_order_release);
+    ASSERT_TRUE(pipeline.waitUntilSettled(std::chrono::seconds(30)));
+    pipeline.tick();
+    EXPECT_EQ(pipeline.snapshot().activity, steplens::LoadActivity::Idle);
+    EXPECT_NE(releaseThread, std::this_thread::get_id());
+    EXPECT_EQ(documentCount(), baseline);
+    static_cast<void>(probeGuard);
+}
+
+TEST(LoadPipeline, OpenWhileReleaseInProgress) {
+    steplens::test::TempDir dir;
+    const std::filesystem::path file = dir.path() / "box.step";
+    ASSERT_TRUE(writeBoxStep(file));
+
+    RecordingHost host(std::this_thread::get_id());
+    steplens::LoadPipeline pipeline(host);
+    pipeline.open(file);
+    ASSERT_TRUE(driveUntil(
+        pipeline,
+        [](const steplens::LoadPipeline::Snapshot& shot) {
+            return shot.activity == steplens::LoadActivity::Ready;
+        },
+        std::chrono::seconds(60)));
+
+    std::atomic<bool> hold{true};
+    std::thread::id releaseThread;
+    ReleaseProbeGuard probeGuard;
+    steplens::model::setDocumentReleaseProbe([&](std::thread::id id) {
+        releaseThread = id;
+        while (hold.load(std::memory_order_acquire)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    });
+    pipeline.cancel();
+    pipeline.tick();
+    ASSERT_EQ(pipeline.snapshot().activity, steplens::LoadActivity::Releasing);
+    pipeline.open(file);
+    hold.store(false, std::memory_order_release);
+    ASSERT_TRUE(driveUntil(
+        pipeline,
+        [](const steplens::LoadPipeline::Snapshot& shot) {
+            return shot.activity == steplens::LoadActivity::Ready;
+        },
+        std::chrono::seconds(60)));
+    ASSERT_TRUE(pipeline.waitUntilSettled(std::chrono::seconds(30)));
+    EXPECT_NE(releaseThread, std::this_thread::get_id());
+    EXPECT_GE(host.resets(), 2);
+    static_cast<void>(probeGuard);
+}
+
+TEST(LoadPipeline, FailureReleasesOffGuiThreadAndCanReopen) {
+    steplens::test::TempDir dir;
+    const std::filesystem::path good = dir.path() / "box.step";
+    const std::filesystem::path missing = dir.path() / "missing.step";
+    const std::filesystem::path corrupt = dir.path() / "corrupt.step";
+    ASSERT_TRUE(writeBoxStep(good));
+    {
+        std::ofstream output(corrupt, std::ios::binary);
+        output << "ISO-10303-21;\nHEADER;\nENDSEC;\nDATA;\nENDSEC;\nEND-ISO-10303-21;\n";
+    }
+
+    RecordingHost host(std::this_thread::get_id());
+    steplens::LoadPipeline pipeline(host);
+
+    pipeline.open(missing);
+    pipeline.tick();
+    const auto missingFailure = pipeline.takeFailure();
+    ASSERT_TRUE(missingFailure.has_value());
+    EXPECT_EQ(missingFailure->code, steplens::ErrorCode::FileNotFound);
+
+    std::thread::id releaseThread;
+    std::atomic<int> releases{0};
+    ReleaseProbeGuard probeGuard;
+    steplens::model::setDocumentReleaseProbe([&](std::thread::id id) {
+        releaseThread = id;
+        releases.fetch_add(1, std::memory_order_relaxed);
+    });
+
+    pipeline.open(corrupt);
+    ASSERT_TRUE(driveUntil(
+        pipeline,
+        [](const steplens::LoadPipeline::Snapshot& shot) {
+            return shot.activity != steplens::LoadActivity::Loading &&
+                   shot.activity != steplens::LoadActivity::Releasing;
+        },
+        std::chrono::seconds(60)));
+    const auto corruptFailure = pipeline.takeFailure();
+    ASSERT_TRUE(corruptFailure.has_value());
+    ASSERT_TRUE(pipeline.waitUntilSettled(std::chrono::seconds(30)));
+    if (releases.load(std::memory_order_relaxed) > 0) {
+        EXPECT_NE(releaseThread, std::this_thread::get_id());
+    }
+
+    pipeline.setFailAfterPublishForTest(true);
+    pipeline.open(good);
+    ASSERT_TRUE(driveUntil(
+        pipeline,
+        [](const steplens::LoadPipeline::Snapshot& shot) {
+            return shot.activity != steplens::LoadActivity::Loading &&
+                   shot.activity != steplens::LoadActivity::Releasing;
+        },
+        std::chrono::seconds(60)));
+    const auto meshFailure = pipeline.takeFailure();
+    ASSERT_TRUE(meshFailure.has_value());
+    EXPECT_EQ(meshFailure->code, steplens::ErrorCode::MeshFailed);
+    ASSERT_TRUE(pipeline.waitUntilSettled(std::chrono::seconds(30)));
+    ASSERT_GT(releases.load(std::memory_order_relaxed), 0);
+    EXPECT_NE(releaseThread, std::this_thread::get_id());
+
+    pipeline.setFailAfterPublishForTest(false);
+    static_cast<void>(probeGuard);
+    steplens::model::setDocumentReleaseProbe({});
+    pipeline.open(good);
+    ASSERT_TRUE(driveUntil(
+        pipeline,
+        [](const steplens::LoadPipeline::Snapshot& shot) {
+            return shot.activity == steplens::LoadActivity::Ready;
+        },
+        std::chrono::seconds(60)));
 }
 
 TEST(LoadPipeline, MissingFileDoesNotStartALoad) {

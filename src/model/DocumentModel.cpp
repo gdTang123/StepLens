@@ -2,6 +2,7 @@
 
 #include "core/Log.h"
 #include "core/OcctLoadContract.h"
+#include "model/DocumentRelease.h"
 #include "occtsupport/OcctBoundary.h"
 #include "occtsupport/OcctExceptions.h"
 
@@ -755,6 +756,7 @@ DocumentModel::DocumentModel(BuildKey, opencascade::handle<TDocStd_Document> doc
     : m_doc(std::move(doc)), m_lengthUnitToMm(sanitizeUnit(lengthUnitToMm)) {}
 
 DocumentModel::~DocumentModel() {
+    noteDocumentDestructorThread();
     closeDocument(m_doc);
 }
 

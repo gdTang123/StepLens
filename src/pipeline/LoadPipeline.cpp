@@ -7,6 +7,7 @@
 #include "mesh/MeshPolicy.h"
 #include "mesh/Tessellator.h"
 #include "model/DocumentModel.h"
+#include "model/DocumentRelease.h"
 #include "occtsupport/OcctBoundary.h"
 
 #include <atomic>
@@ -79,6 +80,7 @@ struct LoadPipeline::State {
     std::vector<mesh::MeshBatch> batches;
     std::optional<Error> failure;
     std::function<void(const CancelToken&)> probe;
+    bool failAfterPublish = false;
     LoadCoordinator coordinator;
 };
 
@@ -86,14 +88,16 @@ LoadPipeline::LoadPipeline(SceneHost& host) : m_host(host), m_state(std::make_un
 
 LoadPipeline::~LoadPipeline() {
     std::shared_ptr<LoadSession> session;
+    std::shared_ptr<const model::DocumentModel> dropped;
     {
         std::lock_guard lock(m_state->mutex);
         ++m_state->generation;
         session = std::move(m_state->session);
-        m_state->batches.clear();
-        m_state->model.reset();
+        dropped = std::move(m_state->model);
         m_state->hasModel = false;
+        m_state->batches.clear();
     }
+    model::retireDocument(std::move(dropped));
     if (session) {
         session->cancel();
     }
@@ -124,6 +128,11 @@ void LoadPipeline::finishWorker(std::uint64_t generation, bool ok, std::optional
 void LoadPipeline::setBeforePublishForTest(std::function<void(const CancelToken&)> probe) {
     std::lock_guard lock(m_state->mutex);
     m_state->probe = std::move(probe);
+}
+
+void LoadPipeline::setFailAfterPublishForTest(bool fail) {
+    std::lock_guard lock(m_state->mutex);
+    m_state->failAfterPublish = fail;
 }
 
 void LoadPipeline::open(const std::filesystem::path& file, std::chrono::milliseconds startPause) {
@@ -178,6 +187,13 @@ void LoadPipeline::open(const std::filesystem::path& file, std::chrono::millisec
                         m_state->session = session;
                     }
                 }
+                while (publish && model::documentsPendingRelease() > 0) {
+                    if (!generationCurrent(generation) || session->token().isCancelled()) {
+                        publish = false;
+                        break;
+                    }
+                    std::this_thread::sleep_for(kPauseSlice);
+                }
                 auto left = pause;
                 while (publish && left.count() > 0) {
                     if (!generationCurrent(generation) || session->token().isCancelled()) {
@@ -231,27 +247,38 @@ void LoadPipeline::open(const std::filesystem::path& file, std::chrono::millisec
                                     }
                                 }
                                 if (publish) {
-                                    session->progress().setStage(LoadStage::MeshingCoarse);
-                                    auto scheduler = occt::makeOcctTaskScheduler();
-                                    mesh::Tessellator tessellator(*scheduler, mesh::MeshPolicy{});
-                                    auto stats = tessellator.run(
-                                        *model, mesh::MeshLevel::SchemeB,
-                                        [&](mesh::MeshBatch&& batch) {
-                                            std::lock_guard lock(m_state->mutex);
-                                            if (generation != m_state->generation) {
-                                                return;
-                                            }
-                                            m_state->batches.push_back(std::move(batch));
-                                        },
-                                        session->progress(), session->token());
-                                    if (!generationCurrent(generation) || session->token().isCancelled() ||
-                                        (!stats.ok() && stats.error().code == ErrorCode::Cancelled)) {
-                                        publish = false;
-                                    } else if (!stats.ok()) {
-                                        error = stats.error();
+                                    bool failAfterPublish = false;
+                                    {
+                                        std::lock_guard lock(m_state->mutex);
+                                        failAfterPublish = m_state->failAfterPublish;
+                                    }
+                                    if (failAfterPublish) {
+                                        error = Error{ErrorCode::MeshFailed, "mesh failed after publish",
+                                                      "生成显示失败"};
                                     } else {
-                                        session->progress().setStage(LoadStage::Ready);
-                                        ok = true;
+                                        session->progress().setStage(LoadStage::MeshingCoarse);
+                                        auto scheduler = occt::makeOcctTaskScheduler();
+                                        mesh::Tessellator tessellator(*scheduler, mesh::MeshPolicy{});
+                                        auto stats = tessellator.run(
+                                            *model, mesh::MeshLevel::SchemeB,
+                                            [&](mesh::MeshBatch&& batch) {
+                                                std::lock_guard lock(m_state->mutex);
+                                                if (generation != m_state->generation) {
+                                                    return;
+                                                }
+                                                m_state->batches.push_back(std::move(batch));
+                                            },
+                                            session->progress(), session->token());
+                                        if (!generationCurrent(generation) ||
+                                            session->token().isCancelled() ||
+                                            (!stats.ok() && stats.error().code == ErrorCode::Cancelled)) {
+                                            publish = false;
+                                        } else if (!stats.ok()) {
+                                            error = stats.error();
+                                        } else {
+                                            session->progress().setStage(LoadStage::Ready);
+                                            ok = true;
+                                        }
                                     }
                                 }
                             }
@@ -282,19 +309,23 @@ void LoadPipeline::open(const std::filesystem::path& file, std::chrono::millisec
 
 void LoadPipeline::cancel() {
     std::shared_ptr<LoadSession> session;
+    std::shared_ptr<const model::DocumentModel> dropped;
     bool adopted = false;
     {
         std::lock_guard lock(m_state->mutex);
-        if (m_state->activity != LoadActivity::Loading) {
+        if (m_state->activity != LoadActivity::Loading && m_state->activity != LoadActivity::Ready) {
             return;
         }
-        ++m_state->generation;
-        session = m_state->session;
-        m_state->batches.clear();
-        m_state->model.reset();
-        m_state->hasModel = false;
-        m_state->success = false;
-        adopted = m_state->adopted;
+        if (m_state->activity == LoadActivity::Loading) {
+            ++m_state->generation;
+            session = m_state->session;
+            dropped = std::move(m_state->model);
+            m_state->hasModel = false;
+            m_state->batches.clear();
+            m_state->success = false;
+        }
+        // 新模型已经显示出来再取消：回到空闲方块，不留上一个文件。
+        adopted = m_state->adopted || m_state->haveDisplay;
         m_state->adopted = false;
         if (adopted) {
             m_state->haveDisplay = false;
@@ -305,6 +336,7 @@ void LoadPipeline::cancel() {
     if (session) {
         session->cancel();
     }
+    model::retireDocument(std::move(dropped));
     if (adopted) {
         m_host.clear();
     }
@@ -321,6 +353,7 @@ void LoadPipeline::tick() {
     bool adopted = false;
     int live = 0;
     LoadActivity activity = LoadActivity::Idle;
+    std::shared_ptr<const model::DocumentModel> retireMailbox;
     {
         std::lock_guard lock(m_state->mutex);
         live = m_state->live->load(std::memory_order_acquire);
@@ -338,7 +371,7 @@ void LoadPipeline::tick() {
             }
             m_state->activity = m_state->haveDisplay ? LoadActivity::Ready : LoadActivity::Idle;
             m_state->batches.clear();
-            m_state->model.reset();
+            retireMailbox = std::move(m_state->model);
             m_state->hasModel = false;
             if (dropPartial) {
                 adopted = true;
@@ -355,6 +388,7 @@ void LoadPipeline::tick() {
         activity = m_state->activity;
     }
 
+    model::retireDocument(std::move(retireMailbox));
     if (failed && done && !success && adopted && !adopt) {
         m_host.clear();
         return;
@@ -389,7 +423,8 @@ void LoadPipeline::tick() {
             m_state->activity = LoadActivity::Ready;
             m_state->displayedFile = m_state->requestFile;
             fit = true;
-        } else if (m_state->activity == LoadActivity::Releasing && live == 0) {
+        } else if (m_state->activity == LoadActivity::Releasing && live == 0 &&
+                   model::documentsPendingRelease() == 0) {
             m_state->activity = m_state->haveDisplay ? LoadActivity::Ready : LoadActivity::Idle;
         }
     }
@@ -410,7 +445,8 @@ LoadPipeline::Snapshot LoadPipeline::snapshot() const {
         session = m_state->session;
         live = m_state->live->load(std::memory_order_acquire);
     }
-    shot.waitingForRelease = shot.activity == LoadActivity::Releasing ||
+    const int pendingRelease = model::documentsPendingRelease();
+    shot.waitingForRelease = pendingRelease > 0 || shot.activity == LoadActivity::Releasing ||
                              (shot.activity == LoadActivity::Loading && !session && live > 1);
     if (session && !shot.waitingForRelease) {
         const ProgressSink& progress = session->progress();
@@ -436,7 +472,7 @@ std::optional<Error> LoadPipeline::takeFailure() {
 }
 
 bool LoadPipeline::isSettled() const noexcept {
-    return m_state->live->load(std::memory_order_acquire) == 0;
+    return m_state->live->load(std::memory_order_acquire) == 0 && model::documentsPendingRelease() == 0;
 }
 
 bool LoadPipeline::waitUntilSettled(std::chrono::milliseconds timeout) const {
