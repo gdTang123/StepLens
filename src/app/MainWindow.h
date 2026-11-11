@@ -58,6 +58,7 @@ private:
     bool m_overlayShotSaved = false;
     bool m_modelShotSaved = false;
     bool m_dumpQuitArmed = false;
+    bool m_quitWhenReadyArmed = false;
 };
 
 } // namespace steplens

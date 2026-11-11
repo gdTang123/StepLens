@@ -184,6 +184,16 @@ if(NOT STEPLENS_CORE_ONLY)
     target_link_libraries(steplens_pipeline_tests PRIVATE steplens::pipeline GTest::gtest_main)
     target_compile_definitions(steplens_pipeline_tests PRIVATE
         "STEPLENS_EXPECTED_OCCT=\"${STEPLENS_EXPECTED_OCCT}\"")
+    if(TARGET StepLens)
+        file(GENERATE
+            OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/app_exit/$<CONFIG>/steplens_app_exe.h"
+            CONTENT "#pragma once
+inline constexpr char kStepLensExe[] = R\"exe($<TARGET_FILE:StepLens>)exe\";
+")
+        target_include_directories(steplens_pipeline_tests PRIVATE
+            "${CMAKE_CURRENT_BINARY_DIR}/app_exit/$<CONFIG>")
+        target_compile_definitions(steplens_pipeline_tests PRIVATE STEPLENS_HAS_APP=1)
+    endif()
     steplens_apply_warnings(steplens_pipeline_tests)
     steplens_apply_exceptions(steplens_pipeline_tests OFF)
     set_target_properties(steplens_pipeline_tests PROPERTIES FOLDER "tests")

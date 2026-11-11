@@ -2,7 +2,9 @@
 
 // 把 T05 读取、T06 DocumentModel、T07 Tessellator 串起来，再把网格交给 SceneHost。
 // open / cancel / tick 只在 GUI 线程调用。tick 里才会 pump，工作线程碰不到 SceneBuilder。
-// 软取消只请求停止并冻住进度，不等待后台。后台释放完之前，下一次 open 在 LoadCoordinator 里排队。
+// 软取消只在 Loading 时生效：请求停止并冻住进度，不等待后台。
+// 加载还没结束、新模型已经显示时，取消回到空闲方块。Ready 之后取消不清除模型。
+// 后台释放完之前，下一次 open 在 LoadCoordinator 里排队。
 
 #include "core/CancelToken.h"
 #include "core/ProgressSink.h"

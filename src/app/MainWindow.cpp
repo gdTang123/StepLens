@@ -361,6 +361,10 @@ void MainWindow::refreshUi() {
         }
     } else if (shot.activity == LoadActivity::Ready) {
         statusBar()->showMessage(tr("已完成"));
+        if (!m_quitWhenReadyArmed && qEnvironmentVariableIsSet("STEPLENS_QUIT_WHEN_READY")) {
+            m_quitWhenReadyArmed = true;
+            QTimer::singleShot(0, qApp, &QCoreApplication::quit);
+        }
         if (!m_dumpDir.isEmpty() && !m_modelShotSaved && !m_dumpQuitArmed) {
             m_dumpQuitArmed = true;
             QTimer::singleShot(kModelShotDelayMs, this, &MainWindow::saveModelShots);

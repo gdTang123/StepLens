@@ -8,9 +8,14 @@
 #include <STEPControl_Writer.hxx>
 #include <XCAFApp_Application.hxx>
 
+#ifdef STEPLENS_HAS_APP
+#include "steplens_app_exe.h"
+#endif
+
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -18,6 +23,20 @@
 #include <mutex>
 #include <string>
 #include <thread>
+
+#if defined(STEPLENS_HAS_APP) && defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#elif defined(STEPLENS_HAS_APP)
+#include <csignal>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 namespace {
 
@@ -75,7 +94,19 @@ public:
     }
 
     [[nodiscard]] int pending() const override {
-        return 0;
+        return m_holdDisplay ? 1 : 0;
+    }
+
+    void holdDisplay() {
+        m_holdDisplay = true;
+    }
+
+    void releaseDisplay() {
+        m_holdDisplay = false;
+    }
+
+    [[nodiscard]] bool holdsModel() const {
+        return m_model != nullptr;
     }
 
     [[nodiscard]] int resets() const {
@@ -105,6 +136,7 @@ private:
 
     std::thread::id m_gui;
     std::shared_ptr<const steplens::model::DocumentModel> m_model;
+    bool m_holdDisplay = false;
     int m_resets = 0;
     int m_enqueued = 0;
     int m_pumps = 0;
@@ -205,7 +237,7 @@ TEST(LoadPipeline, CancelThenOpenAgainReleasesDocuments) {
     static_cast<void>(probeGuard);
 }
 
-TEST(LoadPipeline, CancelAfterModelShownReleasesOffGuiThread) {
+TEST(LoadPipeline, CancelMidLoadReturnsToIdleCube) {
     ASSERT_TRUE(steplens::model::waitForDocumentRelease(std::chrono::seconds(30)));
     steplens::test::TempDir dir;
     const std::filesystem::path file = dir.path() / "box.step";
@@ -213,14 +245,16 @@ TEST(LoadPipeline, CancelAfterModelShownReleasesOffGuiThread) {
     const int baseline = documentCount();
 
     RecordingHost host(std::this_thread::get_id());
+    host.holdDisplay();
     steplens::LoadPipeline pipeline(host);
     pipeline.open(file);
     ASSERT_TRUE(driveUntil(
         pipeline,
-        [](const steplens::LoadPipeline::Snapshot& shot) {
-            return shot.activity == steplens::LoadActivity::Ready;
+        [&](const steplens::LoadPipeline::Snapshot& shot) {
+            return shot.activity == steplens::LoadActivity::Loading && host.resets() >= 1;
         },
         std::chrono::seconds(60)));
+    EXPECT_TRUE(host.holdsModel());
 
     std::atomic<bool> hold{true};
     std::thread::id releaseThread;
@@ -234,6 +268,8 @@ TEST(LoadPipeline, CancelAfterModelShownReleasesOffGuiThread) {
     pipeline.cancel();
     pipeline.tick();
     EXPECT_EQ(pipeline.snapshot().activity, steplens::LoadActivity::Releasing);
+    EXPECT_GE(host.clears(), 1);
+    EXPECT_FALSE(host.holdsModel());
     EXPECT_GT(steplens::model::documentsPendingRelease(), 0);
     hold.store(false, std::memory_order_release);
     ASSERT_TRUE(pipeline.waitUntilSettled(std::chrono::seconds(30)));
@@ -244,7 +280,8 @@ TEST(LoadPipeline, CancelAfterModelShownReleasesOffGuiThread) {
     static_cast<void>(probeGuard);
 }
 
-TEST(LoadPipeline, OpenWhileReleaseInProgress) {
+TEST(LoadPipeline, EscapeAfterReadyKeepsModel) {
+    ASSERT_TRUE(steplens::model::waitForDocumentRelease(std::chrono::seconds(30)));
     steplens::test::TempDir dir;
     const std::filesystem::path file = dir.path() / "box.step";
     ASSERT_TRUE(writeBoxStep(file));
@@ -256,6 +293,34 @@ TEST(LoadPipeline, OpenWhileReleaseInProgress) {
         pipeline,
         [](const steplens::LoadPipeline::Snapshot& shot) {
             return shot.activity == steplens::LoadActivity::Ready;
+        },
+        std::chrono::seconds(60)));
+    EXPECT_TRUE(host.holdsModel());
+    const int clears = host.clears();
+    const int resets = host.resets();
+
+    pipeline.cancel();
+    pipeline.tick();
+    EXPECT_EQ(pipeline.snapshot().activity, steplens::LoadActivity::Ready);
+    EXPECT_EQ(host.clears(), clears);
+    EXPECT_EQ(host.resets(), resets);
+    EXPECT_TRUE(host.holdsModel());
+    EXPECT_EQ(steplens::model::documentsPendingRelease(), 0);
+}
+
+TEST(LoadPipeline, OpenWhileReleaseInProgress) {
+    steplens::test::TempDir dir;
+    const std::filesystem::path file = dir.path() / "box.step";
+    ASSERT_TRUE(writeBoxStep(file));
+
+    RecordingHost host(std::this_thread::get_id());
+    host.holdDisplay();
+    steplens::LoadPipeline pipeline(host);
+    pipeline.open(file);
+    ASSERT_TRUE(driveUntil(
+        pipeline,
+        [&](const steplens::LoadPipeline::Snapshot& shot) {
+            return shot.activity == steplens::LoadActivity::Loading && host.resets() >= 1;
         },
         std::chrono::seconds(60)));
 
@@ -271,6 +336,7 @@ TEST(LoadPipeline, OpenWhileReleaseInProgress) {
     pipeline.cancel();
     pipeline.tick();
     ASSERT_EQ(pipeline.snapshot().activity, steplens::LoadActivity::Releasing);
+    host.releaseDisplay();
     pipeline.open(file);
     hold.store(false, std::memory_order_release);
     ASSERT_TRUE(driveUntil(
@@ -355,6 +421,129 @@ TEST(LoadPipeline, FailureReleasesOffGuiThreadAndCanReopen) {
         },
         std::chrono::seconds(60)));
 }
+
+TEST(LoadPipeline, OpenReplacesQueuedModelOffGuiThread) {
+    ASSERT_TRUE(steplens::model::waitForDocumentRelease(std::chrono::seconds(30)));
+    steplens::test::TempDir dir;
+    const std::filesystem::path file = dir.path() / "box.step";
+    ASSERT_TRUE(writeBoxStep(file));
+
+    RecordingHost host(std::this_thread::get_id());
+    steplens::LoadPipeline pipeline(host);
+    pipeline.open(file);
+    ASSERT_TRUE(pipeline.waitUntilSettled(std::chrono::seconds(30)));
+    EXPECT_EQ(host.resets(), 0);
+
+    std::thread::id releaseThread;
+    std::atomic<bool> sawRelease{false};
+    ReleaseProbeGuard probeGuard;
+    steplens::model::setDocumentReleaseProbe([&](std::thread::id id) {
+        releaseThread = id;
+        sawRelease.store(true, std::memory_order_release);
+    });
+    pipeline.open(file);
+    ASSERT_TRUE(pipeline.waitUntilSettled(std::chrono::seconds(30)));
+    ASSERT_TRUE(sawRelease.load(std::memory_order_acquire));
+    EXPECT_NE(releaseThread, std::this_thread::get_id());
+    static_cast<void>(probeGuard);
+}
+
+#if defined(STEPLENS_HAS_APP)
+
+int runAppUntilReady(const std::filesystem::path& file, std::chrono::milliseconds timeout) {
+    const std::string path = pathUtf8(file);
+#if defined(_WIN32)
+    SetEnvironmentVariableW(L"QT_QPA_PLATFORM", L"offscreen");
+    SetEnvironmentVariableW(L"STEPLENS_QUIT_WHEN_READY", L"1");
+    const std::wstring exe = [] {
+        const int needed = MultiByteToWideChar(CP_UTF8, 0, kStepLensExe, -1, nullptr, 0);
+        std::wstring wide(static_cast<std::size_t>(needed > 0 ? needed - 1 : 0), L'\0');
+        if (needed > 1) {
+            MultiByteToWideChar(CP_UTF8, 0, kStepLensExe, -1, wide.data(), needed);
+        }
+        return wide;
+    }();
+    const std::wstring argument = [&] {
+        const int needed = MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, nullptr, 0);
+        std::wstring wide(static_cast<std::size_t>(needed > 0 ? needed - 1 : 0), L'\0');
+        if (needed > 1) {
+            MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, wide.data(), needed);
+        }
+        return wide;
+    }();
+    std::wstring command = L"\"" + exe + L"\" \"" + argument + L"\"";
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    if (CreateProcessW(exe.c_str(), command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &startup,
+                       &process) == 0) {
+        return -1;
+    }
+    const DWORD waited = WaitForSingleObject(process.hProcess, static_cast<DWORD>(timeout.count()));
+    DWORD code = 1;
+    if (waited == WAIT_OBJECT_0) {
+        GetExitCodeProcess(process.hProcess, &code);
+    } else {
+        TerminateProcess(process.hProcess, 1);
+        code = 124;
+    }
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    return static_cast<int>(code);
+#else
+    const pid_t pid = fork();
+    if (pid < 0) {
+        return -1;
+    }
+    if (pid == 0) {
+        setenv("QT_QPA_PLATFORM", "offscreen", 1);
+        setenv("STEPLENS_QUIT_WHEN_READY", "1", 1);
+        setenv("ASAN_OPTIONS", "halt_on_error=1:detect_leaks=0", 1);
+        execl(kStepLensExe, kStepLensExe, path.c_str(), nullptr);
+        _exit(127);
+    }
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    int status = 0;
+    for (;;) {
+        const pid_t done = waitpid(pid, &status, WNOHANG);
+        if (done == pid) {
+            if (WIFEXITED(status)) {
+                return WEXITSTATUS(status);
+            }
+            return 128 + WTERMSIG(status);
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            kill(pid, SIGKILL);
+            waitpid(pid, &status, 0);
+            return 124;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+#endif
+}
+
+TEST(AppExit, CloseAfterDisplayedModelExitsCleanly) {
+    if (std::getenv("STEPLENS_APP_EXIT") == nullptr) {
+        GTEST_SKIP() << "设置 STEPLENS_APP_EXIT=1 后再跑。托管 CI 的 ctest 不带显示库路径，由冒烟步骤拉起。";
+    }
+    steplens::test::TempDir dir;
+    std::filesystem::path file = dir.path() / "box.step";
+    std::chrono::milliseconds timeout{60000};
+    if (const char* samples = std::getenv("STEPLENS_SAMPLES")) {
+        const std::filesystem::path x02 = std::filesystem::path(samples) / "Scania-Engine-V8-XT-Turbo.step";
+        if (std::filesystem::is_regular_file(x02)) {
+            file = x02;
+            timeout = std::chrono::minutes(10);
+        }
+    }
+    if (file.filename() == "box.step") {
+        ASSERT_TRUE(writeBoxStep(file));
+    }
+    const int code = runAppUntilReady(file, timeout);
+    EXPECT_EQ(code, 0);
+}
+
+#endif
 
 TEST(LoadPipeline, MissingFileDoesNotStartALoad) {
     RecordingHost host(std::this_thread::get_id());

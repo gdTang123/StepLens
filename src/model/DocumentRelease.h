@@ -1,8 +1,9 @@
 #pragma once
 
 // 最后一份 DocumentModel 的析构会 Close XCAF 文档。X-02 上这一步大约 1.2–1.9 秒，
-// 不能放在 GUI 线程。调用方把 shared_ptr 交进来；若这是最后一份，放到后台线程再销毁。
-// documentsPendingRelease() 是还没 Close 完的文档数，算进“还活着的文档”。
+// 不能放在 GUI 线程。调用方把 shared_ptr 交进来，后台线程再丢掉这份引用。
+// 不看 use_count：调用方这份一定在后台释放，避免在 GUI 上变成最后一份。
+// documentsPendingRelease() 是还在队列里、尚未 reset 的份数，算进“还活着的文档”。
 
 #include <chrono>
 #include <functional>

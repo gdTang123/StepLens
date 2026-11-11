@@ -150,6 +150,7 @@ void LoadPipeline::open(const std::filesystem::path& file, std::chrono::millisec
     const auto bytes = sizeCode ? std::uint64_t{0} : static_cast<std::uint64_t>(bytesOnDisk);
 
     std::shared_ptr<LoadSession> previous;
+    std::shared_ptr<const model::DocumentModel> replaced;
     std::uint64_t generation = 0;
     std::shared_ptr<JobTicket> ticket;
     {
@@ -159,7 +160,7 @@ void LoadPipeline::open(const std::filesystem::path& file, std::chrono::millisec
         m_state->requestFile = file;
         m_state->success = false;
         m_state->hasModel = false;
-        m_state->model.reset();
+        replaced = std::move(m_state->model);
         m_state->batches.clear();
         m_state->failure.reset();
         m_state->adopted = false;
@@ -167,6 +168,7 @@ void LoadPipeline::open(const std::filesystem::path& file, std::chrono::millisec
         m_state->live->fetch_add(1, std::memory_order_acq_rel);
         ticket = std::make_shared<JobTicket>(m_state->live);
     }
+    model::retireDocument(std::move(replaced));
     if (previous) {
         previous->cancel();
     }
@@ -310,24 +312,23 @@ void LoadPipeline::open(const std::filesystem::path& file, std::chrono::millisec
 void LoadPipeline::cancel() {
     std::shared_ptr<LoadSession> session;
     std::shared_ptr<const model::DocumentModel> dropped;
-    bool adopted = false;
+    bool clearShown = false;
     {
         std::lock_guard lock(m_state->mutex);
-        if (m_state->activity != LoadActivity::Loading && m_state->activity != LoadActivity::Ready) {
+        // 只在加载过程中生效。Ready 之后按 Esc 不清除已经显示的模型。
+        if (m_state->activity != LoadActivity::Loading) {
             return;
         }
-        if (m_state->activity == LoadActivity::Loading) {
-            ++m_state->generation;
-            session = m_state->session;
-            dropped = std::move(m_state->model);
-            m_state->hasModel = false;
-            m_state->batches.clear();
-            m_state->success = false;
-        }
-        // 新模型已经显示出来再取消：回到空闲方块，不留上一个文件。
-        adopted = m_state->adopted || m_state->haveDisplay;
+        ++m_state->generation;
+        session = m_state->session;
+        dropped = std::move(m_state->model);
+        m_state->hasModel = false;
+        m_state->batches.clear();
+        m_state->success = false;
+        // 加载还没结束、新模型已经显示：回到空闲方块，不留上一个文件。
+        clearShown = m_state->adopted || m_state->haveDisplay;
         m_state->adopted = false;
-        if (adopted) {
+        if (clearShown) {
             m_state->haveDisplay = false;
             m_state->displayedFile.clear();
         }
@@ -337,7 +338,7 @@ void LoadPipeline::cancel() {
         session->cancel();
     }
     model::retireDocument(std::move(dropped));
-    if (adopted) {
+    if (clearShown) {
         m_host.clear();
     }
     Log::info("取消打开");

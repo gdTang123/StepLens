@@ -296,6 +296,11 @@ jobs:
           }
           Stop-Process -Id $proc.Id -Force
           Write-Host "空窗口在 offscreen 平台下保持运行"
+          # 模型已经显示后再关窗口。合成 STEP，不依赖 STEPLENS_SAMPLES。
+          # 进程应正常退出：后台 Close 还没完时直接结束，不和 OCCT 静态析构抢。
+          $env:STEPLENS_APP_EXIT = "1"
+          ctest --preset unit -C RelWithDebInfo -R "^AppExit\.CloseAfterDisplayedModel$" --output-on-failure
+          if ($LASTEXITCODE -ne 0) { throw "显示模型后关闭窗口没有干净退出，退出码 $LASTEXITCODE" }
 
       - name: clang-tidy changed C++ files
         run: |

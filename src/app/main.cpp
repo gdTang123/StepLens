@@ -4,6 +4,7 @@
 #include "core/Log.h"
 #include "core/OcctLoadContract.h"
 #include "core/Version.h"
+#include "model/DocumentRelease.h"
 
 #include <QApplication>
 #include <QGuiApplication>
@@ -20,6 +21,7 @@
 #endif
 
 #include <cstdint>
+#include <cstdlib>
 #include <exception>
 #include <string>
 
@@ -57,16 +59,32 @@ int main(int argc, char* argv[]) {
     QApplication::setApplicationName(QStringLiteral("StepLens"));
     QApplication::setApplicationVersion(QString::fromUtf8(std::string{steplens::kVersion}.c_str()));
 
-    steplens::MainWindow window;
-    window.show();
-    const QStringList arguments = QApplication::arguments();
-    for (int index = 1; index < arguments.size(); ++index) {
-        const QString argument = arguments.at(index);
-        if (argument.startsWith(QLatin1Char('-'))) {
-            continue;
+    int code = 0;
+    {
+        // 先拆主窗口，让 SceneBuilder / LoadPipeline 把最后一份文档交到后台。
+        // QApplication 还活着，Qt 对象可以正常析构。
+        steplens::MainWindow window;
+        window.show();
+        const QStringList arguments = QApplication::arguments();
+        for (int index = 1; index < arguments.size(); ++index) {
+            const QString argument = arguments.at(index);
+            if (argument.startsWith(QLatin1Char('-'))) {
+                continue;
+            }
+            window.openPath(argument);
+            break;
         }
-        window.openPath(argument);
-        break;
+        code = app.exec();
     }
-    return app.exec();
+    // 窗口已经拆完。若 Close 还在后台跑，不能再往下拆 QApplication 和 OCCT 静态对象。
+    if (steplens::model::documentsPendingRelease() > 0) {
+        steplens::Log::info("退出时文档仍在后台关闭，结束进程");
+        steplens::Log::shutdown();
+#if defined(_WIN32)
+        TerminateProcess(GetCurrentProcess(), 0);
+#else
+        std::quick_exit(0);
+#endif
+    }
+    return code;
 }

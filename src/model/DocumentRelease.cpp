@@ -31,7 +31,7 @@ public:
     DocumentRetirer& operator=(const DocumentRetirer&) = delete;
 
     void enqueue(std::shared_ptr<const DocumentModel> model) {
-        if (!model || model.use_count() != 1) {
+        if (!model) {
             return;
         }
         m_pending.fetch_add(1, std::memory_order_acq_rel);
