@@ -482,7 +482,7 @@ private:
     CancelSource m_cancel; ProgressSink m_progress; std::atomic<bool> m_released{false};
     std::chrono::steady_clock::time_point m_start;
 };
-// 打开新文件时 LoadPipeline 检查上一个会话：released() 为 false 就排队等待（5.3(3)④）。
+// 打开新文件时 LoadPipeline 等 documentsPendingRelease() 回到 0 再开始读取（5.3(3)④）。
 
 // core/TaskScheduler.h
 class TaskScheduler {
@@ -1015,7 +1015,7 @@ stateDiagram-v2
 1. GUI 线程**立即**（同一事件循环内）：仅当加载尚未结束时调用 `LoadSession::cancel()`（请求停止 + 冻结进度 + 记录取消时刻，4.3.1）。加载还没结束且新模型已经显示时，断开 `SceneBuilder` 队列、`ctx->RemoveAll(false)`、清空树模型，界面回到空闲方块，不保留上一个文件。新模型还没显示就把队列里的文档交出去，视图保持原样。加载已经完成（Ready）后再按 Esc，不清除模型。状态栏在释放期间显示"正在后台释放上一个文件…"。`RemoveAll` 只摘掉 AIS 对象；交给后台的那份 `DocumentModel` 一律 `retireDocument`，不在 GUI 上做，避免 X-02 上 1.2–1.9 s 卡住界面；
 2. 加载线程在**下一个检查点**退出（流读取中：下一次 `underflow()`；转换中：下一次 `UserBreak()`；网格中：下一个原型任务或 `BRepMesh` 进度检查）；若处在无检查点的盲区，就等这段跑完；
 3. 退出后，加载线程负责**丢弃全部结果**（文档、网格），释放内存并回收堆，最后调用 `LoadSession::noteBackgroundReleased()` 并丢掉自己持有的 `shared_ptr`（GUI 早已丢掉自己那份，会话对象在最后一个持有者释放时销毁）；
-4. 后台释放期间用户可以选择新文件，新加载**排队等释放完成**（上一个会话 `released()` 为 true）再开始（避免两份内存叠加）；
+4. 后台释放期间用户可以选择新文件，新加载**排队等释放完成**（`documentsPendingRelease()` 回到 0，并且没有还在跑的加载任务）再开始读取（避免两份内存叠加）；
 5. 用户在后台释放期间**退出程序**：不等待，直接结束进程（我们只读文件、不写任何数据，进程结束时由操作系统回收内存，安全）；
 6. 细化阶段（v0.2 才有）的取消只停止细化、保留已显示的网格。
 

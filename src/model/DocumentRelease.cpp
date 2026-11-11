@@ -1,16 +1,56 @@
-#include "model/DocumentRelease.h"
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
 
 #include "model/DocumentModel.h"
+#include "model/DocumentRelease.h"
 #include "occtsupport/OcctBoundary.h"
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <mutex>
 #include <utility>
 #include <vector>
 
 namespace steplens::model {
 namespace {
+
+// 只给退出测试用。后台线程在 reset 之前睡一会儿，main 才能看到 documentsPendingRelease() > 0。
+// 生产环境不设这个变量。
+int releaseDelayMs() {
+#if defined(_WIN32)
+    char buffer[16] = {};
+    const DWORD count = GetEnvironmentVariableA("STEPLENS_RELEASE_DELAY_MS", buffer, sizeof(buffer));
+    if (count == 0 || count >= sizeof(buffer)) {
+        return 0;
+    }
+    const char* text = buffer;
+#else
+    const char* text = std::getenv("STEPLENS_RELEASE_DELAY_MS");
+    if (text == nullptr || text[0] == '\0') {
+        return 0;
+    }
+#endif
+    int value = 0;
+    for (const char* cursor = text; *cursor != '\0'; ++cursor) {
+        if (*cursor < '0' || *cursor > '9') {
+            return 0;
+        }
+        value = value * 10 + (*cursor - '0');
+        if (value > 5000) {
+            return 5000;
+        }
+    }
+    return value;
+}
 
 class DocumentRetirer {
 public:
@@ -79,6 +119,10 @@ private:
                 }
                 model = std::move(m_queue.back());
                 m_queue.pop_back();
+            }
+            const int delayMs = releaseDelayMs();
+            if (delayMs > 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
             }
             model.reset();
             m_pending.fetch_sub(1, std::memory_order_acq_rel);

@@ -124,6 +124,10 @@ const char* viewName(StandardView view) {
 
 class MainWindow::NullSceneHost final : public SceneHost {
 public:
+    ~NullSceneHost() override {
+        model::retireDocument(std::move(m_model));
+    }
+
     void reset(std::shared_ptr<const model::DocumentModel> model) override {
         auto previous = std::move(m_model);
         m_model = std::move(model);

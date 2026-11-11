@@ -473,6 +473,7 @@ int runAppUntilReady(const std::filesystem::path& file, std::chrono::millisecond
 #if defined(_WIN32)
     SetEnvironmentVariableW(L"QT_QPA_PLATFORM", L"offscreen");
     SetEnvironmentVariableW(L"STEPLENS_QUIT_WHEN_READY", L"1");
+    SetEnvironmentVariableW(L"STEPLENS_RELEASE_DELAY_MS", L"2000");
     const std::wstring exe = std::filesystem::path(kStepLensExe).wstring();
     const std::wstring argument = file.wstring();
     std::wstring command = L"\"" + exe + L"\" \"" + argument + L"\"";
@@ -481,8 +482,10 @@ int runAppUntilReady(const std::filesystem::path& file, std::chrono::millisecond
     PROCESS_INFORMATION process{};
     if (CreateProcessW(exe.c_str(), command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &startup,
                        &process) == 0) {
+        SetEnvironmentVariableW(L"STEPLENS_RELEASE_DELAY_MS", nullptr);
         return -1;
     }
+    SetEnvironmentVariableW(L"STEPLENS_RELEASE_DELAY_MS", nullptr);
     const DWORD waited = WaitForSingleObject(process.hProcess, static_cast<DWORD>(timeout.count()));
     DWORD code = 1;
     if (waited == WAIT_OBJECT_0) {
@@ -503,6 +506,7 @@ int runAppUntilReady(const std::filesystem::path& file, std::chrono::millisecond
     if (pid == 0) {
         setenv("QT_QPA_PLATFORM", "offscreen", 1);
         setenv("STEPLENS_QUIT_WHEN_READY", "1", 1);
+        setenv("STEPLENS_RELEASE_DELAY_MS", "2000", 1);
         setenv("ASAN_OPTIONS", "halt_on_error=1:detect_leaks=0", 1);
         execl(kStepLensExe, kStepLensExe, path.c_str(), nullptr);
         _exit(127);
@@ -545,8 +549,16 @@ TEST(AppExit, CloseAfterDisplayedModelExitsCleanly) {
     if (file.filename() == "box.step") {
         ASSERT_TRUE(writeBoxStep(file));
     }
+    const auto logPath = std::filesystem::path(kStepLensExe).parent_path() / "logs" / "steplens.log";
+    const auto logBytes = std::filesystem::is_regular_file(logPath) ? std::filesystem::file_size(logPath) : 0;
     const int code = runAppUntilReady(file, timeout);
     EXPECT_EQ(code, 0);
+    ASSERT_TRUE(std::filesystem::is_regular_file(logPath)) << logPath;
+    std::ifstream log(logPath, std::ios::binary);
+    ASSERT_TRUE(log);
+    log.seekg(static_cast<std::streamoff>(logBytes));
+    const std::string appended((std::istreambuf_iterator<char>(log)), std::istreambuf_iterator<char>());
+    EXPECT_NE(appended.find("退出时文档仍在后台关闭，结束进程"), std::string::npos) << appended;
 }
 
 #endif
