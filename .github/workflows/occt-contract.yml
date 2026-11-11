@@ -2,7 +2,7 @@ name: occt-contract
 
 # G1-7：Linux 无头 OCCT 内核契约单测。独立于 ci.yml，周严接入主流程时可以整份搬。
 # 主路径是产品锁定的 7.9.3。8.0.1 留在矩阵里做对照（conda 预编译包），不是默认依赖。
-# 只在契约测试、io、model、mesh、occtsupport、cmake 或本 workflow 变化时跑，避免每个 PR 都装 OCCT。
+# 只在契约测试、io、model、mesh、scene、occtsupport、cmake 或本 workflow 变化时跑，避免每个 PR 都装 OCCT。
 # 预编译包没有插桩。ASan 覆盖本仓库的测试代码，看不到 TK* 内部的数据竞争。
 on:
   pull_request:
@@ -11,6 +11,7 @@ on:
       - "src/io/**"
       - "src/model/**"
       - "src/mesh/**"
+      - "src/scene/**"
       - "src/occtsupport/**"
       - "cmake/**"
       - "CMakeLists.txt"
@@ -22,6 +23,7 @@ on:
       - "src/io/**"
       - "src/model/**"
       - "src/mesh/**"
+      - "src/scene/**"
       - "src/occtsupport/**"
       - "cmake/**"
       - "CMakeLists.txt"
@@ -93,4 +95,9 @@ jobs:
             ldd "${test_bin}"
             exit 1
           fi
-          ctest --test-dir build/occt-contract --output-on-failure -L occt-contract
+          # 场景测试要建 AIS 视图。软件光栅在 xvfb 里提供 OpenGL，不改默认 OCCT 版本。
+          # T08：src/scene 的改动必须走到这里，否则契约作业不会编 AIS。
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb libgl1-mesa-dri libglx-mesa0 libx11-6
+          export LIBGL_ALWAYS_SOFTWARE=1
+          xvfb-run -a ctest --test-dir build/occt-contract --output-on-failure -L occt-contract
