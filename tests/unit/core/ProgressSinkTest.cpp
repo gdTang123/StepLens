@@ -141,3 +141,33 @@ TEST(ProgressSink, ConcurrentWritersDoNotGoBackwards) {
     EXPECT_EQ(regressions.load(), 0);
     EXPECT_GT(sink.fraction(), 0.99f);
 }
+
+TEST(ProgressSink, PhaseHookReportsEachChangeOnce) {
+    struct Seen {
+        steplens::ProgressPhase phases[8]{};
+        int count = 0;
+    } seen;
+    steplens::ProgressSink sink;
+    sink.setPhaseHook(
+        [](steplens::ProgressPhase phase, void* user) noexcept {
+            auto* record = static_cast<Seen*>(user);
+            if (record->count < 8) {
+                record->phases[record->count] = phase;
+                ++record->count;
+            }
+        },
+        &seen);
+    sink.reset(kFileBytes);
+    sink.setReadingBytes(10);
+    sink.setReadingBytes(kFileBytes);
+    sink.enterParsing();
+    sink.enterTransfer();
+    sink.setPresentFaceFraction(0.5f);
+    sink.beginCancel();
+    ASSERT_EQ(seen.count, 5);
+    EXPECT_EQ(seen.phases[0], steplens::ProgressPhase::ReadingBytes);
+    EXPECT_EQ(seen.phases[1], steplens::ProgressPhase::Parsing);
+    EXPECT_EQ(seen.phases[2], steplens::ProgressPhase::Transferring);
+    EXPECT_EQ(seen.phases[3], steplens::ProgressPhase::Presenting);
+    EXPECT_EQ(seen.phases[4], steplens::ProgressPhase::Cancelling);
+}

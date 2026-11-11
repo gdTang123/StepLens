@@ -57,6 +57,7 @@ jobs:
             -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
           cmake --build build/core
           ctest --test-dir build/core --output-on-failure
+          python3 scripts/test_t03_tools.py
 
       - name: Check vcpkg manifests and OCCT version macro
         run: |

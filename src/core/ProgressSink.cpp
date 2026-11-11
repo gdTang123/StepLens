@@ -27,12 +27,28 @@ void ProgressSink::setFractionLocked(float fraction) noexcept {
     }
 }
 
+void ProgressSink::publishPhaseLocked(ProgressPhase phase) noexcept {
+    if (m_phase == phase) {
+        return;
+    }
+    m_phase = phase;
+    if (m_phaseHook != nullptr) {
+        m_phaseHook(phase, m_phaseHookUser);
+    }
+}
+
+void ProgressSink::setPhaseHook(PhaseHook hook, void* user) noexcept {
+    std::lock_guard lock(m_mutex);
+    m_phaseHook = hook;
+    m_phaseHookUser = user;
+}
+
 void ProgressSink::enterTimedPhaseLocked(ProgressPhase phase, float bandStart, float bandEnd,
                                          double estimateSeconds) noexcept {
     if (m_frozen) {
         return;
     }
-    m_phase = phase;
+    publishPhaseLocked(phase);
     m_timedBandStart = bandStart;
     m_timedBandEnd = bandEnd;
     m_phaseEstimateSeconds = estimateSeconds;
@@ -69,7 +85,7 @@ void ProgressSink::reset(std::uint64_t fileBytes, ProgressEstimate estimate) noe
     m_fraction = 0.f;
     m_published = 0.f;
     m_stage = LoadStage::Idle;
-    m_phase = ProgressPhase::Idle;
+    publishPhaseLocked(ProgressPhase::Idle);
     m_phaseEstimateSeconds = 0.0;
     m_timedBandStart = 0.f;
     m_timedBandEnd = 0.f;
@@ -85,7 +101,7 @@ void ProgressSink::setReadingBytes(std::uint64_t bytesRead) noexcept {
         return;
     }
     m_timedPhase = false;
-    m_phase = ProgressPhase::ReadingBytes;
+    publishPhaseLocked(ProgressPhase::ReadingBytes);
     float fileFraction = 1.f;
     if (m_fileBytes > 0) {
         if (bytesRead > m_fileBytes) {
@@ -142,7 +158,7 @@ void ProgressSink::setPresentFaceFraction(float faceFraction) noexcept {
         return;
     }
     m_timedPhase = false;
-    m_phase = ProgressPhase::Presenting;
+    publishPhaseLocked(ProgressPhase::Presenting);
     setFractionLocked(progressFromPresenting(faceFraction));
 }
 
@@ -154,7 +170,7 @@ void ProgressSink::beginCancel() noexcept {
     m_frozen = true;
     m_timedPhase = false;
     m_stage = LoadStage::Cancelling;
-    m_phase = ProgressPhase::Cancelling;
+    publishPhaseLocked(ProgressPhase::Cancelling);
     touchLocked();
 }
 

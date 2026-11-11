@@ -26,6 +26,8 @@ vcpkg/
 
 # 样例体积大，而且 GrabCAD / Twin Disc 的文件不能进仓库。
 samples/
+# T03 拼接出来的大 STEP 和本机基准 JSON。
+local/
 
 # 本地运行产物
 logs/
