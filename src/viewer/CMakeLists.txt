@@ -28,6 +28,7 @@ target_link_libraries(steplens_viewer PUBLIC
     Qt6::Widgets
     Qt6::OpenGL)
 target_link_libraries(steplens_viewer PRIVATE
+    steplens::scene
     steplens::occt_vis
     "${OPENGL_gl_LIBRARY}")
 if(STEPLENS_USE_WNT_WINDOW)

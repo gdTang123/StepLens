@@ -6,8 +6,20 @@
 #include "core/Version.h"
 
 #include <QApplication>
+#include <QGuiApplication>
 #include <QString>
 
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
+#include <cstdint>
 #include <exception>
 #include <string>
 
@@ -29,12 +41,32 @@ int main(int argc, char* argv[]) {
 #if defined(_WIN32)
     // OCCT 不走 ANGLE。必须在 QApplication 之前。
     QApplication::setAttribute(Qt::AA_UseDesktopOpenGL);
+    // 每监视器 V2。Qt 6 的入口也会设；这里提前设上，125% 和 150% 按系统缩放，不取整到 100% 或 200%。
+    // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 的值是 (HANDLE)-4。
+    if (HMODULE user32 = GetModuleHandleW(L"user32.dll")) {
+        using SetDpiContext = int(__stdcall*)(void*);
+        auto setDpiContext =
+            reinterpret_cast<SetDpiContext>(GetProcAddress(user32, "SetProcessDpiAwarenessContext"));
+        if (setDpiContext != nullptr) {
+            static_cast<void>(setDpiContext(reinterpret_cast<void*>(static_cast<std::intptr_t>(-4))));
+        }
+    }
 #endif
+    QGuiApplication::setHighDpiScaleFactorRoundingPolicy(Qt::HighDpiScaleFactorRoundingPolicy::PassThrough);
     QApplication app(argc, argv);
     QApplication::setApplicationName(QStringLiteral("StepLens"));
     QApplication::setApplicationVersion(QString::fromUtf8(std::string{steplens::kVersion}.c_str()));
 
     steplens::MainWindow window;
     window.show();
+    const QStringList arguments = QApplication::arguments();
+    for (int index = 1; index < arguments.size(); ++index) {
+        const QString argument = arguments.at(index);
+        if (argument.startsWith(QLatin1Char('-'))) {
+            continue;
+        }
+        window.openPath(argument);
+        break;
+    }
     return app.exec();
 }

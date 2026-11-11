@@ -118,6 +118,22 @@ if(STEPLENS_OCCT_CONTRACT)
             TIMEOUT 180
             LABELS "unit;occt-contract"
             ENVIRONMENT "ASAN_OPTIONS=halt_on_error=1:detect_leaks=0;LIBGL_ALWAYS_SOFTWARE=1")
+
+    # T11 取消后再打开。不链 TKOpenGl，场景用假的 SceneHost。
+    add_executable(steplens_pipeline_tests pipeline/LoadPipelineTest.cpp)
+    target_include_directories(steplens_pipeline_tests PRIVATE "${CMAKE_SOURCE_DIR}/src")
+    target_link_libraries(steplens_pipeline_tests PRIVATE steplens::pipeline GTest::gtest_main)
+    target_compile_definitions(steplens_pipeline_tests PRIVATE
+        "STEPLENS_EXPECTED_OCCT=\"${STEPLENS_EXPECTED_OCCT}\"")
+    steplens_apply_warnings(steplens_pipeline_tests)
+    steplens_apply_exceptions(steplens_pipeline_tests OFF)
+    set_target_properties(steplens_pipeline_tests PROPERTIES FOLDER "tests")
+    gtest_discover_tests(steplens_pipeline_tests
+        DISCOVERY_MODE PRE_TEST
+        PROPERTIES
+            TIMEOUT 120
+            LABELS "unit;occt-contract"
+            ENVIRONMENT "ASAN_OPTIONS=halt_on_error=1:detect_leaks=0")
     return()
 endif()
 
@@ -161,6 +177,15 @@ if(NOT STEPLENS_CORE_ONLY)
     set_target_properties(steplens_scene_tests PROPERTIES FOLDER "tests")
 
     steplens_add_bench_cli_test()
+
+    add_executable(steplens_pipeline_tests pipeline/LoadPipelineTest.cpp)
+    target_include_directories(steplens_pipeline_tests PRIVATE "${CMAKE_SOURCE_DIR}/src")
+    target_link_libraries(steplens_pipeline_tests PRIVATE steplens::pipeline GTest::gtest_main)
+    target_compile_definitions(steplens_pipeline_tests PRIVATE
+        "STEPLENS_EXPECTED_OCCT=\"${STEPLENS_EXPECTED_OCCT}\"")
+    steplens_apply_warnings(steplens_pipeline_tests)
+    steplens_apply_exceptions(steplens_pipeline_tests OFF)
+    set_target_properties(steplens_pipeline_tests PROPERTIES FOLDER "tests")
 endif()
 steplens_apply_warnings(steplens_tests)
 steplens_apply_exceptions(steplens_tests OFF)
@@ -181,4 +206,9 @@ if(NOT STEPLENS_CORE_ONLY)
             TIMEOUT 180
             LABELS unit
             ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1")
+    gtest_discover_tests(steplens_pipeline_tests
+        DISCOVERY_MODE PRE_TEST
+        PROPERTIES
+            TIMEOUT 120
+            LABELS unit)
 endif()
