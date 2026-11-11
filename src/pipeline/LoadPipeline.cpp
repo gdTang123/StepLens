@@ -448,7 +448,8 @@ LoadPipeline::Snapshot LoadPipeline::snapshot() const {
     const int pendingRelease = model::documentsPendingRelease();
     shot.waitingForRelease = pendingRelease > 0 || shot.activity == LoadActivity::Releasing ||
                              (shot.activity == LoadActivity::Loading && !session && live > 1);
-    if (session && !shot.waitingForRelease) {
+    // 后台 Close 时不要把进度读数清成 0。waitingForRelease 只决定状态栏文案。
+    if (session) {
         const ProgressSink& progress = session->progress();
         shot.progress = progress.phase();
         shot.fraction = progress.fraction();
