@@ -450,6 +450,25 @@ TEST(LoadPipeline, OpenReplacesQueuedModelOffGuiThread) {
 
 #if defined(STEPLENS_HAS_APP)
 
+std::string envOrEmpty(const char* name) {
+#if defined(_WIN32)
+    const DWORD needed = GetEnvironmentVariableA(name, nullptr, 0);
+    if (needed == 0) {
+        return {};
+    }
+    std::string value(static_cast<std::size_t>(needed), '\0');
+    const DWORD wrote = GetEnvironmentVariableA(name, value.data(), needed);
+    if (wrote == 0) {
+        return {};
+    }
+    value.resize(wrote);
+    return value;
+#else
+    const char* value = std::getenv(name);
+    return value == nullptr ? std::string{} : std::string{value};
+#endif
+}
+
 int runAppUntilReady(const std::filesystem::path& file, std::chrono::milliseconds timeout) {
 #if defined(_WIN32)
     SetEnvironmentVariableW(L"QT_QPA_PLATFORM", L"offscreen");
@@ -509,13 +528,14 @@ int runAppUntilReady(const std::filesystem::path& file, std::chrono::millisecond
 }
 
 TEST(AppExit, CloseAfterDisplayedModelExitsCleanly) {
-    if (std::getenv("STEPLENS_APP_EXIT") == nullptr) {
+    if (envOrEmpty("STEPLENS_APP_EXIT").empty()) {
         GTEST_SKIP() << "设置 STEPLENS_APP_EXIT=1 后再跑。托管 CI 的 ctest 不带显示库路径，由冒烟步骤拉起。";
     }
     steplens::test::TempDir dir;
     std::filesystem::path file = dir.path() / "box.step";
     std::chrono::milliseconds timeout{60000};
-    if (const char* samples = std::getenv("STEPLENS_SAMPLES")) {
+    const std::string samples = envOrEmpty("STEPLENS_SAMPLES");
+    if (!samples.empty()) {
         const std::filesystem::path x02 = std::filesystem::path(samples) / "Scania-Engine-V8-XT-Turbo.step";
         if (std::filesystem::is_regular_file(x02)) {
             file = x02;
