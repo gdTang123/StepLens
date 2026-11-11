@@ -2,10 +2,11 @@
 
 // T07 单级 Tessellator，方案 B（c = 0.002）。
 // 每个原型只三角化一次，实例共用面上的网格。按面数 × 实例数从大到小调度。
-// 面数超过 MeshPolicy::largeFaceCount 的原型独占调用线程，OCCT 自己的线程池按面并行，
-// 不再和本池的其它原型任务叠在一起。
+// 面数超过 MeshPolicy::largeFaceCount 的原型独占调用线程，不再和本池的其它原型任务叠在一起。
+// 面数超过 2000 时按 2000 面切成顺序复合体再三角化：整壳一次调用会把工作集抬到约 1.8 GB（U14）。
 // 同一原型上的 FillTriangles / FillFaceBoundaries 只在这条独占路径里调用。
-// Poly_Triangulation 保持 BRepMesh 写下来的双精度，不在网格生成之后改单精度。
+// 显示数组拷走顶点之后，面上的 Poly_Triangulation 会去掉 UV，并改成单精度后留在面上（拾取要用）。
+// 7.9.3 和 8.0.1 的 SetDoublePrecision 都不能在节点已经分配之后直接改精度，要先 Clear。
 // T07+ 的粗/细两级、T08 的 SceneBuilder / AIS 不在这里。
 
 #if defined(_WIN32)

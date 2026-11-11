@@ -6,16 +6,22 @@
 
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <BRepTools.hxx>
+#include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <IMeshTools_Parameters.hxx>
 #include <Message_ProgressIndicator.hxx>
 #include <Message_ProgressScope.hxx>
+#include <Poly_Triangle.hxx>
 #include <Poly_Triangulation.hxx>
+#include <Standard_ProgramError.hxx>
 #include <StdPrs_ShadedShape.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopLoc_Location.hxx>
 #include <TopoDS.hxx>
+#include <TopoDS_Compound.hxx>
 #include <TopoDS_Face.hxx>
+#include <gp_Pnt.hxx>
+#include <gp_Vec3f.hxx>
 
 #include <algorithm>
 #include <atomic>
@@ -321,6 +327,157 @@ struct MeshJob {
     std::uint64_t totalFaces = 0;
 };
 
+struct TriSnapshot {
+    std::vector<gp_Pnt> nodes;
+    std::vector<Poly_Triangle> triangles;
+    std::vector<gp_Vec3f> normals;
+    bool hasNormals = false;
+};
+
+// 7.9.3 与 8.0.1 的 SetDoublePrecision 都要求在分配节点之前调用，否则抛
+// Standard_ProgramError（"should be called before allocation"）。两个版本都有
+// RemoveUVNodes。显示数组已经拷走顶点，这里 Clear 后改成单精度再写回，对象本身留在面上。
+void writeTriangulation(const opencascade::handle<Poly_Triangulation>& tri, const TriSnapshot& snap,
+                        bool single) {
+    const int nodeCount = static_cast<int>(snap.nodes.size());
+    const int triangleCount = static_cast<int>(snap.triangles.size());
+    tri->Clear();
+    tri->SetDoublePrecision(!single);
+    if (nodeCount > 0) {
+        tri->ResizeNodes(nodeCount, false);
+    }
+    if (triangleCount > 0) {
+        tri->ResizeTriangles(triangleCount, false);
+    }
+    if (snap.hasNormals) {
+        tri->AddNormals();
+    }
+    for (int index = 1; index <= nodeCount; ++index) {
+        tri->SetNode(index, snap.nodes[static_cast<std::size_t>(index - 1)]);
+    }
+    for (int index = 1; index <= triangleCount; ++index) {
+        tri->SetTriangle(index, snap.triangles[static_cast<std::size_t>(index - 1)]);
+    }
+    if (snap.hasNormals) {
+        for (int index = 1; index <= nodeCount; ++index) {
+            tri->SetNormal(index, snap.normals[static_cast<std::size_t>(index - 1)]);
+        }
+    }
+    tri->RemoveUVNodes();
+    if (nodeCount > 0) {
+        tri->UpdateCachedMinMax();
+    }
+}
+
+void slimTriangulation(const opencascade::handle<Poly_Triangulation>& tri) {
+    if (tri.IsNull()) {
+        return;
+    }
+    tri->RemoveUVNodes();
+    if (!tri->IsDoublePrecision()) {
+        return;
+    }
+    const int nodeCount = tri->NbNodes();
+    const int triangleCount = tri->NbTriangles();
+    if (nodeCount <= 0) {
+        tri->SetDoublePrecision(false);
+        tri->RemoveUVNodes();
+        return;
+    }
+
+    TriSnapshot snap;
+    snap.hasNormals = tri->HasNormals();
+    snap.nodes.resize(static_cast<std::size_t>(nodeCount));
+    for (int index = 1; index <= nodeCount; ++index) {
+        snap.nodes[static_cast<std::size_t>(index - 1)] = tri->Node(index);
+    }
+    if (triangleCount > 0) {
+        snap.triangles.resize(static_cast<std::size_t>(triangleCount));
+        for (int index = 1; index <= triangleCount; ++index) {
+            snap.triangles[static_cast<std::size_t>(index - 1)] = tri->Triangle(index);
+        }
+    }
+    if (snap.hasNormals) {
+        snap.normals.resize(static_cast<std::size_t>(nodeCount));
+        for (int index = 1; index <= nodeCount; ++index) {
+            tri->Normal(index, snap.normals[static_cast<std::size_t>(index - 1)]);
+        }
+    }
+
+    try {
+        writeTriangulation(tri, snap, true);
+    } catch (const Standard_ProgramError&) {
+        // 这一版不能改精度时把双精度网格写回去，面上的三角网格不能丢。
+        writeTriangulation(tri, snap, false);
+    }
+}
+
+void slimKeptMeshes(const TopoDS_Shape& shape) {
+    if (shape.IsNull()) {
+        return;
+    }
+    std::unordered_set<const void*> seen;
+    for (TopExp_Explorer explorer(shape, TopAbs_FACE); explorer.More(); explorer.Next()) {
+        TopLoc_Location location;
+        const auto triangulation = BRep_Tool::Triangulation(TopoDS::Face(explorer.Current()), location);
+        if (triangulation.IsNull() || !seen.insert(triangulation.get()).second) {
+            continue;
+        }
+        slimTriangulation(triangulation);
+    }
+}
+
+// 单个 BRepMesh 调用吃下整张巨型壳时，工作集跟面数一起涨。
+// X-05（40096 面）整壳并行峰值约 1.79 GB，关掉 InParallel 仍约 1.83 GB；
+// 按 2000 面切成顺序的复合体后峰值约 0.51 GB，三角形数相同。
+// 切块仍在这份原型的独占区里顺序执行，同一时刻只有一个三角化任务。
+[[nodiscard]] bool meshPrototypeShape(const TopoDS_Shape& shape, const MeshParams& params,
+                                      std::uint64_t doneBefore, std::uint64_t prototypeFaces,
+                                      std::uint64_t totalFaces, ProgressSink& progress,
+                                      const CancelToken& cancel) {
+    if (prototypeFaces <= kLargePrototypeFaces) {
+        MeshCancelProgress indicator(progress, cancel, doneBefore, prototypeFaces, totalFaces);
+        const Message_ProgressRange range = indicator.Start();
+        BRepMesh_IncrementalMesh mesher(shape, occtParameters(params), range);
+        return static_cast<bool>(mesher.IsDone());
+    }
+
+    std::vector<TopoDS_Face> faces;
+    faces.reserve(static_cast<std::size_t>(prototypeFaces));
+    for (TopExp_Explorer explorer(shape, TopAbs_FACE); explorer.More(); explorer.Next()) {
+        faces.push_back(TopoDS::Face(explorer.Current()));
+    }
+    IMeshTools_Parameters occt = occtParameters(params);
+    occt.InParallel = false;
+    BRep_Builder builder;
+    bool allDone = true;
+    std::uint64_t localDone = 0;
+    for (std::size_t cursor = 0; cursor < faces.size();) {
+        cancel.throwIfCancelled();
+        const std::size_t end =
+            std::min(faces.size(), cursor + static_cast<std::size_t>(kLargePrototypeFaces));
+        TopoDS_Compound compound;
+        builder.MakeCompound(compound);
+        for (std::size_t index = cursor; index < end; ++index) {
+            builder.Add(compound, faces[index]);
+        }
+        BRepMesh_IncrementalMesh mesher(compound, occt);
+        if (!static_cast<bool>(mesher.IsDone())) {
+            allDone = false;
+        }
+        const auto covered = static_cast<std::uint64_t>(end - cursor);
+        if (localDone >= prototypeFaces || covered > prototypeFaces - localDone) {
+            localDone = prototypeFaces;
+        } else {
+            localDone += covered;
+        }
+        progress.setPresentFaceFraction(
+            portionOf(static_cast<double>(doneBefore) + static_cast<double>(localDone), totalFaces));
+        cursor = end;
+    }
+    return allDone;
+}
+
 void meshOne(MeshJob& job, std::size_t prototypeIndex) {
     const model::PrototypeInfo& info = job.model.prototypes()[prototypeIndex];
     ExclusiveLock exclusive(job.exclusive, info.id);
@@ -332,16 +489,13 @@ void meshOne(MeshJob& job, std::size_t prototypeIndex) {
     if (!info.shape.IsNull()) {
         BRepTools::Clean(info.shape);
         const std::uint64_t doneBefore = job.accumulator.doneFaces.load(std::memory_order_relaxed);
-        MeshCancelProgress indicator(job.progress, job.cancel, doneBefore, info.faceCount, job.totalFaces);
-        const Message_ProgressRange range = indicator.Start();
-        // 精度在 BRepMesh 分配节点时已经是双精度。事后 SetDoublePrecision(false) 会抛，
-        // 大坐标的单精度误差也会超过 0.001 mm。这里不改 Poly_Triangulation 的精度。
-        BRepMesh_IncrementalMesh mesher(info.shape, occtParameters(params), range);
+        const bool done = meshPrototypeShape(info.shape, params, doneBefore, info.faceCount, job.totalFaces,
+                                             job.progress, job.cancel);
         job.accumulator.meshCalls.fetch_add(1, std::memory_order_relaxed);
         if (job.cancel.isCancelled()) {
             throw CancelledException{};
         }
-        if (!static_cast<bool>(mesher.IsDone())) {
+        if (!done) {
             Log::warn(std::format("prototype {} mesher reported not done", info.id));
         }
     }
@@ -351,16 +505,10 @@ void meshOne(MeshJob& job, std::size_t prototypeIndex) {
     }
     job.cancel.throwIfCancelled();
 
-    const FaceMesh faces = summarizeMesh(info.shape);
-    if (faces.missing > 0) {
-        Log::warn(std::format("prototype {} left {} face(s) without triangulation", info.id, faces.missing));
-    }
-
     MeshBatch batch;
     batch.id = info.id;
     batch.level = job.level;
-    batch.triangleCount = faces.triangles;
-    batch.approxBytes = faces.bytes;
+    std::uint64_t shownBytes = 0;
     if (info.colorGroups.empty()) {
         job.cancel.throwIfCancelled();
         ColorGroupArrays arrays;
@@ -369,8 +517,8 @@ void meshOne(MeshJob& job, std::size_t prototypeIndex) {
             arrays.triangles = StdPrs_ShadedShape::FillTriangles(info.shape);
             arrays.edges = StdPrs_ShadedShape::FillFaceBoundaries(info.shape);
         }
-        batch.approxBytes += displayBytes(arrays.triangles);
-        batch.approxBytes += displayBytes(arrays.edges);
+        shownBytes += displayBytes(arrays.triangles);
+        shownBytes += displayBytes(arrays.edges);
         batch.groups.push_back(std::move(arrays));
     } else {
         batch.groups.reserve(info.colorGroups.size());
@@ -380,11 +528,24 @@ void meshOne(MeshJob& job, std::size_t prototypeIndex) {
             arrays.color = group.first;
             arrays.triangles = StdPrs_ShadedShape::FillTriangles(group.second);
             arrays.edges = StdPrs_ShadedShape::FillFaceBoundaries(group.second);
-            batch.approxBytes += displayBytes(arrays.triangles);
-            batch.approxBytes += displayBytes(arrays.edges);
+            shownBytes += displayBytes(arrays.triangles);
+            shownBytes += displayBytes(arrays.edges);
             batch.groups.push_back(std::move(arrays));
         }
     }
+
+    // FillTriangles / FillFaceBoundaries 已经把顶点拷进显示数组。之后再瘦身，不改 MeshBatch。
+    slimKeptMeshes(info.shape);
+    for (const auto& group : info.colorGroups) {
+        slimKeptMeshes(group.second);
+    }
+
+    const FaceMesh faces = summarizeMesh(info.shape);
+    if (faces.missing > 0) {
+        Log::warn(std::format("prototype {} left {} face(s) without triangulation", info.id, faces.missing));
+    }
+    batch.triangleCount = faces.triangles;
+    batch.approxBytes = faces.bytes + shownBytes;
 
     {
         std::lock_guard lock(job.accumulator.mutex);

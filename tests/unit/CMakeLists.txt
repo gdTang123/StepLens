@@ -83,7 +83,8 @@ if(STEPLENS_OCCT_CONTRACT)
     # T07 单级网格。和 model 同一个无头作业。OCCT 静态分配仍关掉泄漏检查。
     add_executable(steplens_mesh_tests
         mesh/TessellatorTest.cpp
-        mesh/StepHeapReproTest.cpp)
+        mesh/StepHeapReproTest.cpp
+        mesh/MemoryReleaseTest.cpp)
     target_include_directories(steplens_mesh_tests PRIVATE "${CMAKE_SOURCE_DIR}/src")
     target_link_libraries(steplens_mesh_tests PRIVATE steplens::mesh GTest::gtest_main)
     target_compile_definitions(steplens_mesh_tests PRIVATE
@@ -162,7 +163,8 @@ if(NOT STEPLENS_CORE_ONLY)
         io/CadLoaderTest.cpp
         model/DocumentModelTest.cpp
         mesh/TessellatorTest.cpp
-        mesh/StepHeapReproTest.cpp)
+        mesh/StepHeapReproTest.cpp
+        mesh/MemoryReleaseTest.cpp)
     # io 把数据交换工具包拉进测试进程，用来确认这条链上没有 TKOpenGl。
     # mesh 公开链 TKV3d（FillTriangles），不链 vis，所以 TKOpenGl 仍然进不来。
     target_link_libraries(steplens_tests PRIVATE steplens::occtsupport steplens::mesh)

@@ -3,6 +3,7 @@
 steplens_add_module(io
     ILoader.cpp
     ILoader.h
+    HeapRelease.h
     LoadInternal.cpp
     LoadInternal.h
     ProgressStreamBuf.cpp

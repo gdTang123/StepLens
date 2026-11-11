@@ -6,10 +6,24 @@
 #include <XCAFApp_Application.hxx>
 #include <XCAFDoc_DocumentTool.hxx>
 
+#if defined(_WIN32) || defined(__GLIBC__)
 #include <malloc.h>
+#endif
 #include <mutex>
 #include <system_error>
 #include <utility>
+
+namespace steplens::io {
+
+void releaseFreedHeap() noexcept {
+#if defined(_WIN32)
+    _heapmin();
+#elif defined(__GLIBC__)
+    malloc_trim(0);
+#endif
+}
+
+} // namespace steplens::io
 
 namespace steplens::io::detail {
 
@@ -41,14 +55,6 @@ InputFile inspectInputFile(const std::filesystem::path& file) {
     input.bytes = static_cast<std::uint64_t>(bytes);
     input.ok = true;
     return input;
-}
-
-void releaseFreedHeap() noexcept {
-#if defined(_WIN32)
-    _heapmin();
-#else
-    malloc_trim(0);
-#endif
 }
 
 opencascade::handle<TDocStd_Document> newXcafDocument() {

@@ -250,6 +250,61 @@ std::vector<MemoryMetric> MemoryProbe::runMetrics() {
     return metrics;
 }
 
+std::vector<MemoryMetric> MemoryProbe::heldMetrics() const {
+    std::vector<MemoryMetric> metrics;
+#if defined(_WIN32)
+    const PROCESS_MEMORY_COUNTERS_EX info = counters();
+    MemoryMetric working;
+    working.name = "WorkingSetSizeHeld";
+    working.role = "held_working_set";
+    working.source = "GetProcessMemoryInfo WorkingSetSize after stages, model still resident";
+    working.correspondsTo = "WorkingSetSize";
+    working.aggregation = "median";
+    working.bytes = asBytes(info.WorkingSetSize);
+    metrics.push_back(std::move(working));
+
+    MemoryMetric privateBytes;
+    privateBytes.name = "PrivateUsageHeld";
+    privateBytes.role = "held_commit_private";
+    privateBytes.source = "GetProcessMemoryInfo PrivateUsage after stages, model still resident";
+    privateBytes.correspondsTo = "PrivateUsage";
+    privateBytes.aggregation = "median";
+    privateBytes.bytes = asBytes(info.PrivateUsage);
+    metrics.push_back(std::move(privateBytes));
+#else
+    MemoryMetric resident;
+    resident.name = "VmRSSHeld";
+    resident.role = "held_resident_set";
+    resident.source = "/proc/self/status VmRSS after stages, model still resident";
+    resident.correspondsTo = "WorkingSetSize";
+    resident.aggregation = "median";
+    const std::int64_t rss = kbToBytes(procKilobytes("VmRSS"));
+    if (rss < 0) {
+        resident.available = false;
+        resident.bytes = 0;
+    } else {
+        resident.bytes = rss;
+    }
+    metrics.push_back(std::move(resident));
+
+    MemoryMetric privateBytes;
+    privateBytes.name = "private_bytes_held";
+    privateBytes.role = "held_commit_private";
+    privateBytes.source = "smaps_rollup Private_Clean+Private_Dirty after stages, model still resident";
+    privateBytes.correspondsTo = "PrivateUsage";
+    privateBytes.aggregation = "median";
+    const std::int64_t now = privateBytesNow();
+    if (now < 0) {
+        privateBytes.available = false;
+        privateBytes.bytes = 0;
+    } else {
+        privateBytes.bytes = now;
+    }
+    metrics.push_back(std::move(privateBytes));
+#endif
+    return metrics;
+}
+
 std::vector<MemoryMetric> MemoryProbe::lifetimeMetrics() const {
     std::vector<MemoryMetric> metrics;
 #if defined(_WIN32)

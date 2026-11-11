@@ -2,6 +2,7 @@
 
 #include "core/Log.h"
 #include "core/OcctLoadContract.h"
+#include "io/HeapRelease.h"
 #include "model/DocumentRelease.h"
 #include "occtsupport/OcctBoundary.h"
 #include "occtsupport/OcctExceptions.h"
@@ -110,6 +111,8 @@ void closeDocument(opencascade::handle<TDocStd_Document>& doc) noexcept {
     } catch (...) {
     }
     doc.Nullify();
+    // 形状和文档上的空闲页一起还给系统。句柄已经空时也要回收，关闭路径刚清掉网格。
+    io::releaseFreedHeap();
 }
 
 class DocumentOwner {
@@ -756,7 +759,12 @@ DocumentModel::DocumentModel(BuildKey, opencascade::handle<TDocStd_Document> doc
     : m_doc(std::move(doc)), m_lengthUnitToMm(sanitizeUnit(lengthUnitToMm)) {}
 
 DocumentModel::~DocumentModel() {
+    // 探针看到的就是这次 Close 所在的线程。GUI 不直接析构文档，最后一份引用在后台 retirer 上丢掉。
     noteDocumentDestructorThread();
+    // 形状和网格先丢掉，再关 XCAF。closeDocument 把空闲堆还给系统。
+    m_nodes.clear();
+    m_prototypes.clear();
+    m_leaves.clear();
     closeDocument(m_doc);
 }
 

@@ -5,6 +5,7 @@
 #include "core/CancelToken.h"
 #include "core/Log.h"
 #include "core/Result.h"
+#include "io/HeapRelease.h"
 #include "io/ILoader.h"
 
 #include <TDocStd_Document.hxx>
@@ -30,8 +31,6 @@ struct InputFile {
 
 // 不存在、不是普通文件、或拿不到大小时 ok 为 false，error.userMessage 是中文。
 [[nodiscard]] InputFile inspectInputFile(const std::filesystem::path& file);
-
-void releaseFreedHeap() noexcept;
 
 [[nodiscard]] opencascade::handle<TDocStd_Document> newXcafDocument();
 
@@ -113,7 +112,7 @@ public:
     ReaderSlot() = default;
     ~ReaderSlot() {
         reader.reset();
-        releaseFreedHeap();
+        steplens::io::releaseFreedHeap();
     }
 
     ReaderSlot(const ReaderSlot&) = delete;
