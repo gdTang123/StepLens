@@ -223,16 +223,14 @@ jobs:
         env:
           STEPLENS_STEP_HEAP_REPRO: "1"
         run: |
-          $names = @(
-            "Baseline400x10",
-            "NoTrim400x10",
-            "ClearBeforeClose400x10",
-            "SkipTrimIfPending400x10",
-            "PurgeBeforeTrim400x10"
+          $plan = @(
+            @{ Name = "Baseline400x10"; Times = 3 },
+            @{ Name = "NoParallel400x10"; Times = 8 }
           )
           $missing = $false
-          foreach ($name in $names) {
-            foreach ($pass in 1, 2, 3) {
+          foreach ($item in $plan) {
+            foreach ($pass in 1..$item.Times) {
+              $name = $item.Name
               Write-Host "repro_case=$name pass=$pass"
               $log = Join-Path $env:RUNNER_TEMP "repro-$name-$pass.log"
               ctest --preset unit -C RelWithDebInfo -R "^StepHeapRepro\.$name$" --output-on-failure --verbose --no-tests=error *> $log

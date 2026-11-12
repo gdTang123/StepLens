@@ -216,6 +216,7 @@ void prepareVariant(const char* variant) {
     setEnv("STEPLENS_REPRO_SKIP_TRIM_IF_PENDING", "0");
     setEnv("STEPLENS_REPRO_CLEAR_BEFORE_CLOSE", "0");
     setEnv("STEPLENS_REPRO_PURGE_BEFORE_TRIM", "0");
+    setEnv("STEPLENS_REPRO_NO_PARALLEL", "0");
     if (std::strcmp(variant, "no-trim") == 0) {
         setEnv("STEPLENS_REPRO_NO_TRIM", "1");
     } else if (std::strcmp(variant, "clear-before-close") == 0) {
@@ -224,6 +225,8 @@ void prepareVariant(const char* variant) {
         setEnv("STEPLENS_REPRO_SKIP_TRIM_IF_PENDING", "1");
     } else if (std::strcmp(variant, "purge-before-trim") == 0) {
         setEnv("STEPLENS_REPRO_PURGE_BEFORE_TRIM", "1");
+    } else if (std::strcmp(variant, "no-parallel") == 0) {
+        setEnv("STEPLENS_REPRO_NO_PARALLEL", "1");
     }
     phase(std::format("variant={} mmgt_opt={} mmgt_clear={} mmgt_mmap={} note=no Interface_Static or "
                       "XSControl reset between rounds",
@@ -275,4 +278,8 @@ TEST(StepHeapRepro, SkipTrimIfPending400x10) {
 
 TEST(StepHeapRepro, PurgeBeforeTrim400x10) {
     runVariant("purge-before-trim");
+}
+
+TEST(StepHeapRepro, NoParallel400x10) {
+    runVariant("no-parallel");
 }

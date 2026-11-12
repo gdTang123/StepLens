@@ -1,3 +1,10 @@
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+
 #include "mesh/Tessellator.h"
 
 #include "core/Log.h"
@@ -21,6 +28,10 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
+#if defined(_WIN32)
+#include <Windows.h>
+#endif
 #include <format>
 #include <mutex>
 #include <span>
@@ -284,12 +295,24 @@ template <class Array> [[nodiscard]] std::uint64_t displayBytes(const opencascad
     return bytes;
 }
 
+bool envFlag(const char* name) noexcept {
+#if defined(_WIN32)
+    char buffer[8] = {};
+    const DWORD length = GetEnvironmentVariableA(name, buffer, static_cast<DWORD>(sizeof(buffer)));
+    return length == 1 && buffer[0] == '1';
+#else
+    const char* value = std::getenv(name);
+    return value != nullptr && value[0] == '1' && value[1] == '\0';
+#endif
+}
+
 [[nodiscard]] IMeshTools_Parameters occtParameters(const MeshParams& params) {
     IMeshTools_Parameters parameters;
     parameters.Deflection = params.deflection;
     parameters.Angle = params.angleRad;
     parameters.Relative = false;
-    parameters.InParallel = params.inParallel;
+    // 对照：400 盒是 2400 面，策略会打开 InParallel。#23 对这种原型改成串行分块。
+    parameters.InParallel = params.inParallel && !envFlag("STEPLENS_REPRO_NO_PARALLEL");
     parameters.MinSize = params.deflection * kMinSizeToDeflection;
     // 方案 B 跟摸底一致：不做曲面内部偏差控制，允许用更粗的网格替换旧网格。
     parameters.ControlSurfaceDeflection = false;
