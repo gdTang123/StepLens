@@ -6,6 +6,7 @@
 #endif
 
 #include "core/CancelToken.h"
+#include "core/OcctLoadContract.h"
 #include "core/ProgressSink.h"
 #include "io/HeapRelease.h"
 #include "io/ILoader.h"
@@ -16,10 +17,11 @@
 
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRep_Builder.hxx>
-#include <IFSelect_ReturnStatus.hxx>
-#include <STEPControl_Writer.hxx>
+#include <TDocStd_Document.hxx>
 #include <TopoDS_Compound.hxx>
-#include <TopoDS_Shape.hxx>
+#include <XCAFApp_Application.hxx>
+#include <XCAFDoc_DocumentTool.hxx>
+#include <XCAFDoc_ShapeTool.hxx>
 #include <gp_Pnt.hxx>
 
 #include <atomic>
@@ -30,8 +32,10 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <functional>
 #include <gtest/gtest.h>
 #include <iostream>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -58,7 +62,7 @@ constexpr std::int64_t kMinOpenRiseBytes = 40LL * kBytesPerMiB;
 constexpr std::int64_t kCloseSlackBytes = 48LL * kBytesPerMiB;
 constexpr int kRounds = 3;
 // 重复盒子。本地测过这一档能把私有字节抬过 40 MiB，又远小于特大档。
-constexpr int kSyntheticBoxes = 400;
+constexpr int kSyntheticBoxes = 600;
 
 #if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
 constexpr bool kSanitizer = true;
@@ -165,7 +169,10 @@ std::optional<std::filesystem::path> findNamedSample(const std::filesystem::path
     return std::nullopt;
 }
 
-bool writeBoxGridStep(const std::filesystem::path& path, int boxCount) {
+// 不把这几百个盒子写成 STEP。Windows 上 OCCT 写出/读入十几万个实体会堆损坏
+// （0xc0000374），进程在断言之前就退出。内存仍来自同一份 B-Rep：建进 XCAF，再走
+// DocumentModel、网格化、后台 Close 和堆回收。
+std::shared_ptr<const steplens::model::DocumentModel> buildBoxGridModel(int boxCount) {
     TopoDS_Compound compound;
     BRep_Builder builder;
     builder.MakeCompound(compound);
@@ -178,11 +185,31 @@ bool writeBoxGridStep(const std::filesystem::path& path, int boxCount) {
         const double y = static_cast<double>(index / side) * 15.0;
         builder.Add(compound, BRepPrimAPI_MakeBox(gp_Pnt(x, y, 0.0), 10.0, 10.0, 10.0).Shape());
     }
-    STEPControl_Writer writer;
-    if (writer.Transfer(compound, STEPControl_AsIs) != IFSelect_RetDone) {
-        return false;
+
+    opencascade::handle<TDocStd_Document> doc;
+    {
+        std::lock_guard lock(steplens::xcafDocumentMutex());
+        XCAFApp_Application::GetApplication()->NewDocument("BinXCAF", doc);
     }
-    return writer.Write(pathUtf8(path).c_str()) == IFSelect_RetDone;
+    if (doc.IsNull()) {
+        ADD_FAILURE() << "NewDocument failed";
+        return {};
+    }
+    XCAFDoc_DocumentTool::ShapeTool(doc->Main())->AddShape(compound, false);
+
+    steplens::io::LoadedDocument loaded;
+    loaded.doc = std::move(doc);
+    loaded.lengthUnitToMm = 1.0;
+    loaded.schema = "AP214";
+    loaded.fileBytes = 1;
+    steplens::ProgressSink sink;
+    sink.reset(1);
+    auto built = steplens::model::DocumentModel::build(std::move(loaded), sink, steplens::CancelToken{});
+    if (!built.ok()) {
+        ADD_FAILURE() << built.error().message;
+        return {};
+    }
+    return std::move(built.value());
 }
 
 void raisePeak(std::atomic<std::int64_t>& slot, std::int64_t value) {
@@ -196,7 +223,8 @@ void raisePeak(std::atomic<std::int64_t>& slot, std::int64_t value) {
 
 // 打开峰值：加载并网格化期间的私有字节高水位，模型还在手里。
 // 关闭后：显示数组丢掉，最后一份 DocumentModel 交给后台 retirer，等 Close 结束再回收堆。
-void openCloseOnce(const std::filesystem::path& file, std::int64_t& openPeakOut) {
+void openCloseOnce(const std::function<std::shared_ptr<const steplens::model::DocumentModel>()>& open,
+                   std::string_view label, std::int64_t& openPeakOut) {
     std::atomic<std::int64_t> peak{0};
     std::atomic<bool> sample{true};
     std::thread sampler([&] {
@@ -216,17 +244,10 @@ void openCloseOnce(const std::filesystem::path& file, std::int64_t& openPeakOut)
         }
     } stop{sample, sampler};
 
-    const auto bytes = std::filesystem::file_size(file);
+    auto model = open();
+    ASSERT_TRUE(static_cast<bool>(model)) << label;
     steplens::ProgressSink sink;
-    sink.reset(static_cast<std::uint64_t>(bytes));
-    auto loader = steplens::io::makeLoader(file);
-    ASSERT_TRUE(static_cast<bool>(loader));
-    auto loaded = loader->load(file, {}, sink, steplens::CancelToken{});
-    ASSERT_TRUE(loaded.ok()) << loaded.error().message;
-    auto built =
-        steplens::model::DocumentModel::build(std::move(loaded.value()), sink, steplens::CancelToken{});
-    ASSERT_TRUE(built.ok()) << built.error().message;
-    auto model = std::move(built.value());
+    sink.reset(1);
     std::vector<steplens::mesh::MeshBatch> batches;
     {
         auto scheduler = steplens::occt::makeOcctTaskScheduler(2);
@@ -235,8 +256,8 @@ void openCloseOnce(const std::filesystem::path& file, std::int64_t& openPeakOut)
             *model, steplens::mesh::MeshLevel::SchemeB,
             [&](steplens::mesh::MeshBatch&& batch) { batches.push_back(std::move(batch)); }, sink,
             steplens::CancelToken{});
-        ASSERT_TRUE(meshed.ok()) << pathUtf8(file) << " " << meshed.error().message;
-        EXPECT_GT(meshed.value().triangleCount, 0u) << pathUtf8(file);
+        ASSERT_TRUE(meshed.ok()) << label << " " << meshed.error().message;
+        EXPECT_GT(meshed.value().triangleCount, 0u) << label;
     }
     int shownVertices = 0;
     for (const auto& batch : batches) {
@@ -246,7 +267,7 @@ void openCloseOnce(const std::filesystem::path& file, std::int64_t& openPeakOut)
             }
         }
     }
-    EXPECT_GT(shownVertices, 0) << pathUtf8(file);
+    EXPECT_GT(shownVertices, 0) << label;
     raisePeak(peak, privateBytesNow());
     sample.store(false, std::memory_order_relaxed);
     if (sampler.joinable()) {
@@ -255,7 +276,7 @@ void openCloseOnce(const std::filesystem::path& file, std::int64_t& openPeakOut)
 
     batches.clear();
     steplens::model::retireDocument(std::move(model));
-    EXPECT_TRUE(steplens::model::waitForDocumentRelease(std::chrono::seconds(120))) << pathUtf8(file);
+    EXPECT_TRUE(steplens::model::waitForDocumentRelease(std::chrono::seconds(120))) << label;
     steplens::io::releaseFreedHeap();
     openPeakOut = peak.load(std::memory_order_relaxed);
 }
@@ -292,25 +313,17 @@ TEST(MemoryRelease, SyntheticOpenCloseStaysNearBaseline) {
     if (kSanitizer) {
         GTEST_SKIP() << "ASan/TSan 不是产品分配器。回落断言在 windows-build 的 RelWithDebInfo 上跑";
     }
-    const auto directory = std::filesystem::temp_directory_path() / "steplens-memory-release-synthetic";
-    std::filesystem::create_directories(directory);
-    const auto file = directory / "box-grid.step";
-    ASSERT_TRUE(writeBoxGridStep(file, kSyntheticBoxes));
-
     steplens::io::releaseFreedHeap();
     const std::int64_t baseline = privateBytesNow();
     ASSERT_GE(baseline, 0);
 
     for (int round = 0; round < kRounds; ++round) {
         std::int64_t openPeak = 0;
-        openCloseOnce(file, openPeak);
+        openCloseOnce([] { return buildBoxGridModel(kSyntheticBoxes); }, "box-grid", openPeak);
         const std::int64_t afterClose = privateBytesNow();
-        reportRound("box-grid.step", round, baseline, openPeak, afterClose);
+        reportRound("box-grid", round, baseline, openPeak, afterClose);
         expectReleased(baseline, openPeak, afterClose, "synthetic round " + std::to_string(round), true);
     }
-
-    std::error_code removed;
-    std::filesystem::remove_all(directory, removed);
 }
 
 TEST(MemoryRelease, SampleOpenCloseStaysNearBaseline) {
@@ -362,7 +375,31 @@ TEST(MemoryRelease, SampleOpenCloseStaysNearBaseline) {
     for (const auto& file : files) {
         for (int round = 0; round < kRounds; ++round) {
             std::int64_t openPeak = 0;
-            openCloseOnce(file, openPeak);
+            const std::filesystem::path sample = file;
+            openCloseOnce(
+                [sample] {
+                    const auto bytes = std::filesystem::file_size(sample);
+                    steplens::ProgressSink sink;
+                    sink.reset(static_cast<std::uint64_t>(bytes));
+                    auto loader = steplens::io::makeLoader(sample);
+                    if (!loader) {
+                        ADD_FAILURE() << pathUtf8(sample);
+                        return std::shared_ptr<const steplens::model::DocumentModel>{};
+                    }
+                    auto loaded = loader->load(sample, {}, sink, steplens::CancelToken{});
+                    if (!loaded.ok()) {
+                        ADD_FAILURE() << loaded.error().message;
+                        return std::shared_ptr<const steplens::model::DocumentModel>{};
+                    }
+                    auto built = steplens::model::DocumentModel::build(std::move(loaded.value()), sink,
+                                                                       steplens::CancelToken{});
+                    if (!built.ok()) {
+                        ADD_FAILURE() << built.error().message;
+                        return std::shared_ptr<const steplens::model::DocumentModel>{};
+                    }
+                    return std::move(built.value());
+                },
+                pathUtf8(sample), openPeak);
             const std::int64_t afterClose = privateBytesNow();
             reportRound(pathUtf8(file.filename()), round, baseline, openPeak, afterClose);
             expectReleased(baseline, openPeak, afterClose, pathUtf8(file) + " round " + std::to_string(round),
