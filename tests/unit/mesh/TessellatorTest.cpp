@@ -197,9 +197,10 @@ bool shapeKeepsSlimMeshNear(const TopoDS_Shape& shape, double x, double toleranc
             continue;
         }
         ++kept;
-        // 显示数组已经建完。面上的网格留下，但不再是双精度，也没有 UV。测量仍走 B-Rep。
+        // 显示数组已经建完。面上的网格留下，但不再是双精度，也没有 UV。法向还在。测量仍走 B-Rep。
         EXPECT_FALSE(triangulation->IsDoublePrecision());
         EXPECT_FALSE(triangulation->HasUVNodes());
+        EXPECT_TRUE(triangulation->HasNormals());
         EXPECT_GT(triangulation->NbNodes(), 0);
         for (int node = 1; node <= triangulation->NbNodes(); ++node) {
             const gp_Pnt point = triangulation->Node(node).Transformed(location.Transformation());

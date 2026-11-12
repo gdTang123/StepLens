@@ -8,6 +8,7 @@
 #include <windows.h>
 #endif
 
+#include "io/HeapRelease.h"
 #include "model/DocumentModel.h"
 #include "model/DocumentRelease.h"
 #include "occtsupport/OcctBoundary.h"
@@ -139,8 +140,19 @@ private:
     std::thread m_thread;
 };
 
+DocumentRetirer& retirer();
+
+int pendingForHeapRelease() noexcept {
+    return retirer().pending();
+}
+
 DocumentRetirer& retirer() {
     static DocumentRetirer instance;
+    static const int registered = [] {
+        io::setHeapReleasePendingProbe(&pendingForHeapRelease);
+        return 0;
+    }();
+    static_cast<void>(registered);
     return instance;
 }
 

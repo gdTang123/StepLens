@@ -15,9 +15,12 @@
 #include "occtsupport/OcctBoundary.h"
 
 #include <BRepPrimAPI_MakeBox.hxx>
+#include <BRep_Builder.hxx>
 #include <IFSelect_ReturnStatus.hxx>
 #include <STEPControl_Writer.hxx>
+#include <TopoDS_Compound.hxx>
 #include <TopoDS_Shape.hxx>
+#include <gp_Pnt.hxx>
 
 #include <atomic>
 #include <chrono>
@@ -48,8 +51,14 @@
 namespace {
 
 constexpr std::int64_t kBytesPerKb = 1024;
-constexpr std::int64_t kCloseToleranceBytes = 300LL * 1024LL * 1024LL;
+constexpr std::int64_t kBytesPerMiB = 1024LL * 1024LL;
+// 合成装配要让打开峰值至少高出基线这么多，避免小盒子只涨几 MiB 还算通过。
+constexpr std::int64_t kMinOpenRiseBytes = 40LL * kBytesPerMiB;
+// 实测 S/M 关闭后残留最大约 +35 MiB。容差收在这附近，不再用 300 MiB。
+constexpr std::int64_t kCloseSlackBytes = 48LL * kBytesPerMiB;
 constexpr int kRounds = 3;
+// 重复盒子。本地测过这一档能把私有字节抬过 40 MiB，又远小于特大档。
+constexpr int kSyntheticBoxes = 1200;
 
 #if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
 constexpr bool kSanitizer = true;
@@ -156,10 +165,21 @@ std::optional<std::filesystem::path> findNamedSample(const std::filesystem::path
     return std::nullopt;
 }
 
-bool writeBoxStep(const std::filesystem::path& path) {
+bool writeBoxGridStep(const std::filesystem::path& path, int boxCount) {
+    TopoDS_Compound compound;
+    BRep_Builder builder;
+    builder.MakeCompound(compound);
+    int side = 1;
+    while (side * side < boxCount) {
+        ++side;
+    }
+    for (int index = 0; index < boxCount; ++index) {
+        const double x = static_cast<double>(index % side) * 15.0;
+        const double y = static_cast<double>(index / side) * 15.0;
+        builder.Add(compound, BRepPrimAPI_MakeBox(gp_Pnt(x, y, 0.0), 10.0, 10.0, 10.0).Shape());
+    }
     STEPControl_Writer writer;
-    const TopoDS_Shape box = BRepPrimAPI_MakeBox(10.0, 20.0, 30.0).Shape();
-    if (writer.Transfer(box, STEPControl_AsIs) != IFSelect_RetDone) {
+    if (writer.Transfer(compound, STEPControl_AsIs) != IFSelect_RetDone) {
         return false;
     }
     return writer.Write(pathUtf8(path).c_str()) == IFSelect_RetDone;
@@ -175,7 +195,7 @@ void raisePeak(std::atomic<std::int64_t>& slot, std::int64_t value) {
 }
 
 // 打开峰值：加载并网格化期间的私有字节高水位，模型还在手里。
-// 关闭后：显示数组丢掉，最后一份 DocumentModel 交给后台 retirer，析构里 Close 并回收堆，再采样。
+// 关闭后：显示数组丢掉，最后一份 DocumentModel 交给后台 retirer，等 Close 结束再回收堆。
 void openCloseOnce(const std::filesystem::path& file, std::int64_t& openPeakOut) {
     std::atomic<std::int64_t> peak{0};
     std::atomic<bool> sample{true};
@@ -250,19 +270,32 @@ void reportRound(std::string_view file, int round, std::int64_t baseline, std::i
               << std::flush;
 }
 
-void expectNearBaseline(std::int64_t baseline, std::string_view label) {
-    const std::int64_t now = privateBytesNow();
-    ASSERT_GE(now, 0) << label;
-    EXPECT_LE(now, baseline + kCloseToleranceBytes) << label << " now=" << now << " baseline=" << baseline;
+void expectReleased(std::int64_t baseline, std::int64_t openPeak, std::int64_t afterClose,
+                    std::string_view label, bool requireRise) {
+    ASSERT_GE(baseline, 0) << label;
+    ASSERT_GE(openPeak, 0) << label;
+    ASSERT_GE(afterClose, 0) << label;
+    const std::int64_t rise = openPeak - baseline;
+    if (requireRise) {
+        EXPECT_GE(rise, kMinOpenRiseBytes) << label;
+    }
+    if (rise >= kMinOpenRiseBytes) {
+        // 关闭后至少收回打开增量的一半，不能停在峰值附近。
+        EXPECT_LE(afterClose, openPeak - rise / 2) << label;
+    }
+    EXPECT_LE(afterClose, baseline + kCloseSlackBytes) << label;
 }
 
 } // namespace
 
 TEST(MemoryRelease, SyntheticOpenCloseStaysNearBaseline) {
+    if (kSanitizer) {
+        GTEST_SKIP() << "ASan/TSan 不是产品分配器。回落断言在 windows-build 的 RelWithDebInfo 上跑";
+    }
     const auto directory = std::filesystem::temp_directory_path() / "steplens-memory-release-synthetic";
     std::filesystem::create_directories(directory);
-    const auto file = directory / "box.step";
-    ASSERT_TRUE(writeBoxStep(file));
+    const auto file = directory / "box-grid.step";
+    ASSERT_TRUE(writeBoxGridStep(file, kSyntheticBoxes));
 
     steplens::io::releaseFreedHeap();
     const std::int64_t baseline = privateBytesNow();
@@ -272,8 +305,8 @@ TEST(MemoryRelease, SyntheticOpenCloseStaysNearBaseline) {
         std::int64_t openPeak = 0;
         openCloseOnce(file, openPeak);
         const std::int64_t afterClose = privateBytesNow();
-        reportRound("box.step", round, baseline, openPeak, afterClose);
-        expectNearBaseline(baseline, "synthetic round " + std::to_string(round));
+        reportRound("box-grid.step", round, baseline, openPeak, afterClose);
+        expectReleased(baseline, openPeak, afterClose, "synthetic round " + std::to_string(round), true);
     }
 
     std::error_code removed;
@@ -281,6 +314,9 @@ TEST(MemoryRelease, SyntheticOpenCloseStaysNearBaseline) {
 }
 
 TEST(MemoryRelease, SampleOpenCloseStaysNearBaseline) {
+    if (kSanitizer) {
+        GTEST_SKIP() << "ASan/TSan 不是产品分配器。回落断言在 windows-build 的 RelWithDebInfo 上跑";
+    }
     const auto root = samplesDirectory();
     if (!root) {
         GTEST_SKIP() << "STEPLENS_SAMPLES 未设置";
@@ -329,7 +365,8 @@ TEST(MemoryRelease, SampleOpenCloseStaysNearBaseline) {
             openCloseOnce(file, openPeak);
             const std::int64_t afterClose = privateBytesNow();
             reportRound(pathUtf8(file.filename()), round, baseline, openPeak, afterClose);
-            expectNearBaseline(baseline, pathUtf8(file) + " round " + std::to_string(round));
+            expectReleased(baseline, openPeak, afterClose, pathUtf8(file) + " round " + std::to_string(round),
+                           false);
         }
     }
 }

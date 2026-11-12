@@ -9,13 +9,29 @@
 #if defined(_WIN32) || defined(__GLIBC__)
 #include <malloc.h>
 #endif
+#include <atomic>
 #include <mutex>
 #include <system_error>
 #include <utility>
 
 namespace steplens::io {
+namespace {
+
+std::atomic<HeapReleasePendingProbe> g_pendingProbe{nullptr};
+
+} // namespace
+
+void setHeapReleasePendingProbe(HeapReleasePendingProbe probe) noexcept {
+    g_pendingProbe.store(probe, std::memory_order_release);
+}
 
 void releaseFreedHeap() noexcept {
+    if (const HeapReleasePendingProbe probe = g_pendingProbe.load(std::memory_order_acquire)) {
+        // 后台还在 Close。这时 trim 会和释放线程抢堆，长序列开关曾把 glibc 打坏。
+        if (probe() > 0) {
+            return;
+        }
+    }
 #if defined(_WIN32)
     _heapmin();
 #elif defined(__GLIBC__)
