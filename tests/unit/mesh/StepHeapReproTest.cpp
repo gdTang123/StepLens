@@ -46,13 +46,26 @@ void releaseFreedHeap() noexcept;
 #include <utility>
 #include <vector>
 
+#if defined(_WIN32)
+// clang-format off
+#include <Windows.h>
+// clang-format on
+#endif
+
 namespace {
 
 constexpr int kRounds = 2;
 
 bool reproEnabled() {
+#if defined(_WIN32)
+    char buffer[8] = {};
+    const DWORD length =
+        GetEnvironmentVariableA("STEPLENS_STEP_HEAP_REPRO", buffer, static_cast<DWORD>(sizeof(buffer)));
+    return length == 1 && buffer[0] == '1';
+#else
     const char* value = std::getenv("STEPLENS_STEP_HEAP_REPRO");
     return value != nullptr && value[0] == '1' && value[1] == '\0';
+#endif
 }
 
 std::string pathUtf8(const std::filesystem::path& path) {
