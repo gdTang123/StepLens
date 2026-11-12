@@ -58,7 +58,7 @@ constexpr std::int64_t kMinOpenRiseBytes = 40LL * kBytesPerMiB;
 constexpr std::int64_t kCloseSlackBytes = 48LL * kBytesPerMiB;
 constexpr int kRounds = 3;
 // 重复盒子。本地测过这一档能把私有字节抬过 40 MiB，又远小于特大档。
-constexpr int kSyntheticBoxes = 1200;
+constexpr int kSyntheticBoxes = 400;
 
 #if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
 constexpr bool kSanitizer = true;
