@@ -11,6 +11,7 @@
 #include "io/ILoader.h"
 #include "mesh/Tessellator.h"
 #include "model/DocumentModel.h"
+#include "model/DocumentRelease.h"
 #include "occtsupport/OcctBoundary.h"
 
 #include <BRepPrimAPI_MakeBox.hxx>
@@ -18,15 +19,20 @@
 #include <STEPControl_Writer.hxx>
 #include <TopoDS_Shape.hxx>
 
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <format>
 #include <fstream>
 #include <gtest/gtest.h>
+#include <iostream>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #if defined(_WIN32)
@@ -159,7 +165,37 @@ bool writeBoxStep(const std::filesystem::path& path) {
     return writer.Write(pathUtf8(path).c_str()) == IFSelect_RetDone;
 }
 
-void openCloseOnce(const std::filesystem::path& file) {
+void raisePeak(std::atomic<std::int64_t>& slot, std::int64_t value) {
+    if (value < 0) {
+        return;
+    }
+    std::int64_t seen = slot.load(std::memory_order_relaxed);
+    while (value > seen && !slot.compare_exchange_weak(seen, value, std::memory_order_relaxed)) {
+    }
+}
+
+// 打开峰值：加载并网格化期间的私有字节高水位，模型还在手里。
+// 关闭后：显示数组丢掉，最后一份 DocumentModel 交给后台 retirer，析构里 Close 并回收堆，再采样。
+void openCloseOnce(const std::filesystem::path& file, std::int64_t& openPeakOut) {
+    std::atomic<std::int64_t> peak{0};
+    std::atomic<bool> sample{true};
+    std::thread sampler([&] {
+        while (sample.load(std::memory_order_relaxed)) {
+            raisePeak(peak, privateBytesNow());
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+    });
+    struct StopSampler {
+        std::atomic<bool>& flag;
+        std::thread& worker;
+        ~StopSampler() {
+            flag.store(false, std::memory_order_relaxed);
+            if (worker.joinable()) {
+                worker.join();
+            }
+        }
+    } stop{sample, sampler};
+
     const auto bytes = std::filesystem::file_size(file);
     steplens::ProgressSink sink;
     sink.reset(static_cast<std::uint64_t>(bytes));
@@ -191,9 +227,27 @@ void openCloseOnce(const std::filesystem::path& file) {
         }
     }
     EXPECT_GT(shownVertices, 0) << pathUtf8(file);
+    raisePeak(peak, privateBytesNow());
+    sample.store(false, std::memory_order_relaxed);
+    if (sampler.joinable()) {
+        sampler.join();
+    }
+
     batches.clear();
-    model.reset();
+    steplens::model::retireDocument(std::move(model));
+    EXPECT_TRUE(steplens::model::waitForDocumentRelease(std::chrono::seconds(120))) << pathUtf8(file);
     steplens::io::releaseFreedHeap();
+    openPeakOut = peak.load(std::memory_order_relaxed);
+}
+
+void reportRound(std::string_view file, int round, std::int64_t baseline, std::int64_t openPeak,
+                 std::int64_t afterClose) {
+    constexpr double kMiB = 1024.0 * 1024.0;
+    std::cout << std::format("memory_round file={} round={} baseline_mib={:.1f} open_peak_mib={:.1f} "
+                             "after_close_mib={:.1f} metric=private_bytes\n",
+                             file, round, static_cast<double>(baseline) / kMiB,
+                             static_cast<double>(openPeak) / kMiB, static_cast<double>(afterClose) / kMiB)
+              << std::flush;
 }
 
 void expectNearBaseline(std::int64_t baseline, std::string_view label) {
@@ -215,7 +269,10 @@ TEST(MemoryRelease, SyntheticOpenCloseStaysNearBaseline) {
     ASSERT_GE(baseline, 0);
 
     for (int round = 0; round < kRounds; ++round) {
-        openCloseOnce(file);
+        std::int64_t openPeak = 0;
+        openCloseOnce(file, openPeak);
+        const std::int64_t afterClose = privateBytesNow();
+        reportRound("box.step", round, baseline, openPeak, afterClose);
         expectNearBaseline(baseline, "synthetic round " + std::to_string(round));
     }
 
@@ -268,7 +325,10 @@ TEST(MemoryRelease, SampleOpenCloseStaysNearBaseline) {
     ASSERT_GE(baseline, 0);
     for (const auto& file : files) {
         for (int round = 0; round < kRounds; ++round) {
-            openCloseOnce(file);
+            std::int64_t openPeak = 0;
+            openCloseOnce(file, openPeak);
+            const std::int64_t afterClose = privateBytesNow();
+            reportRound(pathUtf8(file.filename()), round, baseline, openPeak, afterClose);
             expectNearBaseline(baseline, pathUtf8(file) + " round " + std::to_string(round));
         }
     }

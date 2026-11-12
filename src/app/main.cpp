@@ -4,6 +4,7 @@
 #include "core/Log.h"
 #include "core/OcctLoadContract.h"
 #include "core/Version.h"
+#include "io/HeapRelease.h"
 #include "model/DocumentRelease.h"
 
 #include <QApplication>
@@ -86,5 +87,6 @@ int main(int argc, char* argv[]) {
         std::quick_exit(0);
 #endif
     }
+    steplens::io::releaseFreedHeap();
     return code;
 }
