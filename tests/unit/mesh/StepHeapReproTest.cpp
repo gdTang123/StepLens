@@ -13,20 +13,18 @@
 
 // 只在 windows-build 的独立步骤里设 STEPLENS_STEP_HEAP_REPRO=1。
 // 普通 unit 预设不设这个变量，测试跳过，避免把「Configure, build, test」拖很长。
-// 路径是 main 上的产品路径：makeLoader、DocumentModel::build、网格化、
-// retireDocument、waitForDocumentRelease、io::detail::releaseFreedHeap。
+// 路径是 T16 打开后的产品路径：makeLoader、DocumentModel::build、网格化、
+// retireDocument、waitForDocumentRelease、io::releaseFreedHeap。
+// push_back 不加测试锁，只靠 Tessellator::run 串行化 onBatch。
 
 #include "core/CancelToken.h"
 #include "core/ProgressSink.h"
+#include "io/HeapRelease.h"
 #include "io/ILoader.h"
 #include "mesh/Tessellator.h"
 #include "model/DocumentModel.h"
 #include "model/DocumentRelease.h"
 #include "occtsupport/OcctBoundary.h"
-
-namespace steplens::io::detail {
-void releaseFreedHeap() noexcept;
-}
 
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRep_Builder.hxx>
@@ -129,7 +127,7 @@ void loadMeshRetireReclaim(const std::filesystem::path& file, std::string_view t
     steplens::model::retireDocument(std::move(model));
     ASSERT_TRUE(steplens::model::waitForDocumentRelease(std::chrono::seconds(180))) << tag;
     phase(std::format("file={} round={} phase=retire_done", tag, round));
-    steplens::io::detail::releaseFreedHeap();
+    steplens::io::releaseFreedHeap();
     phase(std::format("file={} round={} phase=reclaim_done", tag, round));
 }
 

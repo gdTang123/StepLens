@@ -225,7 +225,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       # 400/1200 盒 STEP：加载、网格化、后台 Close、releaseFreedHeap。普通 unit 不设变量所以跳过。
-      # --verbose 让通过时的 step_heap_repro 行留在日志里。
+      # --verbose 让通过时的 step_heap_repro 行留在日志里。测试自己跑 10 轮。
       - name: Step heap repro on the product allocator
         env:
           STEPLENS_STEP_HEAP_REPRO: "1"
