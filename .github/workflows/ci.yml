@@ -217,6 +217,29 @@ jobs:
           pwsh -File scripts/verify_occt_link.ps1 -BuildDir build/msvc -Report build/msvc/occt-link-report.txt
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      # 大 STEP 的加载、后台 Close、回收堆。普通 unit 预设不设变量，所以那边跳过。
+      # 这里连跑两次。崩溃时 ctest 非零，日志里有 step_heap_repro 的最后阶段。
+      # main 上回收堆走 io::detail::releaseFreedHeap（ReaderSlot 用的同一个函数）。
+      - name: Step heap repro on the product allocator
+        env:
+          STEPLENS_STEP_HEAP_REPRO: "1"
+        run: |
+          foreach ($pass in 1, 2) {
+            Write-Host "step_heap_repro ci_pass=$pass"
+            $log = Join-Path $env:RUNNER_TEMP "step-heap-repro-$pass.log"
+            ctest --preset unit -C RelWithDebInfo -R "^StepHeapRepro\." --output-on-failure --verbose --no-tests=error *> $log
+            $ctestCode = $LASTEXITCODE
+            Get-Content -LiteralPath $log
+            if ($ctestCode -ne 0) { exit $ctestCode }
+            if (Select-String -LiteralPath $log -Pattern "\*\*\*Skipped" -Quiet) {
+              throw "StepHeapRepro 被跳过，这一步必须真实执行"
+            }
+            $done = @(Select-String -LiteralPath $log -Pattern "phase=reclaim_done")
+            if ($done.Count -lt 4) {
+              throw "没有看到 400 与 1200 各两轮的 phase=reclaim_done（实际 $($done.Count)）"
+            }
+          }
+
       - name: Check vcpkg binary cache
         if: success() && steps.vcpkg-cache.outputs.cache-hit != 'true'
         run: |
