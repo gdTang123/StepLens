@@ -1,6 +1,7 @@
 #include "scene/SceneBuilder.h"
 
 #include "core/Log.h"
+#include "model/DocumentRelease.h"
 #include "occtsupport/occt_compat.h"
 
 #include <AIS_ConnectedInteractive.hxx>
@@ -40,6 +41,8 @@ SceneBuilder::~SceneBuilder() {
     m_protos.clear();
     m_queue.clear();
     m_ctx.Nullify();
+    // Close 不在这条 GUI 析构里做。最后一份引用交给后台。
+    model::retireDocument(std::move(m_model));
 }
 
 void SceneBuilder::reset(std::shared_ptr<const model::DocumentModel> model) {
@@ -64,7 +67,9 @@ void SceneBuilder::reset(std::shared_ptr<const model::DocumentModel> model) {
     m_map.clear();
     m_overrides.clear();
     m_protos.clear();
+    auto previous = std::move(m_model);
     m_model = std::move(model);
+    model::retireDocument(std::move(previous));
     if (m_model) {
         m_protos.assign(m_model->prototypes().size(), {});
         m_seen.assign(m_model->prototypes().size(), 0);

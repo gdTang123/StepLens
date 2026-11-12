@@ -2,7 +2,9 @@
 
 内部使用的 STEP/IGES 轻量查看器。技术栈是 C++20、Qt 6.12、Open CASCADE Technology、CMake。平台是 Windows 10/11 x64，发布形式是绿色版 zip。
 
-窗口仍是空的：状态栏写着「尚未打开文件」，界面还没有接到打开文件。后台已经能读 STEP/IGES。`LoadSession` / `LoadCoordinator` 调用 `io` 的 `StepLoader` 和 `IgesLoader`，带进度和软取消，读完释放读取器。`model` 的 DocumentModel 已经实现（装配树、原型去重、实例、颜色分组、IGES 分块）。`mesh` 的 Tessellator 已经实现 T07 单级网格（方案 B，弦高系数 c = 0.002）：按原型并行三角化，每个原型只做一次，颜色组调用 `FillTriangles` / `FillFaceBoundaries`。`scene` 已经实现 T08：每个原型一份 `PrototypePrs`（不直接显示），实例用 `AIS_ConnectedInteractive` 带上变换；带实例色的实例单独一份 `PrototypePrs`，三角形数组仍共用。颜色组沿用 `MeshBatch`。`SelectionMap` 把点选到的实例对象映回 `NodeId`。创建按帧切开，默认预算 8 ms。还没做的是粗/细两级网格（T07+）、`replaceMesh`（T08+）和装配树界面（T10）。core 里有结果类型、软取消、进度、线程池、日志和 Windows 崩溃转储。
+主窗口可以打开 STEP/IGES：菜单、拖放或命令行 `StepLens.exe 文件路径`。加载时有阶段、进度和取消。读文件、建模型和三角化在后台；`SceneBuilder::pump()` 每 16 ms 在界面线程跑一截。模型显示之后可以旋转、平移、缩放。加载还没完成时取消：新模型若已经显示，回到空闲方块；还没显示则视图不动。加载完成后按 Esc 不清除模型。文档的 `Close` 在后台线程做完。还没做的是装配树（T10）、测量（T12）、截图（T13）和内存预检（T14）。
+
+后台读取走 `LoadSession` / `LoadCoordinator`，调用 `io` 的 `StepLoader` 和 `IgesLoader`，带进度和软取消，读完释放读取器。`model` 的 DocumentModel 已经实现（装配树、原型去重、实例、颜色分组、IGES 分块）。`mesh` 的 Tessellator 已经实现 T07 单级网格（方案 B，弦高系数 c = 0.002）：按原型并行三角化，每个原型只做一次，颜色组调用 `FillTriangles` / `FillFaceBoundaries`。`scene` 已经实现 T08：每个原型一份 `PrototypePrs`（不直接显示），实例用 `AIS_ConnectedInteractive` 带上变换；带实例色的实例单独一份 `PrototypePrs`，三角形数组仍共用。颜色组沿用 `MeshBatch`。`SelectionMap` 把点选到的实例对象映回 `NodeId`。创建按帧切开，默认预算 8 ms。还没做的是粗/细两级网格（T07+）和 `replaceMesh`（T08+）。core 里有结果类型、软取消、进度、线程池、日志和 Windows 崩溃转储。
 
 架构文档是 v1.2。摸底报告在 `docs/bench/spike-m0.md`，Windows 复测清单在 `docs/bench/t02b-windows-checklist.md`。产品锁定 **OCCT 7.9.3**（2026-11-08；T02b 结论是 8.0.1 在 X-07 崩溃）。默认预设 `msvc` / `ci` 使用 `vcpkg-configs/occt-7.9.3`（overrides 锁 `7.9.3#1`），`STEPLENS_EXPECTED_OCCT=7.9.3`。根 `vcpkg.json` 不写 overrides，只给对照预设 `msvc-occt801`（基线端口当前是 8.0.1，不是默认）。版本差异只在 `src/occtsupport/occt_compat.h`。老板在自己电脑上跑的工具在 `bench/`。
 
@@ -99,7 +101,7 @@ tools/  bench（steplens-bench）、stepgen（尚未实现，T24 / v0.2）
 scripts/  package.py、fetch_samples.py、make_big_step.py
 ```
 
-模块依赖以架构文档第 4 节为准：`core`、`io`、`model`、`mesh` 不依赖 Qt GUI；只有 `scene`、`viewer`、`measure` 会碰 OCCT 的显示类。`io` 已实现 STEP/IGES 后台读取。`model` 已实现 DocumentModel（装配树、原型去重、实例、颜色分组、IGES 分块）。`mesh` 已实现 T07 单级 Tessellator（方案 B，c = 0.002），不是占位。`scene` 已实现 T08（SceneBuilder、PrototypePrs、SelectionMap），不是占位。T07+ 的粗细两级和 T08+ 的 `replaceMesh` 不在这一版。`measure`、`ui`、`pipeline` 仍是占位翻译单元。`SceneBuilder` 不继承 `QObject`：无头契约测试不链 Qt，GUI 线程的调用方每个事件循环调用一次 `pump()`。
+模块依赖以架构文档第 4 节为准：`core`、`io`、`model`、`mesh` 不依赖 Qt GUI；只有 `scene`、`viewer`、`measure` 会碰 OCCT 的显示类。`io` 已实现 STEP/IGES 后台读取。`model` 已实现 DocumentModel（装配树、原型去重、实例、颜色分组、IGES 分块）。`mesh` 已实现 T07 单级 Tessellator（方案 B，c = 0.002），不是占位。`scene` 已实现 T08（SceneBuilder、PrototypePrs、SelectionMap），不是占位。T07+ 的粗细两级和 T08+ 的 `replaceMesh` 不在这一版。`pipeline` 已经串起打开、加载中取消和后台释放，不是占位。`ui` 已经有加载遮罩。`measure` 仍是占位。`SceneBuilder` 不继承 `QObject`：无头契约测试不链 Qt，GUI 线程的调用方每个事件循环调用一次 `pump()`。
 
 ## 许可证
 

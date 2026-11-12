@@ -1,13 +1,21 @@
 #pragma once
 
+#include <QImage>
 #include <QOpenGLWidget>
+#include <QString>
+#include <QStringList>
 #include <QWidget>
 
+#include <cstdint>
 #include <memory>
 
+class QDragEnterEvent;
+class QDropEvent;
+class QMouseEvent;
 class QPaintEvent;
 class QResizeEvent;
 class QShowEvent;
+class QWheelEvent;
 
 // 默认 0：QOpenGLWidget + Aspect_NeutralWindow + OpenGl_FrameBuffer::InitWrapper。
 // 置 1（CMake：-DSTEPLENS_USE_WNT_WINDOW=ON）时改走 WNT_Window。两条路径都在本文件里。
@@ -20,8 +28,15 @@ class QShowEvent;
 
 namespace steplens {
 
+class SceneHost;
+
+// 菜单里的 7 个标准视图。具体 OCCT 朝向留在 cpp。
+enum class StandardView : std::uint8_t { Front, Back, Left, Right, Top, Bottom, Isometric };
+
 // 不要把这个控件 reparent 到另一个顶层窗口。上下文销毁时会丢掉 OCCT 资源，
 // 下一次 initializeGL 再绑定。清理看 context 是否还在，不看上一帧是否画成功。
+// 空闲时仍显示 T09 的旋转方块，已有的独显冒烟脚本靠它判断不是纯色。
+// 打开文件之后方块让位给模型。旋转、平移、缩放走 AIS_ViewController，只在 GUI 线程调用。
 #if STEPLENS_USE_WNT_WINDOW
 class ViewerWidget final : public QWidget {
 #else
@@ -36,7 +51,23 @@ public:
     ViewerWidget(const ViewerWidget&) = delete;
     ViewerWidget& operator=(const ViewerWidget&) = delete;
 
+    void fitAll();
+    void setStandardView(StandardView view);
+    void redraw();
+    [[nodiscard]] bool showingModel() const;
+    [[nodiscard]] SceneHost& sceneHost();
+    [[nodiscard]] QImage grabView();
+
+signals:
+    void filesDropped(const QStringList& paths);
+
 protected:
+    void mousePressEvent(QMouseEvent* event) override;
+    void mouseReleaseEvent(QMouseEvent* event) override;
+    void mouseMoveEvent(QMouseEvent* event) override;
+    void wheelEvent(QWheelEvent* event) override;
+    void dragEnterEvent(QDragEnterEvent* event) override;
+    void dropEvent(QDropEvent* event) override;
 #if STEPLENS_USE_WNT_WINDOW
     void showEvent(QShowEvent* event) override;
     void paintEvent(QPaintEvent* event) override;
@@ -47,10 +78,17 @@ protected:
 #endif
 
 private:
+    friend class ViewerSceneHost;
+
     void createScene();
     void displayBox();
     void spinBox();
     void releaseScene();
+    void suspendIdlePresentation();
+    void restoreIdlePresentation();
+    void drawScene();
+    void noteRedrawRequest(bool again);
+    void showTriedron();
 #if STEPLENS_USE_WNT_WINDOW
     void bindWntWindow();
 #else
