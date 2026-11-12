@@ -44,6 +44,12 @@
 #include <utility>
 #include <vector>
 
+#if defined(_WIN32)
+// clang-format off
+#include <Windows.h>
+// clang-format on
+#endif
+
 namespace {
 
 constexpr int kRounds = 10;
