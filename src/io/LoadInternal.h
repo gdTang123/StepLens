@@ -33,6 +33,11 @@ struct InputFile {
 
 void releaseFreedHeap() noexcept;
 
+// 复现实验用。测试在调用回收前装上，用来打印当时还有几份文档在后台 Close。
+// 不改变默认行为。不要合并到 main。
+using HeapPendingProbe = int (*)() noexcept;
+void setHeapPendingProbe(HeapPendingProbe probe) noexcept;
+
 [[nodiscard]] opencascade::handle<TDocStd_Document> newXcafDocument();
 
 // NewDocument / Close 只走 xcafDocumentMutex()。doc 在返回前会被清空。

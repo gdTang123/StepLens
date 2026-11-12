@@ -25,18 +25,23 @@
 #else
 namespace steplens::io::detail {
 void releaseFreedHeap() noexcept;
-}
+using HeapPendingProbe = int (*)() noexcept;
+void setHeapPendingProbe(HeapPendingProbe probe) noexcept;
+} // namespace steplens::io::detail
 #endif
 
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRep_Builder.hxx>
 #include <IFSelect_ReturnStatus.hxx>
 #include <STEPControl_Writer.hxx>
+#include <Standard.hxx>
 #include <TopoDS_Compound.hxx>
 #include <gp_Pnt.hxx>
 
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <format>
 #include <gtest/gtest.h>
@@ -50,11 +55,36 @@ void releaseFreedHeap() noexcept;
 // clang-format off
 #include <Windows.h>
 // clang-format on
+
+LONG WINAPI crashFilter(EXCEPTION_POINTERS* info) {
+    unsigned long code = 0;
+    void* address = nullptr;
+    if (info != nullptr && info->ExceptionRecord != nullptr) {
+        code = info->ExceptionRecord->ExceptionCode;
+        address = info->ExceptionRecord->ExceptionAddress;
+    }
+    std::fprintf(stderr, "crash_exception code=0x%08lx address=%p\n", code, address);
+    std::fflush(stderr);
+    if (info != nullptr && info->ContextRecord != nullptr) {
+        char buffer[8192];
+        buffer[0] = '\0';
+        Standard::StackTrace(buffer, static_cast<int>(sizeof(buffer)), 40, info->ContextRecord, 0);
+        std::fprintf(stderr, "crash_stack_begin\n%s\ncrash_stack_end\n", buffer);
+        std::fflush(stderr);
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+void installCrashFilter() {
+    SetUnhandledExceptionFilter(crashFilter);
+}
+#else
+void installCrashFilter() {}
 #endif
 
 namespace {
 
-constexpr int kRounds = 2;
+constexpr int kRounds = 10;
 
 bool reproEnabled() {
 #if defined(_WIN32)
@@ -152,6 +182,54 @@ void loadMeshRetireReclaim(const std::filesystem::path& file, std::string_view t
     phase(std::format("file={} round={} phase=reclaim_done", tag, round));
 }
 
+void setEnv(const char* name, const char* value) {
+#if defined(_WIN32)
+    SetEnvironmentVariableA(name, value);
+#else
+    if (setenv(name, value, 1) != 0) {
+        ADD_FAILURE() << name;
+    }
+#endif
+}
+
+std::string envOrUnset(const char* name) {
+#if defined(_WIN32)
+    char buffer[32] = {};
+    const DWORD length = GetEnvironmentVariableA(name, buffer, static_cast<DWORD>(sizeof(buffer)));
+    if (length == 0 || length >= sizeof(buffer)) {
+        return "unset";
+    }
+    return std::string(buffer, length);
+#else
+    const char* value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0') {
+        return "unset";
+    }
+    return std::string(value);
+#endif
+}
+
+void prepareVariant(const char* variant) {
+    installCrashFilter();
+    steplens::io::detail::setHeapPendingProbe(&steplens::model::documentsPendingRelease);
+    setEnv("STEPLENS_REPRO_NO_TRIM", "0");
+    setEnv("STEPLENS_REPRO_SKIP_TRIM_IF_PENDING", "0");
+    setEnv("STEPLENS_REPRO_CLEAR_BEFORE_CLOSE", "0");
+    setEnv("STEPLENS_REPRO_PURGE_BEFORE_TRIM", "0");
+    if (std::strcmp(variant, "no-trim") == 0) {
+        setEnv("STEPLENS_REPRO_NO_TRIM", "1");
+    } else if (std::strcmp(variant, "clear-before-close") == 0) {
+        setEnv("STEPLENS_REPRO_CLEAR_BEFORE_CLOSE", "1");
+    } else if (std::strcmp(variant, "skip-if-pending") == 0) {
+        setEnv("STEPLENS_REPRO_SKIP_TRIM_IF_PENDING", "1");
+    } else if (std::strcmp(variant, "purge-before-trim") == 0) {
+        setEnv("STEPLENS_REPRO_PURGE_BEFORE_TRIM", "1");
+    }
+    phase(std::format("variant={} mmgt_opt={} mmgt_clear={} mmgt_mmap={} note=no Interface_Static or "
+                      "XSControl reset between rounds",
+                      variant, envOrUnset("MMGT_OPT"), envOrUnset("MMGT_CLEAR"), envOrUnset("MMGT_MMAP")));
+}
+
 void runBoxGrid(int boxCount, std::string_view tag) {
     if (!reproEnabled()) {
         GTEST_SKIP() << "STEPLENS_STEP_HEAP_REPRO 未设为 1。windows-build 的独立步骤才会真实执行";
@@ -171,10 +249,30 @@ void runBoxGrid(int boxCount, std::string_view tag) {
 
 } // namespace
 
-TEST(StepHeapRepro, Boxes400) {
-    runBoxGrid(400, "box-400");
+void runVariant(const char* variant) {
+    if (!reproEnabled()) {
+        GTEST_SKIP() << "STEPLENS_STEP_HEAP_REPRO 未设为 1。windows-build 的独立步骤才会真实执行";
+    }
+    prepareVariant(variant);
+    runBoxGrid(400, variant);
 }
 
-TEST(StepHeapRepro, Boxes1200) {
-    runBoxGrid(1200, "box-1200");
+TEST(StepHeapRepro, Baseline400x10) {
+    runVariant("baseline");
+}
+
+TEST(StepHeapRepro, NoTrim400x10) {
+    runVariant("no-trim");
+}
+
+TEST(StepHeapRepro, ClearBeforeClose400x10) {
+    runVariant("clear-before-close");
+}
+
+TEST(StepHeapRepro, SkipTrimIfPending400x10) {
+    runVariant("skip-if-pending");
+}
+
+TEST(StepHeapRepro, PurgeBeforeTrim400x10) {
+    runVariant("purge-before-trim");
 }

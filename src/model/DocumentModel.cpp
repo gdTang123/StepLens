@@ -1,3 +1,10 @@
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+
 #include "model/DocumentModel.h"
 
 #include "core/Log.h"
@@ -23,19 +30,45 @@
 #include <gp_Pnt.hxx>
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
+#if defined(_WIN32)
+#include <Windows.h>
+#endif
 
 namespace steplens::model {
 namespace {
 
 // 8.0 弃用了 TDF_LabelSequence 这个名字。7.9.3 里它就是这个序列。
 using LabelSequence = NCollection_Sequence<TDF_Label>;
+
+bool envFlag(const char* name) noexcept {
+#if defined(_WIN32)
+    char buffer[8] = {};
+    const DWORD length = GetEnvironmentVariableA(name, buffer, static_cast<DWORD>(sizeof(buffer)));
+    return length == 1 && buffer[0] == '1';
+#else
+    const char* value = std::getenv(name);
+    return value != nullptr && value[0] == '1' && value[1] == '\0';
+#endif
+}
+
+unsigned long threadToken() noexcept {
+#if defined(_WIN32)
+    return static_cast<unsigned long>(GetCurrentThreadId());
+#else
+    return static_cast<unsigned long>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
+#endif
+}
 
 struct ColorKey {
     bool colored = false;
@@ -757,6 +790,15 @@ DocumentModel::DocumentModel(BuildKey, opencascade::handle<TDocStd_Document> doc
 
 DocumentModel::~DocumentModel() {
     noteDocumentDestructorThread();
+    // 对照 (b)。默认仍是 main 的顺序：先 Close，成员（含 TDF_Label 和 TopoDS_Shape）随后才析构。
+    const bool clearFirst = envFlag("STEPLENS_REPRO_CLEAR_BEFORE_CLOSE");
+    std::fprintf(stderr, "model_dtor clear_before_close=%d thread=%lu\n", clearFirst ? 1 : 0, threadToken());
+    std::fflush(stderr);
+    if (clearFirst) {
+        m_nodes.clear();
+        m_prototypes.clear();
+        m_leaves.clear();
+    }
     closeDocument(m_doc);
 }
 

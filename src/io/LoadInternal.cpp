@@ -1,14 +1,30 @@
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+
 #include "io/LoadInternal.h"
 
 #include "core/OcctLoadContract.h"
 
+#include <Standard.hxx>
 #include <UnitsMethods_LengthUnit.hxx>
 #include <XCAFApp_Application.hxx>
 #include <XCAFDoc_DocumentTool.hxx>
 
 #include <malloc.h>
+#if defined(_WIN32)
+#include <Windows.h>
+#endif
+#include <atomic>
+#include <cstdio>
+#include <cstdlib>
+#include <functional>
 #include <mutex>
 #include <system_error>
+#include <thread>
 #include <utility>
 
 namespace steplens::io::detail {
@@ -43,7 +59,53 @@ InputFile inspectInputFile(const std::filesystem::path& file) {
     return input;
 }
 
+namespace {
+
+std::atomic<HeapPendingProbe> g_pendingProbe{nullptr};
+
+bool envFlag(const char* name) noexcept {
+#if defined(_WIN32)
+    char buffer[8] = {};
+    const DWORD length = GetEnvironmentVariableA(name, buffer, static_cast<DWORD>(sizeof(buffer)));
+    return length == 1 && buffer[0] == '1';
+#else
+    const char* value = std::getenv(name);
+    return value != nullptr && value[0] == '1' && value[1] == '\0';
+#endif
+}
+
+unsigned long threadToken() noexcept {
+#if defined(_WIN32)
+    return static_cast<unsigned long>(GetCurrentThreadId());
+#else
+    return static_cast<unsigned long>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
+#endif
+}
+
+} // namespace
+
+void setHeapPendingProbe(HeapPendingProbe probe) noexcept {
+    g_pendingProbe.store(probe, std::memory_order_release);
+}
+
 void releaseFreedHeap() noexcept {
+    int pending = -1;
+    if (const HeapPendingProbe probe = g_pendingProbe.load(std::memory_order_acquire)) {
+        pending = probe();
+    }
+    const bool noTrim = envFlag("STEPLENS_REPRO_NO_TRIM");
+    const bool skipPending = envFlag("STEPLENS_REPRO_SKIP_TRIM_IF_PENDING") && pending > 0;
+    const bool purgeFirst = envFlag("STEPLENS_REPRO_PURGE_BEFORE_TRIM");
+    // 对照实验的观测点：pending>0 表示后台 Close 还没结束，这时再 _heapmin 就是并发。
+    std::fprintf(stderr, "heap_reclaim pending=%d no_trim=%d skip_pending=%d purge_first=%d thread=%lu\n",
+                 pending, noTrim ? 1 : 0, skipPending ? 1 : 0, purgeFirst ? 1 : 0, threadToken());
+    std::fflush(stderr);
+    if (noTrim || skipPending) {
+        return;
+    }
+    if (purgeFirst) {
+        Standard::Purge();
+    }
 #if defined(_WIN32)
     _heapmin();
 #else
