@@ -223,25 +223,36 @@ jobs:
         env:
           STEPLENS_STEP_HEAP_REPRO: "1"
         run: |
+          # 进程一启动就带上 MMGT_OPT，赶在 OCCT 第一次分配之前。对照默认（变量不设）。
           $plan = @(
-            @{ Name = "Baseline400x10"; Times = 3 },
-            @{ Name = "NoParallel400x10"; Times = 8 }
+            @{ Name = "Baseline400x10"; Times = 4; Mmgt = "" },
+            @{ Name = "Baseline400x10"; Times = 8; Mmgt = "0" }
           )
           $missing = $false
           foreach ($item in $plan) {
+            if ($item.Mmgt -eq "0") {
+              $env:MMGT_OPT = "0"
+              $env:MMGT_MMAP = "0"
+            } else {
+              Remove-Item Env:MMGT_OPT -ErrorAction SilentlyContinue
+              Remove-Item Env:MMGT_MMAP -ErrorAction SilentlyContinue
+            }
             foreach ($pass in 1..$item.Times) {
               $name = $item.Name
-              Write-Host "repro_case=$name pass=$pass"
-              $log = Join-Path $env:RUNNER_TEMP "repro-$name-$pass.log"
+              $tag = if ($item.Mmgt -eq "0") { "mmgt0" } else { "default" }
+              Write-Host "repro_case=$name pass=$pass allocator=$tag"
+              $log = Join-Path $env:RUNNER_TEMP "repro-$tag-$pass.log"
               ctest --preset unit -C RelWithDebInfo -R "^StepHeapRepro\.$name$" --output-on-failure --verbose --no-tests=error *> $log
               $code = $LASTEXITCODE
               Get-Content -LiteralPath $log
-              Write-Host "repro_case=$name pass=$pass exit=$code"
+              Write-Host "repro_case=$name pass=$pass allocator=$tag exit=$code"
               if (-not (Select-String -LiteralPath $log -Pattern "phase=start" -Quiet)) {
                 $missing = $true
               }
             }
           }
+          Remove-Item Env:MMGT_OPT -ErrorAction SilentlyContinue
+          Remove-Item Env:MMGT_MMAP -ErrorAction SilentlyContinue
           if ($missing) { throw "有对照没有真正跑起来" }
 
       - name: Check vcpkg binary cache
