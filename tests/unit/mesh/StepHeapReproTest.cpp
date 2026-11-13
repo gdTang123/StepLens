@@ -41,7 +41,6 @@ void releaseFreedHeap() noexcept;
 #include <format>
 #include <gtest/gtest.h>
 #include <iostream>
-#include <mutex>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -114,14 +113,11 @@ void loadMeshRetireReclaim(const std::filesystem::path& file, std::string_view t
     {
         auto scheduler = steplens::occt::makeOcctTaskScheduler(4);
         steplens::mesh::Tessellator tessellator(*scheduler, steplens::mesh::MeshPolicy{});
-        std::mutex batchesMutex;
+        // 不在测试里给 push_back 加锁。和 ManySmallPrototypes 一样，只靠 run 把 onBatch 串行化。
         const auto meshed = tessellator.run(
             *model, steplens::mesh::MeshLevel::SchemeB,
-            [&](steplens::mesh::MeshBatch&& batch) {
-                std::lock_guard lock(batchesMutex);
-                batches.push_back(std::move(batch));
-            },
-            sink, steplens::CancelToken{});
+            [&](steplens::mesh::MeshBatch&& batch) { batches.push_back(std::move(batch)); }, sink,
+            steplens::CancelToken{});
         ASSERT_TRUE(meshed.ok()) << tag << " " << meshed.error().message;
         EXPECT_GT(meshed.value().triangleCount, 0u) << tag;
         EXPECT_EQ(batches.size(), model->prototypes().size()) << tag;

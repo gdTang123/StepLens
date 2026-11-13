@@ -11,9 +11,9 @@
 
 namespace {
 
-// core-tests-tsan 不链 OCCT，跑不到 Tessellator。这里用同一类投递：
-// 很多“原型”从多个工作线程送进同一份 vector。锁住之后 TSan 应当安静；
-// 去掉这把锁，TSan 会报 data race。Tessellator::run 的 onBatch 用同样的串行化。
+// core-tests-tsan 不链 OCCT，跑不到 Tessellator，也碰不到 batchMutex。
+// 这把 gate 只保护本测试自己的 vector。去掉 Tessellator.cpp 的 batchMutex 时，
+// 这里不会报 data race。生产锁是否还在，由 StepHeapRepro 和 ManySmallPrototypes 覆盖。
 
 constexpr int kWorkers = 4;
 constexpr int kPrototypes = 200;
