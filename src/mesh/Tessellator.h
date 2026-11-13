@@ -44,7 +44,8 @@ public:
     void setExclusiveProbe(std::function<void(model::PrototypeId)> probe);
 
     // onBatch 在算出该原型的工作线程上调用，调用后本对象不再改这份 MeshBatch。
-    // 回调要自己同步。取消时已交付的批次仍然有效，返回值是 Cancelled。
+    // run 会把回调串行化：多个原型同时网格化时，回调本身不会并发。
+    // 取消时已交付的批次仍然有效，返回值是 Cancelled。
     // 不调用 ProgressSink::reset，也不改 LoadStage。进度只用 setPresentFaceFraction。
     [[nodiscard]] Result<MeshStats> run(const model::DocumentModel& model, MeshLevel level,
                                         const std::function<void(MeshBatch&&)>& onBatch,
