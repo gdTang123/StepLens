@@ -46,6 +46,7 @@ void setHeapPendingProbe(HeapPendingProbe probe) noexcept;
 #include <format>
 #include <gtest/gtest.h>
 #include <iostream>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -216,15 +217,21 @@ void loadMeshRetireReclaim(const std::filesystem::path& file, std::string_view t
     ASSERT_TRUE(built.ok()) << tag << " " << built.error().message;
     auto model = std::move(built.value());
 
-    phase(std::format("file={} round={} phase=mesh_begin", tag, round));
+    phase(std::format("file={} round={} phase=mesh_begin prototypes={}", tag, round,
+                      model->prototypes().size()));
     std::vector<steplens::mesh::MeshBatch> batches;
     {
         auto scheduler = steplens::occt::makeOcctTaskScheduler(2);
         steplens::mesh::Tessellator tessellator(*scheduler, steplens::mesh::MeshPolicy{});
+        // onBatch 在工作线程上调用。不加锁的 push_back 会把这份 vector 写坏。
+        std::mutex batchesMutex;
         const auto meshed = tessellator.run(
             *model, steplens::mesh::MeshLevel::SchemeB,
-            [&](steplens::mesh::MeshBatch&& batch) { batches.push_back(std::move(batch)); }, sink,
-            steplens::CancelToken{});
+            [&](steplens::mesh::MeshBatch&& batch) {
+                std::lock_guard lock(batchesMutex);
+                batches.push_back(std::move(batch));
+            },
+            sink, steplens::CancelToken{});
         ASSERT_TRUE(meshed.ok()) << tag << " " << meshed.error().message;
         EXPECT_GT(meshed.value().triangleCount, 0u) << tag;
     }
