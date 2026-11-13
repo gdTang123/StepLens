@@ -11,16 +11,15 @@
 
 namespace {
 
-// core-tests-tsan 不链 OCCT，跑不到 Tessellator，也碰不到 batchMutex。
-// 这把 gate 只保护本测试自己的 vector。去掉 Tessellator.cpp 的 batchMutex 时，
-// 这里不会报 data race。生产锁是否还在，由 StepHeapRepro 和 ManySmallPrototypes 覆盖。
+// 只是回调加锁模式示例，不守护 Tessellator 生产锁（生产锁由 windows-build 的
+// StepHeapRepro/ManySmallPrototypes 守护）。
 
 constexpr int kWorkers = 4;
 constexpr int kPrototypes = 200;
 
 } // namespace
 
-TEST(BatchCallback, ParallelPrototypeDeliveryDoesNotRace) {
+TEST(BatchCallback, LockedCallbackPatternExample) {
     steplens::TaskScheduler scheduler(static_cast<unsigned>(kWorkers));
     ASSERT_GE(scheduler.threadCount(), 2u);
 

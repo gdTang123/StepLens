@@ -65,6 +65,47 @@ TEST(OcctKernelContract, LinkedVersionMatchesBuild) {
     EXPECT_STREQ(steplens::occt::versionString(), STEPLENS_EXPECTED_OCCT);
 }
 
+TEST(OcctKernelContract, RemoveUvAndSinglePrecisionAfterClear) {
+    // 7.9.3 与 8.0.1 头文件都有 RemoveUVNodes / SetDoublePrecision。
+    // 节点分配之后 SetDoublePrecision 会抛；Clear 之后再设单精度，两版都能写回。
+    const TopoDS_Shape shape = makeCylinder();
+    ASSERT_TRUE(meshShape(shape));
+
+    TriangulationHandle triangulation;
+    for (TopExp_Explorer explorer(shape, TopAbs_FACE); explorer.More(); explorer.Next()) {
+        TopLoc_Location location;
+        triangulation = BRep_Tool::Triangulation(TopoDS::Face(explorer.Current()), location);
+        if (!triangulation.IsNull() && triangulation->NbNodes() > 0) {
+            break;
+        }
+    }
+    ASSERT_FALSE(triangulation.IsNull());
+    const int nodeCount = triangulation->NbNodes();
+    const int triangleCount = triangulation->NbTriangles();
+    ASSERT_GT(nodeCount, 0);
+    ASSERT_GT(triangleCount, 0);
+    ASSERT_TRUE(triangulation->IsDoublePrecision());
+    const gp_Pnt first = triangulation->Node(1);
+    const Poly_Triangle firstTriangle = triangulation->Triangle(1);
+
+    triangulation->RemoveUVNodes();
+    EXPECT_FALSE(triangulation->HasUVNodes());
+
+    triangulation->Clear();
+    triangulation->SetDoublePrecision(false);
+    triangulation->ResizeNodes(nodeCount, false);
+    triangulation->ResizeTriangles(triangleCount, false);
+    triangulation->SetNode(1, first);
+    triangulation->SetTriangle(1, firstTriangle);
+    triangulation->RemoveUVNodes();
+
+    EXPECT_FALSE(triangulation->IsDoublePrecision());
+    EXPECT_FALSE(triangulation->HasUVNodes());
+    EXPECT_EQ(triangulation->NbNodes(), nodeCount);
+    EXPECT_EQ(triangulation->NbTriangles(), triangleCount);
+    EXPECT_NEAR(triangulation->Node(1).Distance(first), 0.0, 1.0e-3);
+}
+
 TEST(OcctKernelContract, SetDoublePrecisionAfterMeshThrows) {
     const TopoDS_Shape shape = makeCylinder();
     ASSERT_TRUE(meshShape(shape));

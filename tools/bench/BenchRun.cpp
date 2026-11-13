@@ -2,6 +2,7 @@
 
 #include "core/CancelToken.h"
 #include "core/ProgressSink.h"
+#include "io/HeapRelease.h"
 #include "io/ILoader.h"
 #include "mesh/MeshPolicy.h"
 #include "mesh/Tessellator.h"
@@ -28,12 +29,6 @@
 #include <mutex>
 #include <optional>
 #include <utility>
-
-#if defined(_WIN32)
-#include <malloc.h>
-#else
-#include <malloc.h>
-#endif
 
 namespace steplens::bench {
 namespace {
@@ -102,11 +97,7 @@ std::string pathUtf8(const std::filesystem::path& path) {
 }
 
 void releaseHeap() noexcept {
-#if defined(_WIN32)
-    _heapmin();
-#else
-    malloc_trim(0);
-#endif
+    io::releaseFreedHeap();
 }
 
 void writeLine(std::string_view line) {
@@ -292,6 +283,9 @@ OnceResult runOnce(const std::filesystem::path& file, std::int64_t fileBytes, St
 
     result.record.stages = durationsOf(clock, loadEnd, buildingSeconds, meshingSeconds, presentingSeconds);
     result.record.metrics = probe.runMetrics();
+    for (MemoryMetric& held : probe.heldMetrics()) {
+        result.record.metrics.push_back(std::move(held));
+    }
     result.ok = true;
     releaseHeap();
     return result;

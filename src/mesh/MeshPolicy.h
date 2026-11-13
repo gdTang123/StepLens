@@ -27,7 +27,8 @@ inline constexpr double kSchemeBAngleDegrees = 25.0;
 inline constexpr double kDeflectionMinMm = 0.005;
 // OCCT IMeshTools_Parameters::RelMinSize()。
 inline constexpr double kMinSizeToDeflection = 0.1;
-// 面数超过这个数的原型单独跑，并打开 OCCT 内部按面并行。和摸底的 2000 一致。
+// 面数超过这个数的原型单独跑。Tessellator 对这种原型按同样的面数切块顺序三角化，
+// 不再对整壳打开 InParallel（U14：并行度不是 X-05 内存尖峰的原因）。
 inline constexpr std::uint32_t kLargePrototypeFaces = 2000;
 
 struct MeshParams {

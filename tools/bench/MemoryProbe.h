@@ -37,6 +37,8 @@ public:
     // 下一次 snapshot 只统计这次重置之后的峰值。进程级计数器清不掉。
     void resetRun() noexcept;
     [[nodiscard]] std::vector<MemoryMetric> runMetrics();
+    // 此刻的常驻和私有字节，不是峰值。网格瘦身前后对比用它：峰值常常出现在读取阶段。
+    [[nodiscard]] std::vector<MemoryMetric> heldMetrics() const;
     [[nodiscard]] std::vector<MemoryMetric> lifetimeMetrics() const;
     [[nodiscard]] const std::string& platform() const noexcept {
         return m_platform;

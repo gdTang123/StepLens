@@ -19,6 +19,7 @@
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Compound.hxx>
+#include <TopoDS_Face.hxx>
 #include <XCAFApp_Application.hxx>
 #include <XCAFDoc_ColorTool.hxx>
 #include <XCAFDoc_DocumentTool.hxx>
@@ -186,15 +187,21 @@ std::optional<std::filesystem::path> findNamedSample(const std::filesystem::path
     return std::nullopt;
 }
 
-bool shapeHasDoublePrecisionNear(const TopoDS_Shape& shape, double x, double tolerance) {
+bool shapeKeepsSlimMeshNear(const TopoDS_Shape& shape, double x, double tolerance) {
     bool found = false;
+    int kept = 0;
     for (TopExp_Explorer faces(shape, TopAbs_FACE); faces.More(); faces.Next()) {
         TopLoc_Location location;
         const auto triangulation = BRep_Tool::Triangulation(TopoDS::Face(faces.Current()), location);
-        if (triangulation.IsNull()) {
+        if (triangulation.IsNull() || triangulation->NbTriangles() <= 0) {
             continue;
         }
-        EXPECT_TRUE(triangulation->IsDoublePrecision());
+        ++kept;
+        // 显示数组已经建完。面上的网格留下，但不再是双精度，也没有 UV。法向还在。测量仍走 B-Rep。
+        EXPECT_FALSE(triangulation->IsDoublePrecision());
+        EXPECT_FALSE(triangulation->HasUVNodes());
+        EXPECT_TRUE(triangulation->HasNormals());
+        EXPECT_GT(triangulation->NbNodes(), 0);
         for (int node = 1; node <= triangulation->NbNodes(); ++node) {
             const gp_Pnt point = triangulation->Node(node).Transformed(location.Transformation());
             if (std::abs(point.X() - x) <= tolerance) {
@@ -202,6 +209,7 @@ bool shapeHasDoublePrecisionNear(const TopoDS_Shape& shape, double x, double tol
             }
         }
     }
+    EXPECT_GT(kept, 0);
     return found;
 }
 
@@ -284,7 +292,7 @@ TEST(Tessellator, SamePrototypeIsTriangulatedOnce) {
     ASSERT_FALSE(batches[0].groups.empty());
     EXPECT_FALSE(batches[0].groups[0].triangles.IsNull());
     EXPECT_GT(batches[0].groups[0].triangles->VertexNumber(), 0);
-    EXPECT_TRUE(shapeHasDoublePrecisionNear(model->prototype(0).shape, 1.0e6, 1.0e-5));
+    EXPECT_TRUE(shapeKeepsSlimMeshNear(model->prototype(0).shape, 1.0e6, 0.25));
     EXPECT_GE(sink.fraction(), 0.f);
     EXPECT_LE(sink.fraction(), 1.f);
     EXPECT_EQ(sink.phase(), steplens::ProgressPhase::Presenting);
@@ -556,6 +564,49 @@ TEST(Tessellator, SharedFacePrototypesDoNotMeshTogether) {
     EXPECT_EQ(probe.order.size(), 2u);
     EXPECT_EQ(probe.violations, 0);
     EXPECT_EQ(probe.maxDepth, 1);
+    model.reset();
+    EXPECT_EQ(documentCount(), before);
+}
+
+TEST(Tessellator, GiantPrototypeIsMeshedInFaceChunks) {
+    const int before = documentCount();
+    TopoDS_Compound compound;
+    BRep_Builder builder;
+    builder.MakeCompound(compound);
+    constexpr int kBoxes = 334;
+    for (int index = 0; index < kBoxes; ++index) {
+        builder.Add(compound, boxAt(index * 12.0, 0.0, 0.0));
+    }
+    auto doc = newDocument();
+    auto shapes = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
+    shapes->AddShape(compound, false);
+    auto model = buildModel(std::move(doc));
+    ASSERT_TRUE(model);
+    ASSERT_EQ(model->prototypes().size(), 1u);
+    ASSERT_GT(model->prototype(0).faceCount, steplens::mesh::kLargePrototypeFaces);
+
+    auto scheduler = steplens::occt::makeOcctTaskScheduler(2);
+    steplens::mesh::Tessellator tessellator(*scheduler, steplens::mesh::MeshPolicy{});
+    steplens::ProgressSink sink;
+    sink.reset(1);
+    ProbeState probe;
+    tessellator.setExclusiveProbe(
+        [&](steplens::model::PrototypeId id) { enterProbe(probe, sink, id, std::chrono::milliseconds{0}); });
+    std::vector<steplens::mesh::MeshBatch> batches;
+    const auto result = tessellator.run(
+        *model, steplens::mesh::MeshLevel::SchemeB,
+        [&](steplens::mesh::MeshBatch&& batch) { batches.push_back(std::move(batch)); }, sink,
+        steplens::CancelToken{});
+    ASSERT_TRUE(result.ok()) << result.error().message;
+    EXPECT_EQ(result.value().meshCalls, 1u);
+    EXPECT_GT(result.value().triangleCount, 0u);
+    EXPECT_EQ(probe.violations, 0);
+    EXPECT_EQ(probe.maxDepth, 1);
+    EXPECT_TRUE(probe.monotonic);
+    ASSERT_EQ(batches.size(), 1u);
+    ASSERT_FALSE(batches[0].groups.empty());
+    EXPECT_GT(batches[0].groups[0].triangles->VertexNumber(), 0);
+    EXPECT_TRUE(shapeKeepsSlimMeshNear(model->prototype(0).shape, 0.0, 0.25));
     model.reset();
     EXPECT_EQ(documentCount(), before);
 }

@@ -217,8 +217,15 @@ jobs:
           pwsh -File scripts/verify_occt_link.ps1 -BuildDir build/msvc -Report build/msvc/occt-link-report.txt
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      # 契约腿是 ASan，不能代表产品分配器。这条是 RelWithDebInfo、无 sanitizer。
+      # --verbose 让通过时的 memory_round 也进日志。--no-tests=error 避免测试没编进去还算过。
+      - name: Memory release on the product allocator
+        run: |
+          ctest --preset unit -C RelWithDebInfo -R "^MemoryRelease\.SyntheticOpenCloseStaysNearBaseline$" --output-on-failure --verbose --no-tests=error
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       # 400/1200 盒 STEP：加载、网格化、后台 Close、releaseFreedHeap。普通 unit 不设变量所以跳过。
-      # --verbose 让通过时的 step_heap_repro 行留在日志里。
+      # --verbose 让通过时的 step_heap_repro 行留在日志里。测试自己跑 10 轮。
       - name: Step heap repro on the product allocator
         env:
           STEPLENS_STEP_HEAP_REPRO: "1"

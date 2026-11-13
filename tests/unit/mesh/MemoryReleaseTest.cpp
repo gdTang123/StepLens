@@ -1,0 +1,442 @@
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+
+#include "core/CancelToken.h"
+#include "core/OcctLoadContract.h"
+#include "core/ProgressSink.h"
+#include "io/HeapRelease.h"
+#include "io/ILoader.h"
+#include "mesh/Tessellator.h"
+#include "model/DocumentModel.h"
+#include "model/DocumentRelease.h"
+#include "occtsupport/OcctBoundary.h"
+
+#include <BRepPrimAPI_MakeBox.hxx>
+#include <BRep_Builder.hxx>
+#include <TDocStd_Document.hxx>
+#include <TopoDS_Compound.hxx>
+#include <XCAFApp_Application.hxx>
+#include <XCAFDoc_DocumentTool.hxx>
+#include <XCAFDoc_ShapeTool.hxx>
+#include <gp_Pnt.hxx>
+
+#include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <filesystem>
+#include <format>
+#include <fstream>
+#include <functional>
+#include <gtest/gtest.h>
+#include <iostream>
+#include <mutex>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <thread>
+#include <vector>
+
+#if defined(_WIN32)
+// clang-format off
+#include <Windows.h>
+#include <psapi.h>
+// clang-format on
+#pragma comment(lib, "psapi.lib")
+#elif defined(__GLIBC__)
+#include <malloc.h>
+#endif
+
+namespace {
+
+constexpr std::int64_t kBytesPerKb = 1024;
+constexpr std::int64_t kBytesPerMiB = 1024LL * 1024LL;
+// 合成装配要让打开峰值至少高出基线这么多，避免小盒子只涨几 MiB 还算通过。
+constexpr std::int64_t kMinOpenRiseBytes = 40LL * kBytesPerMiB;
+// 实测 S/M 关闭后残留最大约 +35 MiB。容差收在这附近，不再用 300 MiB。
+constexpr std::int64_t kCloseSlackBytes = 48LL * kBytesPerMiB;
+constexpr int kRounds = 3;
+// 重复盒子。本地测过这一档能把私有字节抬过 40 MiB，又远小于特大档。
+constexpr int kSyntheticBoxes = 600;
+
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+constexpr bool kSanitizer = true;
+#else
+constexpr bool kSanitizer = false;
+#endif
+
+std::string pathUtf8(const std::filesystem::path& path) {
+    const std::u8string bytes = path.u8string();
+    return std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+}
+
+#if defined(_WIN32)
+std::int64_t privateBytesNow() {
+    PROCESS_MEMORY_COUNTERS_EX info{};
+    info.cb = sizeof(info);
+    if (GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&info),
+                             sizeof(info)) == 0) {
+        return -1;
+    }
+    return static_cast<std::int64_t>(info.PrivateUsage);
+}
+#else
+std::int64_t labeledKilobytes(const std::string& line) {
+    const char* begin = line.c_str();
+    const char* end = begin + line.size();
+    while (begin < end && (*begin < '0' || *begin > '9')) {
+        ++begin;
+    }
+    if (begin == end) {
+        return -1;
+    }
+    char* parsedEnd = nullptr;
+    const long long parsed = std::strtoll(begin, &parsedEnd, 10);
+    if (parsedEnd == begin) {
+        return -1;
+    }
+    return static_cast<std::int64_t>(parsed);
+}
+
+std::int64_t privateBytesNow() {
+    std::ifstream file("/proc/self/smaps_rollup");
+    if (!file) {
+        return -1;
+    }
+    std::int64_t clean = -1;
+    std::int64_t dirty = -1;
+    std::string line;
+    while (std::getline(file, line)) {
+        if (line.rfind("Private_Clean:", 0) == 0) {
+            clean = labeledKilobytes(line);
+        } else if (line.rfind("Private_Dirty:", 0) == 0) {
+            dirty = labeledKilobytes(line);
+        }
+    }
+    if (clean < 0 || dirty < 0) {
+        return -1;
+    }
+    return (clean + dirty) * kBytesPerKb;
+}
+#endif
+
+std::optional<std::filesystem::path> samplesDirectory() {
+#if defined(_WIN32)
+    constexpr DWORD kCapacity = 32767;
+    wchar_t buffer[kCapacity];
+    const DWORD length = GetEnvironmentVariableW(L"STEPLENS_SAMPLES", buffer, kCapacity);
+    if (length == 0 || length >= kCapacity) {
+        return std::nullopt;
+    }
+    return std::filesystem::path{buffer};
+#else
+    const char* root = std::getenv("STEPLENS_SAMPLES");
+    if (root == nullptr || root[0] == '\0') {
+        return std::nullopt;
+    }
+    return std::filesystem::path{root};
+#endif
+}
+
+std::optional<std::filesystem::path> findNamedSample(const std::filesystem::path& root,
+                                                     const std::string& name) {
+    const std::filesystem::path direct = root / name;
+    if (std::filesystem::exists(direct)) {
+        return direct;
+    }
+    std::error_code error;
+    const auto options = std::filesystem::directory_options::skip_permission_denied;
+    for (std::filesystem::recursive_directory_iterator it(root, options, error), end; it != end;
+         it.increment(error)) {
+        if (error) {
+            error.clear();
+            continue;
+        }
+        constexpr int kMaxDepth = 3;
+        if (it.depth() > kMaxDepth) {
+            it.disable_recursion_pending();
+            continue;
+        }
+        if (it->is_regular_file(error) && it->path().filename().string() == name) {
+            return it->path();
+        }
+    }
+    return std::nullopt;
+}
+
+// 不把这几百个盒子写成 STEP。Windows 上 OCCT 写出/读入十几万个实体会堆损坏
+// （0xc0000374），进程在断言之前就退出。内存仍来自同一份 B-Rep：建进 XCAF，再走
+// DocumentModel、网格化、后台 Close 和堆回收。
+std::shared_ptr<const steplens::model::DocumentModel> buildBoxGridModel(int boxCount) {
+    TopoDS_Compound compound;
+    BRep_Builder builder;
+    builder.MakeCompound(compound);
+    int side = 1;
+    while (side * side < boxCount) {
+        ++side;
+    }
+    for (int index = 0; index < boxCount; ++index) {
+        const double x = static_cast<double>(index % side) * 15.0;
+        const double y = static_cast<double>(index / side) * 15.0;
+        builder.Add(compound, BRepPrimAPI_MakeBox(gp_Pnt(x, y, 0.0), 10.0, 10.0, 10.0).Shape());
+    }
+
+    opencascade::handle<TDocStd_Document> doc;
+    {
+        std::lock_guard lock(steplens::xcafDocumentMutex());
+        XCAFApp_Application::GetApplication()->NewDocument("BinXCAF", doc);
+    }
+    if (doc.IsNull()) {
+        ADD_FAILURE() << "NewDocument failed";
+        return {};
+    }
+    XCAFDoc_DocumentTool::ShapeTool(doc->Main())->AddShape(compound, false);
+
+    steplens::io::LoadedDocument loaded;
+    loaded.doc = std::move(doc);
+    loaded.lengthUnitToMm = 1.0;
+    loaded.schema = "AP214";
+    loaded.fileBytes = 1;
+    steplens::ProgressSink sink;
+    sink.reset(1);
+    auto built = steplens::model::DocumentModel::build(std::move(loaded), sink, steplens::CancelToken{});
+    if (!built.ok()) {
+        ADD_FAILURE() << built.error().message;
+        return {};
+    }
+    return std::move(built.value());
+}
+
+void raisePeak(std::atomic<std::int64_t>& slot, std::int64_t value) {
+    if (value < 0) {
+        return;
+    }
+    std::int64_t seen = slot.load(std::memory_order_relaxed);
+    while (value > seen && !slot.compare_exchange_weak(seen, value, std::memory_order_relaxed)) {
+    }
+}
+
+// 打开峰值：加载并网格化期间的私有字节高水位，模型还在手里。
+// 关闭后：显示数组丢掉，最后一份 DocumentModel 交给后台 retirer，等 Close 结束再回收堆。
+void openCloseOnce(const std::function<std::shared_ptr<const steplens::model::DocumentModel>()>& open,
+                   std::string_view label, std::int64_t& openPeakOut) {
+    std::atomic<std::int64_t> peak{0};
+    std::atomic<bool> sample{true};
+    std::thread sampler([&] {
+        while (sample.load(std::memory_order_relaxed)) {
+            raisePeak(peak, privateBytesNow());
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+    });
+    struct StopSampler {
+        std::atomic<bool>& flag;
+        std::thread& worker;
+        ~StopSampler() {
+            flag.store(false, std::memory_order_relaxed);
+            if (worker.joinable()) {
+                worker.join();
+            }
+        }
+    } stop{sample, sampler};
+
+    auto model = open();
+    ASSERT_TRUE(static_cast<bool>(model)) << label;
+    steplens::ProgressSink sink;
+    sink.reset(1);
+    std::vector<steplens::mesh::MeshBatch> batches;
+    {
+        auto scheduler = steplens::occt::makeOcctTaskScheduler(2);
+        steplens::mesh::Tessellator tessellator(*scheduler, steplens::mesh::MeshPolicy{});
+        const auto meshed = tessellator.run(
+            *model, steplens::mesh::MeshLevel::SchemeB,
+            [&](steplens::mesh::MeshBatch&& batch) { batches.push_back(std::move(batch)); }, sink,
+            steplens::CancelToken{});
+        ASSERT_TRUE(meshed.ok()) << label << " " << meshed.error().message;
+        EXPECT_GT(meshed.value().triangleCount, 0u) << label;
+    }
+    int shownVertices = 0;
+    for (const auto& batch : batches) {
+        for (const auto& group : batch.groups) {
+            if (!group.triangles.IsNull()) {
+                shownVertices += group.triangles->VertexNumber();
+            }
+        }
+    }
+    EXPECT_GT(shownVertices, 0) << label;
+    raisePeak(peak, privateBytesNow());
+    sample.store(false, std::memory_order_relaxed);
+    if (sampler.joinable()) {
+        sampler.join();
+    }
+
+    batches.clear();
+    steplens::model::retireDocument(std::move(model));
+    EXPECT_TRUE(steplens::model::waitForDocumentRelease(std::chrono::seconds(120))) << label;
+    steplens::io::releaseFreedHeap();
+    openPeakOut = peak.load(std::memory_order_relaxed);
+}
+
+void reportRound(std::string_view file, int round, std::int64_t baseline, std::int64_t openPeak,
+                 std::int64_t afterClose) {
+    constexpr double kMiB = 1024.0 * 1024.0;
+    std::cout << std::format("memory_round file={} round={} baseline_mib={:.1f} open_peak_mib={:.1f} "
+                             "after_close_mib={:.1f} metric=private_bytes\n",
+                             file, round, static_cast<double>(baseline) / kMiB,
+                             static_cast<double>(openPeak) / kMiB, static_cast<double>(afterClose) / kMiB)
+              << std::flush;
+}
+
+void expectReleased(std::int64_t baseline, std::int64_t openPeak, std::int64_t afterClose,
+                    std::string_view label, bool requireRise) {
+    ASSERT_GE(baseline, 0) << label;
+    ASSERT_GE(openPeak, 0) << label;
+    ASSERT_GE(afterClose, 0) << label;
+    const std::int64_t rise = openPeak - baseline;
+    if (requireRise) {
+        EXPECT_GE(rise, kMinOpenRiseBytes) << label;
+    }
+    if (rise >= kMinOpenRiseBytes) {
+        // 关闭后至少收回打开增量的一半，不能停在峰值附近。
+        EXPECT_LE(afterClose, openPeak - rise / 2) << label;
+    }
+    EXPECT_LE(afterClose, baseline + kCloseSlackBytes) << label;
+}
+
+} // namespace
+
+TEST(MemoryRelease, SyntheticOpenCloseStaysNearBaseline) {
+    if (kSanitizer) {
+        GTEST_SKIP() << "ASan/TSan 不是产品分配器。回落断言在 windows-build 的 RelWithDebInfo 上跑";
+    }
+    steplens::io::releaseFreedHeap();
+    const std::int64_t baseline = privateBytesNow();
+    ASSERT_GE(baseline, 0);
+
+    for (int round = 0; round < kRounds; ++round) {
+        std::int64_t openPeak = 0;
+        openCloseOnce([] { return buildBoxGridModel(kSyntheticBoxes); }, "box-grid", openPeak);
+        const std::int64_t afterClose = privateBytesNow();
+        reportRound("box-grid", round, baseline, openPeak, afterClose);
+        expectReleased(baseline, openPeak, afterClose, "synthetic round " + std::to_string(round), true);
+    }
+}
+
+TEST(MemoryRelease, SampleOpenCloseStaysNearBaseline) {
+    if (kSanitizer) {
+        GTEST_SKIP() << "ASan/TSan 不是产品分配器。回落断言在 windows-build 的 RelWithDebInfo 上跑";
+    }
+    const auto root = samplesDirectory();
+    if (!root) {
+        GTEST_SKIP() << "STEPLENS_SAMPLES 未设置";
+    }
+
+    constexpr std::string_view kNames[] = {
+        "screw.step",
+        "linkrods.step",
+        "as1-ac-214.stp",
+        "Schenkel.stp",
+        "as1_pe.stp",
+        "moon_buggy_asm.stp",
+        "123Block_Color.stp",
+        "nist_ctc_02_asme1_ap242-e2.stp",
+        "nist_ftc_09_asme1_ap242-e1.stp",
+        "nist_stc_10_asme1_ap242-e2.stp",
+        "ROTOR-201NAL-Z7.STEP",
+        "bearing.iges",
+        "hammer.iges",
+        "1030490B.igs",
+        "Rocky_House.stp",
+        "SO101 Assembly.step",
+        "YARR_assembly.STEP",
+        "Cruise_Assembly.stp",
+        "SP218P001.IGS",
+        "1026868C.IGS",
+        "PX13298F.IGS",
+    };
+
+    std::vector<std::filesystem::path> files;
+    for (const std::string_view name : kNames) {
+        if (const auto found = findNamedSample(*root, std::string(name))) {
+            files.push_back(*found);
+        }
+    }
+    if (files.empty()) {
+        GTEST_SKIP() << "STEPLENS_SAMPLES 里没有 S/M 档样例";
+    }
+
+    steplens::io::releaseFreedHeap();
+    const std::int64_t baseline = privateBytesNow();
+    ASSERT_GE(baseline, 0);
+    for (const auto& file : files) {
+        for (int round = 0; round < kRounds; ++round) {
+            std::int64_t openPeak = 0;
+            const std::filesystem::path sample = file;
+            openCloseOnce(
+                [sample] {
+                    const auto bytes = std::filesystem::file_size(sample);
+                    steplens::ProgressSink sink;
+                    sink.reset(static_cast<std::uint64_t>(bytes));
+                    auto loader = steplens::io::makeLoader(sample);
+                    if (!loader) {
+                        ADD_FAILURE() << pathUtf8(sample);
+                        return std::shared_ptr<const steplens::model::DocumentModel>{};
+                    }
+                    auto loaded = loader->load(sample, {}, sink, steplens::CancelToken{});
+                    if (!loaded.ok()) {
+                        ADD_FAILURE() << loaded.error().message;
+                        return std::shared_ptr<const steplens::model::DocumentModel>{};
+                    }
+                    auto built = steplens::model::DocumentModel::build(std::move(loaded.value()), sink,
+                                                                       steplens::CancelToken{});
+                    if (!built.ok()) {
+                        ADD_FAILURE() << built.error().message;
+                        return std::shared_ptr<const steplens::model::DocumentModel>{};
+                    }
+                    return std::move(built.value());
+                },
+                pathUtf8(sample), openPeak);
+            const std::int64_t afterClose = privateBytesNow();
+            reportRound(pathUtf8(file.filename()), round, baseline, openPeak, afterClose);
+            expectReleased(baseline, openPeak, afterClose, pathUtf8(file) + " round " + std::to_string(round),
+                           false);
+        }
+    }
+}
+
+#if defined(__GLIBC__)
+TEST(HeapRelease, MallocTrimDoesNotGrowAfterFree) {
+    if (kSanitizer) {
+        GTEST_SKIP() << "ASan/TSan 替换了分配器，malloc_trim 不能代表产品路径";
+    }
+    // 这块 glibc 在 free 时已经把大块还回去了，trim 只扫剩余空闲页。
+    // 这里锁的是调用本身不把私有字节抬高；下降幅度由 T16 的文件测量给出。
+    ASSERT_EQ(mallopt(M_MMAP_THRESHOLD, 1 << 30), 1);
+    void* pin = std::malloc(1U << 20);
+    ASSERT_NE(pin, nullptr);
+    std::memset(pin, 1, 1U << 20);
+    constexpr int kChunks = 16;
+    constexpr std::size_t kChunk = 4U * 1024U * 1024U;
+    std::vector<void*> blocks(static_cast<std::size_t>(kChunks), nullptr);
+    for (int index = 0; index < kChunks; ++index) {
+        void* block = std::malloc(kChunk);
+        ASSERT_NE(block, nullptr);
+        std::memset(block, 1, kChunk);
+        blocks[static_cast<std::size_t>(index)] = block;
+    }
+    for (void* block : blocks) {
+        std::free(block);
+    }
+    const std::int64_t held = privateBytesNow();
+    steplens::io::releaseFreedHeap();
+    const std::int64_t after = privateBytesNow();
+    std::free(pin);
+    ASSERT_GE(held, 0);
+    ASSERT_GE(after, 0);
+    EXPECT_LE(after, held + kBytesPerKb * kBytesPerKb);
+}
+#endif

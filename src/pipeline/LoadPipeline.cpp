@@ -3,6 +3,7 @@
 #include "core/LoadCoordinator.h"
 #include "core/LoadSession.h"
 #include "core/Log.h"
+#include "io/HeapRelease.h"
 #include "io/ILoader.h"
 #include "mesh/MeshPolicy.h"
 #include "mesh/Tessellator.h"
@@ -417,6 +418,7 @@ void LoadPipeline::tick() {
 
     const int pending = adopted ? m_host.pending() : 0;
     bool fit = false;
+    bool releaseFinished = false;
     {
         std::lock_guard lock(m_state->mutex);
         const bool drained = m_state->batches.empty() && pending == 0;
@@ -427,7 +429,12 @@ void LoadPipeline::tick() {
         } else if (m_state->activity == LoadActivity::Releasing && live == 0 &&
                    model::documentsPendingRelease() == 0) {
             m_state->activity = m_state->haveDisplay ? LoadActivity::Ready : LoadActivity::Idle;
+            releaseFinished = true;
         }
+    }
+    if (releaseFinished) {
+        // 后台 Close 已经结束。在 GUI 线程把空闲堆还给系统，不在 retirer 里 trim。
+        io::releaseFreedHeap();
     }
     if (fit) {
         m_host.fitAll();

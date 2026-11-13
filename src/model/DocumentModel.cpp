@@ -2,6 +2,7 @@
 
 #include "core/Log.h"
 #include "core/OcctLoadContract.h"
+#include "io/HeapRelease.h"
 #include "model/DocumentRelease.h"
 #include "occtsupport/OcctBoundary.h"
 #include "occtsupport/OcctExceptions.h"
@@ -117,7 +118,10 @@ public:
     explicit DocumentOwner(opencascade::handle<TDocStd_Document> doc) : m_doc(std::move(doc)) {}
 
     ~DocumentOwner() {
+        // 建模型失败时在加载线程上 Close。成功时 detach 已经把句柄交出去，这里只回收建树的空闲页。
+        // 不在后台 retirer 里 malloc_trim：长序列开关时在那条线程上 trim 会把 glibc 堆打坏。
         closeDocument(m_doc);
+        io::releaseFreedHeap();
     }
 
     DocumentOwner(const DocumentOwner&) = delete;
@@ -756,7 +760,12 @@ DocumentModel::DocumentModel(BuildKey, opencascade::handle<TDocStd_Document> doc
     : m_doc(std::move(doc)), m_lengthUnitToMm(sanitizeUnit(lengthUnitToMm)) {}
 
 DocumentModel::~DocumentModel() {
+    // 探针看到的就是这次 Close 所在的线程。GUI 不直接析构文档，最后一份引用在后台 retirer 上丢掉。
     noteDocumentDestructorThread();
+    // 形状和网格先丢掉，再关 XCAF。堆回收留给调用方，在 Close 已经结束的线程上做。
+    m_nodes.clear();
+    m_prototypes.clear();
+    m_leaves.clear();
     closeDocument(m_doc);
 }
 
