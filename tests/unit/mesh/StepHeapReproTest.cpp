@@ -54,7 +54,9 @@ void setHeapPendingProbe(HeapPendingProbe probe) noexcept;
 #if defined(_WIN32)
 // clang-format off
 #include <Windows.h>
+#include <DbgHelp.h>
 // clang-format on
+#pragma comment(lib, "dbghelp.lib")
 
 LONG WINAPI crashFilter(EXCEPTION_POINTERS* info) {
     unsigned long code = 0;
@@ -65,6 +67,41 @@ LONG WINAPI crashFilter(EXCEPTION_POINTERS* info) {
     }
     std::fprintf(stderr, "crash_exception code=0x%08lx address=%p\n", code, address);
     std::fflush(stderr);
+    if (address != nullptr) {
+        HMODULE module = nullptr;
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                   GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               static_cast<LPCSTR>(address), &module) != FALSE) {
+            char moduleName[MAX_PATH] = {};
+            GetModuleFileNameA(module, moduleName, MAX_PATH);
+            const auto rva = static_cast<unsigned long long>(static_cast<const char*>(address) -
+                                                             reinterpret_cast<const char*>(module));
+            std::fprintf(stderr, "crash_site module=%s rva=0x%llx\n", moduleName, rva);
+            std::fflush(stderr);
+        }
+        if (SymInitialize(GetCurrentProcess(), nullptr, TRUE) != FALSE) {
+            char symbolBuffer[sizeof(SYMBOL_INFO) + 256] = {};
+            auto* symbol = reinterpret_cast<SYMBOL_INFO*>(symbolBuffer);
+            symbol->SizeOfStruct = sizeof(SYMBOL_INFO);
+            symbol->MaxNameLen = 255;
+            DWORD64 displacement = 0;
+            if (SymFromAddr(GetCurrentProcess(), reinterpret_cast<DWORD64>(address), &displacement, symbol) !=
+                FALSE) {
+                std::fprintf(stderr, "crash_symbol %s+0x%llx\n", symbol->Name,
+                             static_cast<unsigned long long>(displacement));
+                std::fflush(stderr);
+            }
+            IMAGEHLP_LINE64 lineInfo{};
+            lineInfo.SizeOfStruct = sizeof(lineInfo);
+            DWORD lineDisplacement = 0;
+            if (SymGetLineFromAddr64(GetCurrentProcess(), reinterpret_cast<DWORD64>(address),
+                                     &lineDisplacement, &lineInfo) != FALSE) {
+                std::fprintf(stderr, "crash_line %s:%lu\n", lineInfo.FileName, lineInfo.LineNumber);
+                std::fflush(stderr);
+            }
+            SymCleanup(GetCurrentProcess());
+        }
+    }
     if (info != nullptr && info->ContextRecord != nullptr) {
         char buffer[8192];
         buffer[0] = '\0';

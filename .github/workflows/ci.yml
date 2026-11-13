@@ -231,6 +231,16 @@ jobs:
             $code = $LASTEXITCODE
             Get-Content -LiteralPath $log
             Write-Host "repro_case=Baseline400x10 pass=$pass exit=$code"
+            $sites = Select-String -LiteralPath $log -Pattern "crash_site module=.* rva=0x([0-9a-fA-F]+)"
+            $symbolizer = "C:\Program Files\LLVM\bin\llvm-symbolizer.exe"
+            $exe = Join-Path (Get-Location) "build\msvc\RelWithDebInfo\steplens_tests.exe"
+            if ($sites -and (Test-Path -LiteralPath $symbolizer) -and (Test-Path -LiteralPath $exe)) {
+              foreach ($site in $sites) {
+                $rva = $site.Matches[0].Groups[1].Value
+                Write-Host "symbolize rva=0x$rva"
+                & $symbolizer --relative-address -e $exe "0x$rva"
+              }
+            }
             if (-not (Select-String -LiteralPath $log -Pattern "phase=start" -Quiet)) {
               $missing = $true
             }
