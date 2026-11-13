@@ -233,6 +233,12 @@ jobs:
           ctest --preset unit -C RelWithDebInfo -R "^StepHeapRepro\." --output-on-failure --verbose --no-tests=error
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      # 取消中途加载时 pending 必须大于 0。连跑 50 次，门闩没关住就会在这里失败。
+      - name: Repeat CancelMidLoad release gate
+        run: |
+          ctest --preset unit -C RelWithDebInfo -R "^LoadPipeline\.CancelMidLoadReturnsToIdleCube$" --repeat until-fail:50 --output-on-failure --no-tests=error
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Check vcpkg binary cache
         if: success() && steps.vcpkg-cache.outputs.cache-hit != 'true'
         run: |

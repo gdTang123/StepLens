@@ -88,6 +88,10 @@ public:
         m_probe = std::move(probe);
     }
 
+    void setGate(DocumentReleaseGate gate) noexcept {
+        m_gate.store(gate, std::memory_order_release);
+    }
+
     void invokeProbe() {
         std::function<void(std::thread::id)> probe;
         {
@@ -125,6 +129,9 @@ private:
             if (delayMs > 0) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
             }
+            if (DocumentReleaseGate gate = m_gate.load(std::memory_order_acquire)) {
+                gate();
+            }
             model.reset();
             m_pending.fetch_sub(1, std::memory_order_acq_rel);
             m_cv.notify_all();
@@ -135,6 +142,7 @@ private:
     std::condition_variable m_cv;
     std::vector<std::shared_ptr<const DocumentModel>> m_queue;
     std::function<void(std::thread::id)> m_probe;
+    std::atomic<DocumentReleaseGate> m_gate{nullptr};
     std::atomic<int> m_pending{0};
     bool m_stop = false;
     std::thread m_thread;
@@ -179,6 +187,10 @@ bool waitForDocumentRelease(std::chrono::milliseconds timeout) {
 
 void setDocumentReleaseProbe(std::function<void(std::thread::id)> probe) {
     retirer().setProbe(std::move(probe));
+}
+
+void setDocumentReleaseGate(DocumentReleaseGate gate) noexcept {
+    retirer().setGate(gate);
 }
 
 void noteDocumentDestructorThread() {

@@ -105,3 +105,14 @@ jobs:
           sudo apt-get install -y --no-install-recommends xvfb libgl1-mesa-dri libglx-mesa0 libx11-6
           export LIBGL_ALWAYS_SOFTWARE=1
           xvfb-run -a ctest --test-dir build/occt-contract --output-on-failure -L occt-contract
+
+      # 只在 7.9.3 上把取消加载的断言连跑 50 次。8.0.1 仍走上面的整包契约。
+      - name: Repeat CancelMidLoad on 7.9.3
+        if: matrix.occt == '7.9.3'
+        shell: micromamba-shell {0}
+        run: |
+          set -euo pipefail
+          export LIBGL_ALWAYS_SOFTWARE=1
+          xvfb-run -a ctest --test-dir build/occt-contract --output-on-failure \
+            -R '^LoadPipeline\.CancelMidLoadReturnsToIdleCube$' \
+            --repeat until-fail:50 --no-tests=error
