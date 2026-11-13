@@ -301,8 +301,6 @@ template <class Array> [[nodiscard]] std::uint64_t displayBytes(const opencascad
 struct Accumulator {
     // 保护 stats。meshCalls 和 doneFaces 各自原子更新。
     std::mutex mutex;
-    // onBatch 会从多个工作线程进来。串行化回调，避免调用方的容器被并发写坏。
-    std::mutex batchMutex;
     MeshStats stats;
     std::atomic<std::uint32_t> meshCalls{0};
     std::atomic<std::uint64_t> doneFaces{0};
@@ -399,8 +397,6 @@ void meshOne(MeshJob& job, std::size_t prototypeIndex) {
         job.accumulator.doneFaces.fetch_add(info.faceCount, std::memory_order_relaxed) + info.faceCount;
     job.progress.setPresentFaceFraction(portionOf(static_cast<double>(done), job.totalFaces));
     if (job.onBatch) {
-        // 不和 stats 共用一把锁：回调里如果再等别的网格线程，那把锁会形成死锁。
-        std::lock_guard lock(job.accumulator.batchMutex);
         job.onBatch(std::move(batch));
     }
 }

@@ -219,7 +219,9 @@ jobs:
 
       # 400/1200 盒 STEP：加载、网格化、后台 Close、releaseFreedHeap。普通 unit 不设变量所以跳过。
       # --verbose 让通过时的 step_heap_repro 行留在日志里。
+      # 反证分支：前面的 ManySmallPrototypes 可能先因去掉 batchMutex 而失败，这一步仍要跑。
       - name: Step heap repro on the product allocator
+        if: ${{ !cancelled() }}
         env:
           STEPLENS_STEP_HEAP_REPRO: "1"
         run: |
