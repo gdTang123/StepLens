@@ -601,3 +601,41 @@ TEST(Tessellator, X02InstanceTrianglesStayWithinBudget) {
     model.reset();
     EXPECT_EQ(documentCount(), before);
 }
+
+TEST(Tessellator, ManySmallPrototypesDeliverBatchesFromSeveralWorkers) {
+    constexpr int kBoxes = 32;
+    const int before = documentCount();
+    auto doc = newDocument();
+    auto shapes = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
+    for (int index = 0; index < kBoxes; ++index) {
+        shapes->AddShape(boxAt(index * 20.0, 0.0, 0.0), false);
+    }
+    auto model = buildModel(std::move(doc));
+    ASSERT_TRUE(model);
+    ASSERT_EQ(model->prototypes().size(), static_cast<std::size_t>(kBoxes));
+
+    auto scheduler = steplens::occt::makeOcctTaskScheduler(4);
+    steplens::mesh::Tessellator tessellator(*scheduler, steplens::mesh::MeshPolicy{});
+    steplens::ProgressSink sink;
+    sink.reset(1);
+    std::mutex seenMutex;
+    std::set<std::thread::id> workers;
+    std::vector<steplens::mesh::MeshBatch> batches;
+    // 故意不在测试里给 push_back 加锁。run 必须把 onBatch 串行化，否则这里会数据竞争。
+    const auto result = tessellator.run(
+        *model, steplens::mesh::MeshLevel::SchemeB,
+        [&](steplens::mesh::MeshBatch&& batch) {
+            {
+                std::lock_guard lock(seenMutex);
+                workers.insert(std::this_thread::get_id());
+            }
+            batches.push_back(std::move(batch));
+        },
+        sink, steplens::CancelToken{});
+    ASSERT_TRUE(result.ok()) << result.error().message;
+    EXPECT_EQ(batches.size(), model->prototypes().size());
+    EXPECT_EQ(result.value().prototypesMeshed, static_cast<std::uint32_t>(kBoxes));
+    EXPECT_GE(workers.size(), 2u);
+    model.reset();
+    EXPECT_EQ(documentCount(), before);
+}
