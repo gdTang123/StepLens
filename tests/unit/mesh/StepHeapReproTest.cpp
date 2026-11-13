@@ -107,6 +107,24 @@ void phase(std::string_view message) {
     std::cout << "step_heap_repro " << message << std::endl;
 }
 
+void noteHeap(const char* where) {
+#if defined(_WIN32)
+    HANDLE heaps[64];
+    const DWORD count = GetProcessHeaps(64, heaps);
+    int bad = 0;
+    for (DWORD index = 0; index < count; ++index) {
+        if (HeapValidate(heaps[index], 0, nullptr) == FALSE) {
+            ++bad;
+        }
+    }
+    std::fprintf(stderr, "heap_check where=%s heaps=%lu bad=%d\n", where, static_cast<unsigned long>(count),
+                 bad);
+    std::fflush(stderr);
+#else
+    static_cast<void>(where);
+#endif
+}
+
 void reclaimHeap() noexcept {
 #if defined(STEPLENS_REPRO_PUBLIC_HEAP)
     steplens::io::releaseFreedHeap();
@@ -151,10 +169,12 @@ void loadMeshRetireReclaim(const std::filesystem::path& file, std::string_view t
     auto loader = steplens::io::makeLoader(file);
     ASSERT_TRUE(static_cast<bool>(loader)) << tag;
     auto loaded = loader->load(file, {}, sink, steplens::CancelToken{});
+    noteHeap("after_load");
     phase(std::format("file={} round={} phase=load_done", tag, round));
     ASSERT_TRUE(loaded.ok()) << tag << " " << loaded.error().message;
     auto built =
         steplens::model::DocumentModel::build(std::move(loaded.value()), sink, steplens::CancelToken{});
+    noteHeap("after_build");
     phase(std::format("file={} round={} phase=build_done", tag, round));
     ASSERT_TRUE(built.ok()) << tag << " " << built.error().message;
     auto model = std::move(built.value());
@@ -171,6 +191,7 @@ void loadMeshRetireReclaim(const std::filesystem::path& file, std::string_view t
         ASSERT_TRUE(meshed.ok()) << tag << " " << meshed.error().message;
         EXPECT_GT(meshed.value().triangleCount, 0u) << tag;
     }
+    noteHeap("after_mesh");
     phase(std::format("file={} round={} phase=mesh_done", tag, round));
     batches.clear();
 
@@ -179,6 +200,7 @@ void loadMeshRetireReclaim(const std::filesystem::path& file, std::string_view t
     ASSERT_TRUE(steplens::model::waitForDocumentRelease(std::chrono::seconds(180))) << tag;
     phase(std::format("file={} round={} phase=retire_done", tag, round));
     reclaimHeap();
+    noteHeap("after_reclaim");
     phase(std::format("file={} round={} phase=reclaim_done", tag, round));
 }
 
@@ -244,6 +266,7 @@ void runBoxGrid(int boxCount, std::string_view tag) {
     const auto file = directory / (std::string(tag) + ".step");
     phase(std::format("file={} phase=write_begin boxes={}", tag, boxCount));
     ASSERT_TRUE(writeBoxGridStep(file, boxCount)) << tag;
+    noteHeap("after_write");
     phase(std::format("file={} phase=write_done bytes={}", tag, std::filesystem::file_size(file)));
     for (int round = 0; round < kRounds; ++round) {
         loadMeshRetireReclaim(file, tag, round);
