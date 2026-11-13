@@ -11,7 +11,8 @@
 
 namespace {
 
-// 只是回调加锁模式示例，不守护 Tessellator 生产锁（生产锁由 windows-build 的 StepHeapRepro/ManySmallPrototypes 守护）。
+// 只是回调加锁模式示例，不守护 Tessellator 生产锁（生产锁由 windows-build 的
+// StepHeapRepro/ManySmallPrototypes 守护）。
 
 constexpr int kWorkers = 4;
 constexpr int kPrototypes = 200;
