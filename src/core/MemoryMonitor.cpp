@@ -74,7 +74,8 @@ MemoryMonitor::Preflight MemoryMonitor::preflight(std::uint64_t estimatedPeak, s
                                                   double softLimitRatio, double hardLimitRatio) {
     if (totalPhys == 0 || hardLimitRatio <= 0.0 || softLimitRatio < 0.0)
         return Preflight::Open;
-    const long double ratio = static_cast<long double>(estimatedPeak) / totalPhys;
+    // double，不是 long double：80/100 的 long double 比 double 字面量 0.80 略小，边界会判成 Confirm。
+    const double ratio = static_cast<double>(estimatedPeak) / static_cast<double>(totalPhys);
     if (ratio >= hardLimitRatio)
         return Preflight::Block;
     if (ratio >= softLimitRatio)
