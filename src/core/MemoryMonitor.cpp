@@ -52,7 +52,9 @@ MemoryMonitor::Sample MemoryMonitor::sample() const {
             result.processPeak = value * 1024;
     }
     // sysinfo reports physical RAM; mem_unit scales all fields.
-    struct sysinfo info {};
+    // clang-format off
+    struct sysinfo info{};
+    // clang-format on
     if (sysinfo(&info) == 0) {
         result.systemAvailPhys = static_cast<std::uint64_t>(info.freeram + info.bufferram) * info.mem_unit;
         result.systemTotalPhys = static_cast<std::uint64_t>(info.totalram) * info.mem_unit;
