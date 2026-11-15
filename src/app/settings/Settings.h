@@ -23,6 +23,7 @@ struct MeshSettings {
 struct MemorySettings {
     double softLimitRatio = 0.60;
     double hardLimitRatio = 0.80;
+    bool configInvalid = false;
 };
 
 // IniFormat only. Defaults to executable-dir/StepLens.ini; fallback is %APPDATA%/StepLens

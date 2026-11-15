@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QMainWindow>
+#include <QString>
 
 #include <filesystem>
 #include <memory>
@@ -55,6 +56,8 @@ private:
     QLabel* m_hint = nullptr;
     QLabel* m_fileLabel = nullptr;
     QString m_dumpDir;
+    QString m_memoryNotice;
+    bool m_recentFileRecorded = false;
     bool m_overlayShotSaved = false;
     bool m_modelShotSaved = false;
     bool m_dumpQuitArmed = false;

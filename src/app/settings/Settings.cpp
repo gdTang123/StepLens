@@ -1,18 +1,42 @@
 #include "app/settings/Settings.h"
 
+#include "core/Log.h"
+
 #include <QCoreApplication>
 #include <QDir>
-#include <QFileInfo>
+#include <QStandardPaths>
+#include <QTemporaryFile>
+
+#include <cmath>
 
 namespace steplens {
 namespace {
 
 bool writableDirectory(const QString& directory) {
     QDir dir;
-    if (!dir.mkpath(directory))
+    if (!dir.exists(directory))
         return false;
-    const QFileInfo info(directory);
-    return info.isDir() && info.isWritable();
+    QTemporaryFile probe(QDir(directory).filePath(QStringLiteral("StepLens-write-test-XXXXXX.tmp")));
+    if (!probe.open())
+        return false;
+    return probe.remove();
+}
+
+QString absoluteFallbackDirectory(const QString& fallbackRoot) {
+    QString directory = fallbackRoot;
+    if (directory.isEmpty() || !QDir::isAbsolutePath(directory))
+        directory = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation);
+    if (directory.isEmpty() || !QDir::isAbsolutePath(directory))
+        directory = QDir(QDir::tempPath()).filePath(QStringLiteral("StepLens"));
+    else if (!fallbackRoot.isEmpty())
+        directory = QDir(directory).filePath(QStringLiteral("StepLens"));
+    return QDir::cleanPath(directory);
+}
+
+std::unique_ptr<QSettings> openSettings(const QString& path) {
+    auto settings = std::make_unique<QSettings>(path, QSettings::IniFormat);
+    settings->sync();
+    return settings;
 }
 
 } // namespace
@@ -33,16 +57,21 @@ Settings::Settings(const QString& executableDirectory, const QString& fallbackRo
 }
 
 void Settings::initialize(const QString& executableDirectory, const QString& fallbackRoot) {
+    const QString fallbackDirectory = absoluteFallbackDirectory(fallbackRoot);
     QString path;
     if (writableDirectory(executableDirectory)) {
         path = QDir(executableDirectory).filePath(QStringLiteral("StepLens.ini"));
     } else {
-        const QString directory = QDir(fallbackRoot).filePath(QStringLiteral("StepLens"));
-        QDir().mkpath(directory);
-        path = QDir(directory).filePath(QStringLiteral("StepLens.ini"));
+        QDir().mkpath(fallbackDirectory);
+        path = QDir(fallbackDirectory).filePath(QStringLiteral("StepLens.ini"));
     }
     // IniFormat with an explicit file path: never NativeFormat, never the Windows registry.
-    m_ini = std::make_unique<QSettings>(path, QSettings::IniFormat);
+    m_ini = openSettings(path);
+    const QString fallbackPath = QDir(fallbackDirectory).filePath(QStringLiteral("StepLens.ini"));
+    if (m_ini->status() != QSettings::NoError && path != fallbackPath) {
+        QDir().mkpath(fallbackDirectory);
+        m_ini = openSettings(fallbackPath);
+    }
 }
 
 ViewerSettings Settings::viewer() const {
@@ -61,8 +90,16 @@ MeshSettings Settings::mesh() const {
 }
 
 MemorySettings Settings::memory() const {
-    return {m_ini->value("memory/softLimitRatio", 0.60).toDouble(),
-            m_ini->value("memory/hardLimitRatio", 0.80).toDouble()};
+    bool softOk = false;
+    bool hardOk = false;
+    const double soft = m_ini->value("memory/softLimitRatio", 0.60).toDouble(&softOk);
+    const double hard = m_ini->value("memory/hardLimitRatio", 0.80).toDouble(&hardOk);
+    if (!softOk || !hardOk || !std::isfinite(soft) || !std::isfinite(hard) || soft <= 0.0 || hard <= 0.0 ||
+        soft > 1.0 || hard > 1.0 || soft > hard) {
+        Log::warn("内存比例配置非法，已回落到默认值 0.60/0.80");
+        return {0.60, 0.80, true};
+    }
+    return {soft, hard};
 }
 
 QStringList Settings::recentFiles() const {

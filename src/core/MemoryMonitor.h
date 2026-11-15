@@ -20,11 +20,11 @@ public:
         double iges;
     };
 
-    enum class Preflight { Open, Confirm, Block };
+    enum class Preflight { Open, Confirm };
 
     [[nodiscard]] Sample sample() const;
     [[nodiscard]] std::uint64_t estimatePeakBytes(std::uint64_t fileBytes, bool isStep) const;
-    [[nodiscard]] static Preflight preflight(std::uint64_t estimatedPeak, std::uint64_t totalPhys,
+    [[nodiscard]] static Preflight preflight(std::uint64_t estimatedPeak, std::uint64_t availablePhys,
                                              double softLimitRatio, double hardLimitRatio);
     explicit MemoryMonitor(EstimateCoefficients coefficients = {9.0, 9.0}) : m_coefficients(coefficients) {}
 

@@ -1,6 +1,7 @@
 #include "app/MainWindow.h"
 
 #include "app/settings/Settings.h"
+#include "core/Log.h"
 #include "core/MemoryMonitor.h"
 #include "core/ProgressSink.h"
 #include "core/Version.h"
@@ -308,25 +309,35 @@ void MainWindow::openPath(const QString& file) {
     const MemoryMonitor monitor;
     const auto sample = monitor.sample();
     const auto estimate = monitor.estimatePeakBytes(bytes, isStep);
-    const auto decision = MemoryMonitor::preflight(estimate, sample.systemTotalPhys, limits.softLimitRatio,
-                                                   limits.hardLimitRatio);
-    if (decision == MemoryMonitor::Preflight::Block) {
-        QMessageBox::warning(this, tr("内存预检"),
-                             tr("预计加载峰值约 %1 GiB，超过物理内存硬上限。"
-                                "为避免程序或系统不稳定，已阻止打开。")
-                                 .arg(static_cast<double>(estimate) / (1024.0 * 1024 * 1024), 0, 'f', 1));
-        return;
+    if (limits.configInvalid) {
+        m_memoryNotice = tr("内存比例配置无效，已使用默认值");
+    } else if (sample.systemAvailPhys == 0) {
+        m_memoryNotice = tr("内存预检不可用，已跳过");
+    } else {
+        m_memoryNotice.clear();
     }
-    if (decision == MemoryMonitor::Preflight::Confirm) {
-        const auto answer =
-            QMessageBox::warning(this, tr("内存预检"),
-                                 tr("预计加载峰值约 %1 GiB，超过软上限。仍要继续打开吗？")
-                                     .arg(static_cast<double>(estimate) / (1024.0 * 1024 * 1024), 0, 'f', 1),
-                                 QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    if (sample.systemAvailPhys == 0) {
+        Log::warn("内存预检采样失败（可用物理内存为 0），继续打开文件");
+    }
+    const auto decision = MemoryMonitor::preflight(estimate, sample.systemAvailPhys, limits.softLimitRatio,
+                                                   limits.hardLimitRatio);
+    if (decision == MemoryMonitor::Preflight::Confirm && sample.systemAvailPhys != 0 && m_dumpDir.isEmpty()) {
+        const auto answer = QMessageBox::warning(
+            this, tr("内存预检"),
+            tr("该文件预计需要约 %1 GB 内存，当前可用 %2 GB，继续可能导致系统变慢。\n仍要继续打开吗？")
+                .arg(static_cast<double>(estimate) / (1024.0 * 1024 * 1024), 0, 'f', 1)
+                .arg(static_cast<double>(sample.systemAvailPhys) / (1024.0 * 1024 * 1024), 0, 'f', 1),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
         if (answer != QMessageBox::Yes)
             return;
     }
-    settings.addRecentFile(file);
+    if (decision == MemoryMonitor::Preflight::Confirm && !m_dumpDir.isEmpty())
+        Log::info("自动化模式下跳过内存预检确认，继续打开文件");
+    if (sample.systemAvailPhys == 0)
+        Log::info("内存预检采样失败，按要求继续打开文件");
+    if (limits.configInvalid)
+        Log::info("内存比例配置异常，使用默认值继续打开文件");
+    m_recentFileRecorded = false;
     const auto pause =
         m_dumpDir.isEmpty() ? std::chrono::milliseconds(0) : std::chrono::milliseconds(kDumpPauseMs);
     m_pipeline->open(pathFromUtf8(file), pause);
@@ -400,7 +411,18 @@ void MainWindow::refreshUi() {
             statusBar()->showMessage(phaseText(shot.progress));
         }
     } else if (shot.activity == LoadActivity::Ready) {
-        statusBar()->showMessage(tr("已完成"));
+        if (!m_recentFileRecorded && !shot.file.empty()) {
+            const std::u8string fileBytes = shot.file.u8string();
+            Settings::instance().addRecentFile(QString::fromUtf8(
+                reinterpret_cast<const char*>(fileBytes.data()), static_cast<qsizetype>(fileBytes.size())));
+            m_recentFileRecorded = true;
+        }
+        if (!m_memoryNotice.isEmpty()) {
+            statusBar()->showMessage(m_memoryNotice);
+            m_memoryNotice.clear();
+        } else {
+            statusBar()->showMessage(tr("已完成"));
+        }
         if (!m_quitWhenReadyArmed && qEnvironmentVariableIsSet("STEPLENS_QUIT_WHEN_READY")) {
             m_quitWhenReadyArmed = true;
             QTimer::singleShot(0, qApp, &QCoreApplication::quit);
@@ -410,7 +432,8 @@ void MainWindow::refreshUi() {
             QTimer::singleShot(kModelShotDelayMs, this, &MainWindow::saveModelShots);
         }
     } else if (m_viewer == nullptr || !m_viewer->showingModel()) {
-        statusBar()->showMessage(tr("拖拽 STEP/IGES 文件到这里，或使用文件 - 打开"));
+        statusBar()->showMessage(m_memoryNotice.isEmpty() ? tr("拖拽 STEP/IGES 文件到这里，或使用文件 - 打开")
+                                                          : m_memoryNotice);
         setWindowTitle(tr("StepLens"));
     }
     layoutView();

@@ -10,11 +10,15 @@ TEST(MemoryMonitorTest, EstimatesConfiguredStepAndIgesMultipliers) {
     EXPECT_EQ(monitor.estimatePeakBytes(100, false), 300U);
 }
 
-TEST(MemoryMonitorTest, ClassifiesOpenConfirmAndBlockBoundaries) {
+TEST(MemoryMonitorTest, ConfirmsOnlyWhenEstimateExceedsAvailableHardLimit) {
     EXPECT_EQ(MemoryMonitor::preflight(59, 100, .60, .80), MemoryMonitor::Preflight::Open);
-    EXPECT_EQ(MemoryMonitor::preflight(60, 100, .60, .80), MemoryMonitor::Preflight::Confirm);
-    EXPECT_EQ(MemoryMonitor::preflight(79, 100, .60, .80), MemoryMonitor::Preflight::Confirm);
-    EXPECT_EQ(MemoryMonitor::preflight(80, 100, .60, .80), MemoryMonitor::Preflight::Block);
+    EXPECT_EQ(MemoryMonitor::preflight(80, 100, .60, .80), MemoryMonitor::Preflight::Open);
+    EXPECT_EQ(MemoryMonitor::preflight(81, 100, .60, .80), MemoryMonitor::Preflight::Confirm);
+    EXPECT_EQ(MemoryMonitor::preflight(95, 100, .60, .80), MemoryMonitor::Preflight::Confirm);
+}
+
+TEST(MemoryMonitorTest, AllowsOpenWhenAvailableMemoryIsUnknown) {
+    EXPECT_EQ(MemoryMonitor::preflight(1000, 0, .60, .80), MemoryMonitor::Preflight::Open);
 }
 
 TEST(MemoryMonitorTest, SamplesPhysicalMemoryOnThisPlatform) {
