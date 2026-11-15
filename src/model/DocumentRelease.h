@@ -25,6 +25,12 @@ void retireDocument(std::shared_ptr<const DocumentModel> model);
 // 生产路径不设置。换测试前清成空函数。
 void setDocumentReleaseProbe(std::function<void(std::thread::id)> probe);
 
+// 测试缝。后台线程取出一份文档之后、减少 documentsPendingRelease() 之前调用。
+// 空指针时只做一次加载，不进回调。生产路径保持空指针。
+// 回调可以堵住，这样计数在回调返回前不会下降。回调里不能再等这次释放，否则和后台线程互相等。
+using DocumentReleaseGate = void (*)();
+void setDocumentReleaseGate(DocumentReleaseGate gate) noexcept;
+
 // DocumentModel 析构一开始就调用。探针看到的线程就是 Close 所在的线程。
 void noteDocumentDestructorThread();
 

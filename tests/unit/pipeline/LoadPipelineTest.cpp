@@ -174,6 +174,28 @@ struct ReleaseProbeGuard {
     }
 };
 
+// 回收线程取出文档后、减少 pending 之前会调用这个函数。门关着时它不能把计数减下去。
+std::atomic<bool> releaseGateOpen{true};
+
+void waitUntilReleaseGateOpens() {
+    while (!releaseGateOpen.load(std::memory_order_acquire)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+
+struct ReleaseGateGuard {
+    ReleaseGateGuard() {
+        releaseGateOpen.store(false, std::memory_order_release);
+        steplens::model::setDocumentReleaseGate(&waitUntilReleaseGateOpens);
+    }
+    ~ReleaseGateGuard() {
+        releaseGateOpen.store(true, std::memory_order_release);
+        steplens::model::setDocumentReleaseGate(nullptr);
+    }
+    ReleaseGateGuard(const ReleaseGateGuard&) = delete;
+    ReleaseGateGuard& operator=(const ReleaseGateGuard&) = delete;
+};
+
 } // namespace
 
 TEST(LoadPipeline, CancelThenOpenAgainReleasesDocuments) {
@@ -256,22 +278,18 @@ TEST(LoadPipeline, CancelMidLoadReturnsToIdleCube) {
         std::chrono::seconds(60)));
     EXPECT_TRUE(host.holdsModel());
 
-    std::atomic<bool> hold{true};
     std::thread::id releaseThread;
     ReleaseProbeGuard probeGuard;
-    steplens::model::setDocumentReleaseProbe([&](std::thread::id id) {
-        releaseThread = id;
-        while (hold.load(std::memory_order_acquire)) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        }
-    });
+    steplens::model::setDocumentReleaseProbe([&](std::thread::id id) { releaseThread = id; });
+    // 先关上门再取消。后台线程减 pending 之前会停在门上，断言不靠析构跑多快。
+    ReleaseGateGuard gateGuard;
     pipeline.cancel();
     pipeline.tick();
     EXPECT_EQ(pipeline.snapshot().activity, steplens::LoadActivity::Releasing);
     EXPECT_GE(host.clears(), 1);
     EXPECT_FALSE(host.holdsModel());
     EXPECT_GT(steplens::model::documentsPendingRelease(), 0);
-    hold.store(false, std::memory_order_release);
+    releaseGateOpen.store(true, std::memory_order_release);
     ASSERT_TRUE(pipeline.waitUntilSettled(std::chrono::seconds(30)));
     pipeline.tick();
     EXPECT_EQ(pipeline.snapshot().activity, steplens::LoadActivity::Idle);

@@ -5,7 +5,8 @@
 // 面数超过 MeshPolicy::largeFaceCount 的原型独占调用线程，不再和本池的其它原型任务叠在一起。
 // 面数超过 2000 时按 2000 面切成顺序复合体再三角化：整壳一次调用会把工作集抬到约 1.8 GB（U14）。
 // 同一原型上的 FillTriangles / FillFaceBoundaries 只在这条独占路径里调用。
-// 显示数组拷走顶点之后，面上的 Poly_Triangulation 会去掉 UV，并改成单精度后留在面上（拾取要用）。
+// 显示数组拷走顶点之后，面上的 Poly_Triangulation 去掉 UV，改成单精度，网格留在面上。
+// 拾取不读这份面网格。ComputeSelection 用的是批次里已经拷好的三角形数组。
 // 7.9.3 和 8.0.1 的 SetDoublePrecision 都不能在节点已经分配之后直接改精度，要先 Clear。
 // T07+ 的粗/细两级、T08 的 SceneBuilder / AIS 不在这里。
 
@@ -44,8 +45,9 @@ public:
     // 不要在回调里再调用 run。生产路径不设置。
     void setExclusiveProbe(std::function<void(model::PrototypeId)> probe);
 
-    // onBatch 在算出该原型的工作线程上调用，调用后本对象不再改这份 MeshBatch。
-    // run 会把回调串行化：多个原型同时网格化时，回调本身不会并发。
+    // onBatch 由 run 的 batchMutex 串行调用：多个原型同时网格化时，回调本身不会并发。
+    // 调用发生在算出该原型的工作线程上，返回后本对象不再改这份 MeshBatch。
+    // 回调里不能等待 run()，也不能等待其它工作线程，否则会卡在这把锁上。
     // 取消时已交付的批次仍然有效，返回值是 Cancelled。
     // 不调用 ProgressSink::reset，也不改 LoadStage。进度只用 setPresentFaceFraction。
     [[nodiscard]] Result<MeshStats> run(const model::DocumentModel& model, MeshLevel level,
