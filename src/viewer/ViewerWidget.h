@@ -1,5 +1,7 @@
 #pragma once
 
+#include "model/DocumentModel.h"
+
 #include <QImage>
 #include <QOpenGLWidget>
 #include <QString>
@@ -57,9 +59,12 @@ public:
     [[nodiscard]] bool showingModel() const;
     [[nodiscard]] SceneHost& sceneHost();
     [[nodiscard]] QImage grabView();
+    void highlightNode(model::NodeId id);
+    void setNodeVisible(model::NodeId id, bool visible);
 
 signals:
     void filesDropped(const QStringList& paths);
+    void nodeSelected(steplens::model::NodeId id);
 
 protected:
     void mousePressEvent(QMouseEvent* event) override;

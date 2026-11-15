@@ -5,6 +5,7 @@
 #include "model/DocumentRelease.h"
 #include "pipeline/LoadPipeline.h"
 #include "pipeline/SceneHost.h"
+#include "ui/AssemblyTreePanel.h"
 #include "ui/LoadingOverlay.h"
 #include "viewer/ViewerWidget.h"
 
@@ -197,6 +198,13 @@ void MainWindow::buildShell() {
     setCentralWidget(m_frame);
     m_pipeline = std::make_unique<LoadPipeline>(m_viewer->sceneHost());
 
+    m_treePanel = new ui::AssemblyTreePanel(this);
+    addDockWidget(Qt::LeftDockWidgetArea, m_treePanel);
+    resizeDocks({m_treePanel}, {260}, Qt::Horizontal);
+    connect(m_treePanel, &ui::AssemblyTreePanel::nodeActivated, m_viewer, &ViewerWidget::highlightNode);
+    connect(m_treePanel, &ui::AssemblyTreePanel::visibilityChanged, m_viewer, &ViewerWidget::setNodeVisible);
+    connect(m_viewer, &ViewerWidget::nodeSelected, m_treePanel, &ui::AssemblyTreePanel::selectNode);
+
     connect(m_viewer, &ViewerWidget::filesDropped, this, &MainWindow::openFiles);
     connect(m_overlay, &LoadingOverlay::filesDropped, this, &MainWindow::openFiles);
     connect(m_overlay, &LoadingOverlay::cancelRequested, this, [this] { m_pipeline->cancel(); });
@@ -312,6 +320,13 @@ void MainWindow::refreshUi() {
         return;
     }
     m_pipeline->tick();
+    if (m_treePanel != nullptr) {
+        const auto current = m_pipeline->currentModel();
+        if (current != m_treeDocument) {
+            m_treeDocument = current;
+            m_treePanel->setDocument(current);
+        }
+    }
     if (const auto failure = m_pipeline->takeFailure()) {
         const QString message = QString::fromUtf8(failure->userMessage.c_str());
         showFailure(message.isEmpty() ? tr("打开文件时出错") : message);

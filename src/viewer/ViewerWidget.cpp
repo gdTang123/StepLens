@@ -203,6 +203,23 @@ public:
         return m_builder->pending();
     }
 
+    void highlightNode(model::NodeId id) {
+        if (m_builder)
+            m_builder->highlightNode(id);
+    }
+    void setNodeVisible(model::NodeId id, bool visible) {
+        if (m_builder)
+            m_builder->setNodeVisible(id, visible);
+    }
+    std::optional<model::NodeId> selectedNode() {
+        if (!m_builder || m_context.IsNull() || !m_context->HasSelectedShape())
+            return std::nullopt;
+        m_context->InitSelected();
+        if (!m_context->MoreSelected())
+            return std::nullopt;
+        return m_builder->nodeOf(m_context->SelectedInteractive());
+    }
+
 private:
     scene::SceneBuilder& builder();
 
@@ -475,6 +492,16 @@ QImage ViewerWidget::grabView() {
 #endif
 }
 
+void ViewerWidget::highlightNode(model::NodeId id) {
+    if (auto* host = dynamic_cast<ViewerSceneHost*>(m_state->scene.get()))
+        host->highlightNode(id);
+}
+
+void ViewerWidget::setNodeVisible(model::NodeId id, bool visible) {
+    if (auto* host = dynamic_cast<ViewerSceneHost*>(m_state->scene.get()))
+        host->setNodeVisible(id, visible);
+}
+
 void ViewerWidget::mousePressEvent(QMouseEvent* event) {
 #if STEPLENS_USE_WNT_WINDOW
     QWidget::mousePressEvent(event);
@@ -504,6 +531,14 @@ void ViewerWidget::mouseReleaseEvent(QMouseEvent* event) {
     if (m_state->input.UpdateMouseButtons(point, mouseButtons(event->buttons()),
                                           mouseModifiers(event->modifiers()), false)) {
         update();
+    }
+    if (event->button() == Qt::LeftButton && !m_state->context.IsNull() && !m_state->view.IsNull()) {
+        m_state->context->MoveTo(point.x(), point.y(), m_state->view, false);
+        m_state->context->SelectDetected();
+        if (auto* host = dynamic_cast<ViewerSceneHost*>(m_state->scene.get())) {
+            if (const auto id = host->selectedNode())
+                emit nodeSelected(*id);
+        }
     }
 }
 

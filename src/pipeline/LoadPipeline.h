@@ -9,6 +9,7 @@
 #include "core/CancelToken.h"
 #include "core/ProgressSink.h"
 #include "core/Result.h"
+#include "model/DocumentModel.h"
 #include "pipeline/SceneHost.h"
 
 #include <chrono>
@@ -48,6 +49,7 @@ public:
     void tick();
 
     [[nodiscard]] Snapshot snapshot() const;
+    [[nodiscard]] std::shared_ptr<const model::DocumentModel> currentModel() const;
     // 失败对话框只弹一次。没有新的失败就返回空。
     [[nodiscard]] std::optional<Error> takeFailure();
     [[nodiscard]] bool isSettled() const noexcept;

@@ -156,6 +156,13 @@ add_executable(steplens_tests
 target_link_libraries(steplens_tests PRIVATE steplens::core GTest::gtest_main)
 target_include_directories(steplens_tests PRIVATE "${CMAKE_SOURCE_DIR}/src")
 if(NOT STEPLENS_CORE_ONLY)
+    add_executable(steplens_ui_tests ui/AssemblyTreeModelTest.cpp)
+    target_include_directories(steplens_ui_tests PRIVATE "${CMAKE_SOURCE_DIR}/src")
+    target_link_libraries(steplens_ui_tests PRIVATE steplens::ui Qt6::Test GTest::gtest_main)
+    steplens_apply_warnings(steplens_ui_tests)
+    steplens_apply_exceptions(steplens_ui_tests OFF)
+    set_target_properties(steplens_ui_tests PROPERTIES FOLDER "tests")
+
     target_sources(steplens_tests PRIVATE
         occt/OcctCompatTest.cpp
         occt/OcctKernelContractTest.cpp
@@ -213,6 +220,9 @@ gtest_discover_tests(steplens_tests
     DISCOVERY_MODE PRE_TEST
     PROPERTIES LABELS unit)
 if(NOT STEPLENS_CORE_ONLY)
+    gtest_discover_tests(steplens_ui_tests
+        DISCOVERY_MODE PRE_TEST
+        PROPERTIES LABELS "unit;ui")
     # include(GoogleTest) 在上面。提前调用 gtest_discover_tests 时 MSVC 配置会报未知命令。
     gtest_discover_tests(steplens_scene_tests
         DISCOVERY_MODE PRE_TEST

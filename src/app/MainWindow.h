@@ -1,5 +1,7 @@
 #pragma once
 
+#include "model/DocumentModel.h"
+
 #include <QMainWindow>
 
 #include <filesystem>
@@ -18,6 +20,9 @@ class LoadPipeline;
 class LoadingOverlay;
 class SceneHost;
 class ViewerWidget;
+namespace ui {
+class AssemblyTreePanel;
+}
 
 // 主窗口。打开、取消、进度都走 LoadPipeline，界面线程只 tick，不读文件、不三角化。
 class MainWindow final : public QMainWindow {
@@ -52,6 +57,8 @@ private:
     QWidget* m_frame = nullptr;
     ViewerWidget* m_viewer = nullptr;
     LoadingOverlay* m_overlay = nullptr;
+    ui::AssemblyTreePanel* m_treePanel = nullptr;
+    std::shared_ptr<const model::DocumentModel> m_treeDocument;
     QLabel* m_hint = nullptr;
     QLabel* m_fileLabel = nullptr;
     QString m_dumpDir;

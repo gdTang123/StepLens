@@ -470,6 +470,11 @@ LoadPipeline::Snapshot LoadPipeline::snapshot() const {
     return shot;
 }
 
+std::shared_ptr<const model::DocumentModel> LoadPipeline::currentModel() const {
+    std::lock_guard lock(m_state->mutex);
+    return m_state->model;
+}
+
 std::optional<Error> LoadPipeline::takeFailure() {
     std::lock_guard lock(m_state->mutex);
     if (!m_state->failure.has_value()) {
