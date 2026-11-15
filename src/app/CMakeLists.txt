@@ -1,5 +1,7 @@
 qt_add_executable(StepLens
     main.cpp
+    settings/Settings.h
+    settings/Settings.cpp
     MainWindow.h
     MainWindow.cpp)
 

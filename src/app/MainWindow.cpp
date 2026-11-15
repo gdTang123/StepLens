@@ -1,5 +1,7 @@
 #include "app/MainWindow.h"
 
+#include "app/settings/Settings.h"
+#include "core/MemoryMonitor.h"
 #include "core/ProgressSink.h"
 #include "core/Version.h"
 #include "model/DocumentRelease.h"
@@ -16,6 +18,7 @@
 #include <QDropEvent>
 #include <QEvent>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QKeySequence>
 #include <QLabel>
 #include <QMenuBar>
@@ -39,6 +42,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <string>
 #include <utility>
@@ -291,6 +295,38 @@ void MainWindow::buildMenus() {
 }
 
 void MainWindow::openPath(const QString& file) {
+    const QFileInfo info(file);
+    if (!info.exists() || !info.isFile()) {
+        showFailure(tr("文件不存在或无法访问"));
+        return;
+    }
+    const QString suffix = info.suffix().toLower();
+    const bool isStep = suffix == QStringLiteral("stp") || suffix == QStringLiteral("step");
+    const auto bytes = static_cast<std::uint64_t>(info.size());
+    auto& settings = Settings::instance();
+    const MemorySettings limits = settings.memory();
+    const MemoryMonitor monitor;
+    const auto sample = monitor.sample();
+    const auto estimate = monitor.estimatePeakBytes(bytes, isStep);
+    const auto decision = MemoryMonitor::preflight(estimate, sample.systemTotalPhys, limits.softLimitRatio,
+                                                   limits.hardLimitRatio);
+    if (decision == MemoryMonitor::Preflight::Block) {
+        QMessageBox::warning(this, tr("内存预检"),
+                             tr("预计加载峰值约 %1 GiB，超过物理内存硬上限。"
+                                "为避免程序或系统不稳定，已阻止打开。")
+                                 .arg(static_cast<double>(estimate) / (1024.0 * 1024 * 1024), 0, 'f', 1));
+        return;
+    }
+    if (decision == MemoryMonitor::Preflight::Confirm) {
+        const auto answer =
+            QMessageBox::warning(this, tr("内存预检"),
+                                 tr("预计加载峰值约 %1 GiB，超过软上限。仍要继续打开吗？")
+                                     .arg(static_cast<double>(estimate) / (1024.0 * 1024 * 1024), 0, 'f', 1),
+                                 QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        if (answer != QMessageBox::Yes)
+            return;
+    }
+    settings.addRecentFile(file);
     const auto pause =
         m_dumpDir.isEmpty() ? std::chrono::milliseconds(0) : std::chrono::milliseconds(kDumpPauseMs);
     m_pipeline->open(pathFromUtf8(file), pause);

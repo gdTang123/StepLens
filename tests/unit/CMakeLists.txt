@@ -153,10 +153,13 @@ add_executable(steplens_tests
     core/BatchCallbackRaceTest.cpp
     core/LogTest.cpp
     core/CrashDumpTest.cpp)
+target_sources(steplens_tests PRIVATE core/MemoryMonitorTest.cpp)
 target_link_libraries(steplens_tests PRIVATE steplens::core GTest::gtest_main)
 target_include_directories(steplens_tests PRIVATE "${CMAKE_SOURCE_DIR}/src")
 if(NOT STEPLENS_CORE_ONLY)
     target_sources(steplens_tests PRIVATE
+        app/SettingsTest.cpp
+        ${CMAKE_SOURCE_DIR}/src/app/settings/Settings.cpp
         occt/OcctCompatTest.cpp
         occt/OcctKernelContractTest.cpp
         occt/OcctBoundaryTest.cpp
@@ -168,6 +171,7 @@ if(NOT STEPLENS_CORE_ONLY)
     # io 把数据交换工具包拉进测试进程，用来确认这条链上没有 TKOpenGl。
     # mesh 公开链 TKV3d（FillTriangles），不链 vis，所以 TKOpenGl 仍然进不来。
     target_link_libraries(steplens_tests PRIVATE steplens::occtsupport steplens::mesh)
+    target_link_libraries(steplens_tests PRIVATE Qt6::Core)
     target_compile_definitions(steplens_tests PRIVATE "STEPLENS_EXPECTED_OCCT=\"${STEPLENS_EXPECTED_OCCT}\"")
 
     # 场景测试单独成可执行文件：它要链 TKOpenGl，不能并进上面这份。
