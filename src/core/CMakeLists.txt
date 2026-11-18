@@ -9,6 +9,7 @@ steplens_add_module(core
     OcctLoadContract.cpp
     TaskScheduler.cpp
     Log.cpp
+    LifecycleTrace.cpp
     CrashDump.cpp
     Version.h
     Result.h
@@ -19,6 +20,7 @@ steplens_add_module(core
     OcctLoadContract.h
     TaskScheduler.h
     Log.h
+    LifecycleTrace.h
     CrashDump.h
     AppPaths.h
     MemoryMonitor.h)

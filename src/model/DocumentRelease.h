@@ -44,7 +44,14 @@ void setDocumentReleaseProbe(std::function<void(std::thread::id)> probe);
 using DocumentReleaseGate = void (*)();
 void setDocumentReleaseGate(DocumentReleaseGate gate) noexcept;
 
+// 测试缝：在节点入队后、producer 最后一次通知之前调用，可阻塞以验证停机寿命顺序。
+using DocumentReleaseEnqueueGate = void (*)();
+void setDocumentReleaseEnqueueGate(DocumentReleaseEnqueueGate gate) noexcept;
+
 // DocumentModel 析构一开始就调用。探针看到的线程就是 Close 所在的线程。
 void noteDocumentDestructorThread();
+
+// 后台 Close 线程。定向测试用来排除 GUI 与全部 producer，不作为生产停机 API。
+[[nodiscard]] std::thread::id documentReleaseWorkerThread();
 
 } // namespace steplens::model

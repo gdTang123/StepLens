@@ -1,14 +1,21 @@
 #include "model/DocumentRelease.h"
 
+#include "core/LifecycleTrace.h"
+#include "core/Log.h"
+#include "core/OcctLoadContract.h"
 #include "io/HeapRelease.h"
 #include "model/DocumentModel.h"
 #include "occtsupport/OcctBoundary.h"
 
+#include <XCAFApp_Application.hxx>
+
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <cstdlib>
 #include <mutex>
+#include <string>
 #include <thread>
 
 #if defined(_WIN32)
@@ -51,6 +58,21 @@ unsigned releaseDelayMs() noexcept {
     return static_cast<unsigned>(parsed > 5000 ? 5000 : parsed);
 }
 
+void traceShutdownEnvironment() noexcept {
+    try {
+        lifecycleTrace("retirer-log", Log::ready() ? "ready" : "not-ready");
+        std::unique_lock lock(xcafDocumentMutex(), std::try_to_lock);
+        if (lock.owns_lock()) {
+            const int documents = XCAFApp_Application::GetApplication()->NbDocuments();
+            lifecycleTrace("retirer-xcaf", "mutex-acquired docs=" + std::to_string(documents));
+        } else {
+            lifecycleTrace("retirer-xcaf", "mutex-busy");
+        }
+    } catch (...) {
+        lifecycleTrace("retirer-xcaf", "access-failed");
+    }
+}
+
 } // namespace
 
 class Retirer {
@@ -58,6 +80,7 @@ public:
     Retirer() : m_thread([this] { run(); }) {}
 
     ~Retirer() {
+        lifecycleTrace("retirer-stop", "pending=" + std::to_string(count()));
         {
             Lock lock(m_mutex);
             m_stopping = true;
@@ -66,17 +89,30 @@ public:
         if (m_thread.joinable()) {
             m_thread.join();
         }
-        // 必须在 join 之后再摘掉堆探针：join 期间仍可能 Close，过早清空会让
-        // releaseFreedHeap 在 pending>0 时 trim。registerHeapProbe 析构晚于 Retirer，
-        // 若不摘掉，之后的 releaseFreedHeap 会进入已销毁的 function-local instance()。
+        lifecycleTrace("retirer-join-end");
+        // 已准入 producer 覆盖到最后一次通知；归零后不再通知 cv。这里用限时等待，
+        // 不把“再读一次计数”当成门闩，也不依赖 inFlight 归零之后的唤醒。
+        {
+            std::unique_lock lock(m_mutex);
+            while (m_inFlight.load(std::memory_order_acquire) != 0) {
+                m_condition.wait_for(lock, std::chrono::milliseconds(20),
+                                     [this] { return m_inFlight.load(std::memory_order_acquire) == 0; });
+            }
+        }
+        traceShutdownEnvironment();
         io::setHeapReleasePendingProbe(nullptr);
+        lifecycleTrace("retirer-end");
     }
 
     void retire(std::shared_ptr<const DocumentModel> model) {
         if (!model) {
             return;
         }
-        markRetired(const_cast<DocumentModel*>(model.get()));
+        InFlight active(*this);
+        {
+            Lock lock(m_mutex);
+            markRetiredLocked(const_cast<DocumentModel*>(model.get()));
+        }
         model.reset();
     }
 
@@ -88,29 +124,40 @@ public:
         if (!model) {
             return;
         }
+        InFlight active(*this);
         auto* mutableModel = const_cast<DocumentModel*>(model);
-        markRetired(mutableModel);
         if (std::this_thread::get_id() == m_thread.get_id()) {
+            {
+                Lock lock(m_mutex);
+                markRetiredLocked(mutableModel);
+            }
             finish(model);
             return;
         }
-        // 必要性：destroy 是 noexcept，可能在 GUI 最后引用上执行；mutex.lock 可能抛，
-        // 旧的无限重试会让 GUI 忙转并掩盖永久错误。无分配 CAS 入队也覆盖原 deque
-        // 的分配失败。复杂度高于 mutex 链表，只为这条释放路径。
-        // 算法：先 markRetired；非 retirer 线程 CAS 推入 m_incoming。retirer 用
-        // exchange(nullptr) 整批摘头，waitForPushers（activePushers==0）后才反转并
-        // finish/delete。activePushers 以 seq_cst 包住 CAS 窗口，避免摘头后节点释放、
-        // 地址复用再入栈导致 ABA。通知若丢失，后台 wait_for 短超时兜底。
-        m_activePushers.fetch_add(1, std::memory_order_seq_cst);
-        DocumentModel* head = m_incoming.load(std::memory_order_seq_cst);
-        do {
-            mutableModel->m_releaseNext = head;
-        } while (!m_incoming.compare_exchange_weak(head, mutableModel, std::memory_order_release,
-                                                   std::memory_order_relaxed));
-        if (m_activePushers.fetch_sub(1, std::memory_order_seq_cst) == 1) {
-            m_condition.notify_all();
+        DocumentReleaseEnqueueGate gate = nullptr;
+        {
+            Lock lock(m_mutex);
+            markRetiredLocked(mutableModel);
+            mutableModel->m_releaseNext = nullptr;
+            if (m_tail) {
+                m_tail->m_releaseNext = mutableModel;
+            } else {
+                m_head = mutableModel;
+            }
+            m_tail = mutableModel;
+            gate = m_enqueueGate.load(std::memory_order_acquire);
         }
+        lifecycleTrace("document-enqueue", std::to_string(reinterpret_cast<std::uintptr_t>(model)));
+        // 测试门和通知都在锁外；InFlight 覆盖回调与 notify 返回。
+        if (gate) {
+            try {
+                gate();
+            } catch (...) {
+            }
+        }
+        lifecycleTrace("producer-notify");
         m_condition.notify_one();
+        lifecycleTrace("producer-notify-returned");
     }
 
     int count() const noexcept {
@@ -118,17 +165,26 @@ public:
     }
 
     bool wait(std::chrono::milliseconds timeout) {
+        // pending 的线性化点是 markRetiredLocked / finish 持有的同一把队列锁。
         std::unique_lock lock(m_mutex);
         return m_condition.wait_for(lock, timeout, [this] { return count() == 0; });
     }
 
     void setProbe(std::function<void(std::thread::id)> probe) {
-        Lock lock(m_mutex);
-        m_probe = std::move(probe);
+        std::function<void(std::thread::id)> old;
+        {
+            Lock lock(m_mutex);
+            old = std::move(m_probe);
+            m_probe = std::move(probe);
+        }
     }
 
     void setGate(DocumentReleaseGate gate) noexcept {
         m_gate.store(gate, std::memory_order_release);
+    }
+
+    void setEnqueueGate(DocumentReleaseEnqueueGate gate) noexcept {
+        m_enqueueGate.store(gate, std::memory_order_release);
     }
 
     void noteDestructorThread() {
@@ -149,14 +205,37 @@ public:
         m_live.fetch_add(1, std::memory_order_release);
     }
 
+    std::thread::id workerThread() const noexcept {
+        return m_thread.get_id();
+    }
+
 private:
-    void markRetired(DocumentModel* model) noexcept {
-        // 先 tentative 记票再发布 retired，避免 wait/isSettled 在 retired 已可见而 pending=0 时提前成功。
-        // CAS 失败时撤销临时票；service 生命周期也因此只会在真实释放完成后观察到归零。
-        m_pending.fetch_add(1, std::memory_order_acq_rel);
-        bool expected = false;
-        if (!model->m_retired.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
-            m_pending.fetch_sub(1, std::memory_order_acq_rel);
+    class InFlight {
+    public:
+        explicit InFlight(Retirer& owner) : m_owner(owner) {
+            // 必须先于 producer 的首次 mutex/cv 访问登记；停机锁失败或对象不可恢复时
+            // destroy() 为 noexcept，标准策略是终止进程，不在 GUI 线程兜底删除模型。
+            m_owner.m_inFlight.fetch_add(1, std::memory_order_acq_rel);
+        }
+        ~InFlight() {
+            // 最后一次 service 访问是 notify；必须在 notify 返回之后才撤销准入。
+            // 归零后不再碰 cv，避免与 ~Retirer 拆成员竞态。
+            m_owner.m_condition.notify_all();
+            lifecycleTrace("producer-inflight-release");
+            m_owner.m_inFlight.fetch_sub(1, std::memory_order_acq_rel);
+        }
+        InFlight(const InFlight&) = delete;
+        InFlight& operator=(const InFlight&) = delete;
+
+    private:
+        Retirer& m_owner;
+    };
+
+    void markRetiredLocked(DocumentModel* model) noexcept {
+        // 同一把队列锁内首次退役才记一票；先加票再标记，避免无锁观察看到 retired 已发布而 pending 仍为 0。
+        if (!model->m_retired.load(std::memory_order_relaxed)) {
+            m_pending.fetch_add(1, std::memory_order_release);
+            model->m_retired.store(true, std::memory_order_release);
         }
     }
 
@@ -172,67 +251,47 @@ private:
             }
         }
         delete model;
-        // 在同一把 retirer 锁上减票再 notify，避免 wait/drain 丢失唤醒。
         {
             Lock lock(m_mutex);
             m_pending.fetch_sub(1, std::memory_order_acq_rel);
-            // finish 只在模型析构（含 destroy/Close）完成后减 live。
             m_live.fetch_sub(1, std::memory_order_acq_rel);
         }
         m_condition.notify_all();
     }
 
-    void waitForPushers() {
-        // 旧批次可能被正在 CAS 的入队者暂存；等待只发生在 retirer，超时覆盖无锁 notify 的竞态。
-        std::unique_lock lock(m_mutex);
-        while (m_activePushers.load(std::memory_order_seq_cst) != 0) {
-            m_condition.wait_for(lock, std::chrono::milliseconds(20));
-        }
-    }
-
     void run() noexcept {
         occt::OcctBoundary::armWorkerThread();
         for (;;) {
-            DocumentModel* model = nullptr;
+            DocumentModel* batch = nullptr;
             {
                 std::unique_lock lock(m_mutex);
-                m_condition.wait_for(lock, std::chrono::milliseconds(20), [this] {
-                    return m_incoming.load(std::memory_order_acquire) ||
-                           (m_stopping && m_live.load(std::memory_order_acquire) == 0);
+                m_condition.wait(lock, [this] {
+                    return m_head != nullptr || (m_stopping && m_live.load(std::memory_order_acquire) == 0);
                 });
-                if (!m_incoming.load(std::memory_order_acquire) && m_stopping &&
-                    m_live.load(std::memory_order_acquire) == 0 &&
-                    m_activePushers.load(std::memory_order_seq_cst) == 0) {
+                if (!m_head && m_stopping && m_live.load(std::memory_order_acquire) == 0) {
                     return;
                 }
+                batch = m_head;
+                m_head = nullptr;
+                m_tail = nullptr;
             }
-            model = m_incoming.exchange(nullptr, std::memory_order_seq_cst);
-            if (!model)
-                continue;
-            waitForPushers();
-            // 反转 CAS 栈，维持一批入队的 FIFO 回收次序。
-            DocumentModel* reversed = nullptr;
-            while (model) {
-                DocumentModel* next = model->m_releaseNext;
-                model->m_releaseNext = reversed;
-                reversed = model;
-                model = next;
-            }
-            model = reversed;
-            while (model) {
-                DocumentModel* next = model->m_releaseNext;
-                finish(model);
-                model = next;
+            while (batch) {
+                DocumentModel* next = batch->m_releaseNext;
+                batch->m_releaseNext = nullptr;
+                finish(batch);
+                batch = next;
             }
         }
     }
 
     std::mutex m_mutex;
     std::condition_variable m_condition;
-    std::atomic<DocumentModel*> m_incoming{nullptr};
-    std::atomic<unsigned> m_activePushers{0};
+    DocumentModel* m_head = nullptr;
+    DocumentModel* m_tail = nullptr;
+    std::atomic<int> m_inFlight{0};
     std::function<void(std::thread::id)> m_probe;
     std::atomic<DocumentReleaseGate> m_gate{nullptr};
+    std::atomic<DocumentReleaseEnqueueGate> m_enqueueGate{nullptr};
     std::atomic<int> m_pending{0};
     std::atomic<int> m_live{0};
     bool m_stopping = false;
@@ -247,8 +306,8 @@ namespace {
 // ctor/instance()，故 Retirer 析构时 locApp 仍在；测试若先 waitForDocumentRelease 则
 // 顺序相反。跨 TU 没有更强保证。正常 return 且 live/pending 已归零时，Retirer 只回收
 // 空闲线程，不应再 Close；pending>0 时 main.cpp 用 quick_exit/TerminateProcess 跳过
-// 静态析构。真实 MainWindow 成员/子树析构顺序本机尚未验证；QObject 仿真树和快退子进程
-// 不覆盖主窗退出。~Retirer 时也不应 new 模型，若发生属于契约外。
+// 静态析构。真实 MainWindow 成员/子树析构顺序由 STEPLENS_LIFECYCLE_LOG 取证；QObject
+// 仿真树和 ReleaseQuickExitMain 不覆盖主窗退出。~Retirer 时也不应 new 模型，若发生属于契约外。
 Retirer& instance() {
     static Retirer retirer;
     return retirer;
@@ -289,8 +348,14 @@ void setDocumentReleaseProbe(std::function<void(std::thread::id)> probe) {
 void setDocumentReleaseGate(DocumentReleaseGate gate) noexcept {
     instance().setGate(gate);
 }
+void setDocumentReleaseEnqueueGate(DocumentReleaseEnqueueGate gate) noexcept {
+    instance().setEnqueueGate(gate);
+}
 void noteDocumentDestructorThread() {
     instance().noteDestructorThread();
+}
+std::thread::id documentReleaseWorkerThread() {
+    return instance().workerThread();
 }
 
 } // namespace steplens::model

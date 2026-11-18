@@ -1,6 +1,7 @@
 #include "app/MainWindow.h"
 #include "core/AppPaths.h"
 #include "core/CrashDump.h"
+#include "core/LifecycleTrace.h"
 #include "core/Log.h"
 #include "core/OcctLoadContract.h"
 #include "core/Version.h"
@@ -21,12 +22,15 @@
 #include <windows.h>
 #endif
 
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <exception>
 #include <string>
 
 int main(int argc, char* argv[]) {
+    steplens::initializeLifecycleTrace();
+    steplens::lifecycleTrace("main-start");
     try {
         // Interface_Static 只允许在 main() 的这个位置、单线程初始化一次。
         // T05 的加载器不调用 SetIVal / SetCVal。XCAFApp NewDocument / Close 走 xcafDocumentMutex()。
@@ -77,8 +81,18 @@ int main(int argc, char* argv[]) {
         }
         code = app.exec();
     }
+    steplens::lifecycleTrace("main-after-window",
+                             "pending=" + std::to_string(steplens::model::documentsPendingRelease()), code);
+    // 窗口已经拆完。测试入口可先等 Close 完成，再进入 pending 判断；默认生产路径不等待。
+    if (qEnvironmentVariableIsSet("STEPLENS_WAIT_RELEASE_BEFORE_EXIT")) {
+        const bool settled = steplens::model::waitForDocumentRelease(std::chrono::seconds(30));
+        steplens::lifecycleTrace("main-wait-release-done", settled ? "settled" : "timeout",
+                                 steplens::model::documentsPendingRelease());
+    }
     // 窗口已经拆完。若 Close 还在后台跑，不能再往下拆 QApplication 和 OCCT 静态对象。
     if (steplens::model::documentsPendingRelease() > 0) {
+        steplens::lifecycleTrace("main-quick-exit-pending",
+                                 "pending=" + std::to_string(steplens::model::documentsPendingRelease()), 0);
         steplens::Log::info("退出时文档仍在后台关闭，结束进程");
         steplens::Log::shutdown();
 #if defined(_WIN32)
@@ -87,6 +101,7 @@ int main(int argc, char* argv[]) {
         std::quick_exit(0);
 #endif
     }
+    steplens::lifecycleTrace("main-normal-return", "pending=0", code);
     steplens::io::releaseFreedHeap();
     return code;
 }

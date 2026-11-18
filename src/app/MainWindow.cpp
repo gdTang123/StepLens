@@ -1,6 +1,7 @@
 #include "app/MainWindow.h"
 
 #include "app/settings/Settings.h"
+#include "core/LifecycleTrace.h"
 #include "core/Log.h"
 #include "core/MemoryMonitor.h"
 #include "core/ProgressSink.h"
@@ -31,6 +32,8 @@
 #include <QTimer>
 #include <QToolBar>
 #include <QUrl>
+
+#include <functional>
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -175,7 +178,24 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(escape, &QShortcut::activated, this, [this] { m_pipeline->cancel(); });
 }
 
-MainWindow::~MainWindow() = default;
+MainWindow::~MainWindow() {
+    lifecycleTrace("mainwindow-destructor-begin", "MainWindow");
+    const auto connectDestroyed = [](QObject* object) {
+        const QByteArray identity = object->objectName().isEmpty()
+                                        ? QByteArray(object->metaObject()->className())
+                                        : object->objectName().toUtf8();
+        QObject::connect(object, &QObject::destroyed,
+                         [identity] { lifecycleTrace("qobject-child-destroyed", identity.constData()); });
+    };
+    std::function<void(QObject*)> walk = [&](QObject* object) {
+        for (QObject* child : object->children()) {
+            connectDestroyed(child);
+            walk(child);
+        }
+    };
+    walk(this);
+    lifecycleTrace("mainwindow-destructor-end", "members-and-qobject-children-follow");
+}
 
 void MainWindow::buildShell() {
     m_fileLabel = new QLabel(tr("尚未打开文件"), this);
@@ -185,6 +205,7 @@ void MainWindow::buildShell() {
     const bool offscreen = qgetenv("QT_QPA_PLATFORM") == "offscreen";
     if (offscreen) {
         auto* placeholder = new QLabel(tr("离屏模式，未创建三维视图"), this);
+        placeholder->setObjectName(QStringLiteral("offscreenPlaceholder"));
         placeholder->setAlignment(Qt::AlignCenter);
         setCentralWidget(placeholder);
         m_nullHost = std::make_unique<NullSceneHost>();
@@ -193,7 +214,9 @@ void MainWindow::buildShell() {
     }
 
     m_frame = new QWidget(this);
+    m_frame->setObjectName(QStringLiteral("viewerFrame"));
     m_viewer = new ViewerWidget(m_frame);
+    m_viewer->setObjectName(QStringLiteral("viewerWidget"));
     m_hint = new QLabel(tr("拖拽 STEP/IGES 文件到这里，或点击打开"), m_frame);
     m_hint->setAttribute(Qt::WA_TransparentForMouseEvents);
     m_hint->setAutoFillBackground(true);
@@ -208,6 +231,7 @@ void MainWindow::buildShell() {
     m_pipeline = std::make_unique<LoadPipeline>(m_viewer->sceneHost());
 
     m_treePanel = new ui::AssemblyTreePanel(this);
+    m_treePanel->setObjectName(QStringLiteral("assemblyTreePanel"));
     addDockWidget(Qt::LeftDockWidgetArea, m_treePanel);
     resizeDocks({m_treePanel}, {260}, Qt::Horizontal);
     connect(m_treePanel, &ui::AssemblyTreePanel::nodeActivated, m_viewer, &ViewerWidget::highlightNode);
@@ -420,6 +444,10 @@ void MainWindow::refreshUi() {
     }
 
     if (shot.activity == LoadActivity::Loading || shot.activity == LoadActivity::Releasing) {
+        if (!m_closeWhileBusyArmed && qEnvironmentVariableIsSet("STEPLENS_CLOSE_WHILE_BUSY")) {
+            m_closeWhileBusyArmed = true;
+            QTimer::singleShot(0, this, &QWidget::close);
+        }
         if (shot.waitingForRelease) {
             statusBar()->showMessage(m_memoryNotice.combine(tr("正在后台释放上一个文件…")));
         } else {
@@ -513,6 +541,7 @@ void MainWindow::saveModelShots() {
 }
 
 void MainWindow::endProcessNow() {
+    lifecycleTrace("end-process-now", "busy-close", 0);
 #if defined(_WIN32)
     TerminateProcess(GetCurrentProcess(), 0);
 #else
@@ -522,6 +551,7 @@ void MainWindow::endProcessNow() {
 
 void MainWindow::closeEvent(QCloseEvent* event) {
     if (m_pipeline && !m_pipeline->isSettled()) {
+        lifecycleTrace("mainwindow-closeEvent-busy", "loading-or-releasing");
         event->ignore();
         endProcessNow();
     }

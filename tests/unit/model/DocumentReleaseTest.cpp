@@ -1,5 +1,6 @@
 #include "../core/TempDir.h"
 #include "core/CancelToken.h"
+#include "core/LifecycleTrace.h"
 #include "core/Log.h"
 #include "core/OcctLoadContract.h"
 #include "core/ProgressSink.h"
@@ -15,9 +16,11 @@
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -236,9 +239,15 @@ TEST(DocumentRelease, ConcurrentLastReferencesDrainOffCallerThreads) {
         ASSERT_TRUE(item);
         models.push_back(std::move(item));
     }
+    std::mutex producerMutex;
+    std::vector<std::thread::id> producerIds;
     std::vector<std::thread> workers;
     for (int thread = 0; thread < threadCount; ++thread) {
         workers.emplace_back([&, thread] {
+            {
+                std::lock_guard lock(producerMutex);
+                producerIds.push_back(std::this_thread::get_id());
+            }
             for (int index = thread; index < totalModels; index += threadCount) {
                 models[index].reset();
             }
@@ -250,6 +259,11 @@ TEST(DocumentRelease, ConcurrentLastReferencesDrainOffCallerThreads) {
     EXPECT_TRUE(model::waitForDocumentRelease(std::chrono::seconds(30)));
     EXPECT_EQ(probeCount.load(), totalModels);
     EXPECT_TRUE(allBackground.load());
+    const auto workerThread = model::documentReleaseWorkerThread();
+    EXPECT_NE(workerThread, caller);
+    for (const auto id : producerIds) {
+        EXPECT_NE(workerThread, id);
+    }
     EXPECT_EQ(model::documentsPendingRelease(), 0);
     EXPECT_EQ(documentCount(), baselineDocuments);
     model::setDocumentReleaseProbe({});
@@ -275,6 +289,185 @@ TEST(DocumentRelease, RetiredReferenceKeepsTicketUntilItIsReleased) {
     docModel.reset();
     EXPECT_TRUE(model::waitForDocumentRelease(std::chrono::seconds(30)));
     EXPECT_EQ(model::documentsPendingRelease(), 0);
+}
+
+TEST(DocumentRelease, ConcurrentDuplicateRetireNeverPublishesTwoTickets) {
+    ASSERT_TRUE(model::waitForDocumentRelease(std::chrono::seconds(30)));
+    auto docModel = makeModel();
+    ASSERT_TRUE(docModel);
+    model::retireDocument(docModel);
+    constexpr int threadCount = 16;
+    std::atomic<bool> start{false};
+    std::atomic<bool> done{false};
+    std::atomic<int> maximumPending{0};
+    std::atomic<int> closeCount{0};
+    const auto caller = std::this_thread::get_id();
+    std::thread::id destroyed;
+    std::mutex producerMutex;
+    std::vector<std::thread::id> producerIds;
+    model::setDocumentReleaseProbe([&](std::thread::id id) {
+        destroyed = id;
+        closeCount.fetch_add(1, std::memory_order_relaxed);
+    });
+    std::thread observer([&] {
+        while (!done.load(std::memory_order_acquire)) {
+            const int pending = model::documentsPendingRelease();
+            int observed = maximumPending.load(std::memory_order_relaxed);
+            while (observed < pending &&
+                   !maximumPending.compare_exchange_weak(observed, pending, std::memory_order_relaxed)) {
+            }
+        }
+    });
+    std::vector<std::thread> producers;
+    for (int i = 0; i < threadCount; ++i) {
+        producers.emplace_back([copy = docModel, &start, &producerMutex, &producerIds]() mutable {
+            {
+                std::lock_guard lock(producerMutex);
+                producerIds.push_back(std::this_thread::get_id());
+            }
+            while (!start.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            model::retireDocument(std::move(copy));
+        });
+    }
+    start.store(true, std::memory_order_release);
+    for (auto& producer : producers) {
+        producer.join();
+    }
+    done.store(true, std::memory_order_release);
+    observer.join();
+    EXPECT_LE(maximumPending.load(), 1);
+    EXPECT_EQ(model::documentsPendingRelease(), 1);
+    docModel.reset();
+    EXPECT_TRUE(model::waitForDocumentRelease(std::chrono::seconds(30)));
+    EXPECT_EQ(model::documentsPendingRelease(), 0);
+    EXPECT_EQ(closeCount.load(), 1);
+    const auto workerThread = model::documentReleaseWorkerThread();
+    EXPECT_EQ(destroyed, workerThread);
+    EXPECT_NE(destroyed, caller);
+    for (const auto id : producerIds) {
+        EXPECT_NE(destroyed, id);
+    }
+    model::setDocumentReleaseProbe({});
+}
+
+TEST(DocumentRelease, EnqueueNotifyIsCoveredByInFlightAcrossStop) {
+    steplens::test::TempDir dir;
+    const auto logPath = dir.path() / "lifecycle-r1.log";
+    const char* childMark = std::getenv("STEPLENS_R1_ENQUEUE_CHILD");
+    if (childMark != nullptr && *childMark != '\0') {
+        static std::atomic<bool> atGate{false};
+        steplens::initializeLifecycleTrace();
+        model::setDocumentReleaseEnqueueGate([] {
+            steplens::lifecycleTrace("producer-enqueue-gate");
+            atGate.store(true, std::memory_order_release);
+            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+            steplens::lifecycleTrace("producer-enqueue-gate-release");
+        });
+        auto* held = new std::shared_ptr<const model::DocumentModel>(makeModel());
+        ASSERT_TRUE(*held);
+        std::thread([held] {
+            held->reset();
+            delete held;
+            steplens::lifecycleTrace("producer-reset-done");
+        }).detach();
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (!atGate.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        if (!atGate.load(std::memory_order_acquire)) {
+            steplens::lifecycleTrace("r1-child-gate-timeout");
+            std::exit(2);
+        }
+        steplens::lifecycleTrace("r1-child-returning-to-static-dtors");
+        return;
+    }
+
+#if defined(_WIN32)
+    const char* exe = nullptr;
+    char module[MAX_PATH]{};
+    ASSERT_GT(GetModuleFileNameA(nullptr, module, MAX_PATH), 0u);
+    exe = module;
+#else
+    const auto exePath = std::filesystem::read_symlink("/proc/self/exe");
+    const std::string exe = exePath.string();
+#endif
+#if defined(_WIN32)
+    SetEnvironmentVariableA("STEPLENS_R1_ENQUEUE_CHILD", "1");
+    SetEnvironmentVariableA("STEPLENS_LIFECYCLE_LOG", logPath.string().c_str());
+    STARTUPINFOA startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    std::string command = std::string("\"") + module +
+                          "\" --gtest_filter=DocumentRelease.EnqueueNotifyIsCoveredByInFlightAcrossStop";
+    ASSERT_TRUE(CreateProcessA(nullptr, command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr,
+                               &startup, &process));
+    SetEnvironmentVariableA("STEPLENS_R1_ENQUEUE_CHILD", nullptr);
+    SetEnvironmentVariableA("STEPLENS_LIFECYCLE_LOG", nullptr);
+    const DWORD waitResult = WaitForSingleObject(process.hProcess, 10000);
+    DWORD exitCode = 9;
+    if (waitResult == WAIT_TIMEOUT) {
+        TerminateProcess(process.hProcess, 9);
+    } else {
+        GetExitCodeProcess(process.hProcess, &exitCode);
+    }
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    EXPECT_EQ(waitResult, WAIT_OBJECT_0);
+    EXPECT_EQ(exitCode, 0u);
+#else
+    setenv("STEPLENS_R1_ENQUEUE_CHILD", "1", 1);
+    setenv("STEPLENS_LIFECYCLE_LOG", logPath.string().c_str(), 1);
+    const pid_t child = fork();
+    if (child < 0) {
+        unsetenv("STEPLENS_R1_ENQUEUE_CHILD");
+        unsetenv("STEPLENS_LIFECYCLE_LOG");
+        FAIL() << "fork failed";
+    }
+    if (child == 0) {
+        setenv("ASAN_OPTIONS", "halt_on_error=1:detect_leaks=0", 1);
+        execl(exe.c_str(), exe.c_str(),
+              "--gtest_filter=DocumentRelease.EnqueueNotifyIsCoveredByInFlightAcrossStop",
+              static_cast<char*>(nullptr));
+        _exit(127);
+    }
+    unsetenv("STEPLENS_R1_ENQUEUE_CHILD");
+    unsetenv("STEPLENS_LIFECYCLE_LOG");
+    int status = 0;
+    bool exited = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (std::chrono::steady_clock::now() < deadline) {
+        const pid_t result = waitpid(child, &status, WNOHANG);
+        if (result == child) {
+            exited = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    if (!exited) {
+        kill(child, SIGKILL);
+        waitpid(child, &status, 0);
+    }
+    EXPECT_TRUE(exited);
+    ASSERT_TRUE(exited);
+    ASSERT_TRUE(WIFEXITED(status));
+    EXPECT_EQ(WEXITSTATUS(status), 0);
+#endif
+    ASSERT_TRUE(std::filesystem::is_regular_file(logPath)) << logPath;
+    std::ifstream in(logPath);
+    const std::string logged((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    EXPECT_NE(logged.find("producer-enqueue-gate"), std::string::npos) << logged;
+    EXPECT_NE(logged.find("r1-child-returning-to-static-dtors"), std::string::npos) << logged;
+    EXPECT_NE(logged.find("retirer-stop"), std::string::npos) << logged;
+    const auto notifyAt = logged.find("producer-notify-returned");
+    const auto inflightAt = logged.find("producer-inflight-release");
+    const auto endAt = logged.find("retirer-end");
+    ASSERT_NE(notifyAt, std::string::npos) << logged;
+    ASSERT_NE(inflightAt, std::string::npos) << logged;
+    ASSERT_NE(endAt, std::string::npos) << logged;
+    EXPECT_LT(notifyAt, endAt);
+    EXPECT_LT(inflightAt, endAt);
 }
 
 TEST(DocumentRelease, ReleaseDelayKeepsPendingTicketUntilCloseCompletes) {
