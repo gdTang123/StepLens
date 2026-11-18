@@ -1,13 +1,9 @@
 #include "model/DocumentRelease.h"
 
 #include "core/LifecycleTrace.h"
-#include "core/Log.h"
-#include "core/OcctLoadContract.h"
 #include "io/HeapRelease.h"
 #include "model/DocumentModel.h"
 #include "occtsupport/OcctBoundary.h"
-
-#include <XCAFApp_Application.hxx>
 
 #include <atomic>
 #include <chrono>
@@ -58,21 +54,6 @@ unsigned releaseDelayMs() noexcept {
     return static_cast<unsigned>(parsed > 5000 ? 5000 : parsed);
 }
 
-void traceShutdownEnvironment() noexcept {
-    try {
-        lifecycleTrace("retirer-log", Log::ready() ? "ready" : "not-ready");
-        std::unique_lock lock(xcafDocumentMutex(), std::try_to_lock);
-        if (lock.owns_lock()) {
-            const int documents = XCAFApp_Application::GetApplication()->NbDocuments();
-            lifecycleTrace("retirer-xcaf", "mutex-acquired docs=" + std::to_string(documents));
-        } else {
-            lifecycleTrace("retirer-xcaf", "mutex-busy");
-        }
-    } catch (...) {
-        lifecycleTrace("retirer-xcaf", "access-failed");
-    }
-}
-
 } // namespace
 
 class Retirer {
@@ -99,7 +80,8 @@ public:
                                      [this] { return m_inFlight.load(std::memory_order_acquire) == 0; });
             }
         }
-        traceShutdownEnvironment();
+        // 不在析构中访问 XCAF/Log：Retirer 可能早于 locApp/Log 构造，
+        // 此处取证会变成对已毁依赖的访问。本改动只撤探针，不改变 Close 与静态寿命顺序。
         io::setHeapReleasePendingProbe(nullptr);
         lifecycleTrace("retirer-end");
     }
