@@ -155,6 +155,20 @@ void SceneBuilder::highlightNode(model::NodeId id) {
     selectTree(id);
 }
 
+std::optional<model::NodeId> SceneBuilder::selectedNode() {
+    if (m_ctx.IsNull()) {
+        return std::nullopt;
+    }
+    m_ctx->InitSelected();
+    while (m_ctx->MoreSelected()) {
+        if (const auto id = nodeOf(m_ctx->SelectedInteractive())) {
+            return id;
+        }
+        m_ctx->NextSelected();
+    }
+    return std::nullopt;
+}
+
 std::optional<model::NodeId>
 SceneBuilder::nodeOf(const opencascade::handle<AIS_InteractiveObject>& object) const {
     return m_map.nodeOf(object);

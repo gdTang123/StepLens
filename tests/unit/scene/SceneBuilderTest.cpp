@@ -515,6 +515,58 @@ TEST(SceneBuilder, InstanceColorUsesItsOwnPrototypeAndSharesArrays) {
     expectDocumentsReleased(before);
 }
 
+TEST(SceneBuilder, SelectedNodeMapsConnectedAndColorOverrideInstances) {
+    const int before = documentCount();
+    auto doc = newDocument();
+    auto shapes = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
+    auto colors = XCAFDoc_DocumentTool::ColorTool(doc->Main());
+    const TDF_Label part = shapes->AddShape(boxAt(0.0, 0.0, 0.0), false);
+    const TDF_Label root = shapes->NewShape();
+    gp_Trsf plainTrsf;
+    plainTrsf.SetTranslation(gp_Vec{0.0, 0.0, 0.0});
+    shapes->AddComponent(root, part, TopLoc_Location{plainTrsf});
+    gp_Trsf coloredTrsf;
+    coloredTrsf.SetTranslation(gp_Vec{50.0, 0.0, 0.0});
+    const TDF_Label coloredUse = shapes->AddComponent(root, part, TopLoc_Location{coloredTrsf});
+    colors->SetColor(coloredUse, Quantity_Color{1.0, 0.0, 0.0, Quantity_TOC_RGB}, XCAFDoc_ColorGen);
+    shapes->UpdateAssemblies();
+
+    auto model = buildModel(std::move(doc));
+    ASSERT_TRUE(model);
+    const auto leaves = model->leafNodesOf(0);
+    ASSERT_EQ(leaves.size(), 2u);
+    const auto plainId = model->node(leaves[0]).instanceColor ? leaves[1] : leaves[0];
+    const auto coloredId = model->node(leaves[0]).instanceColor ? leaves[0] : leaves[1];
+    auto batches = tessellate(*model);
+    ASSERT_EQ(batches.size(), 1u);
+    auto context = contextOrEmpty();
+    ASSERT_FALSE(context.IsNull());
+    steplens::scene::SceneBuilder builder(context);
+    builder.reset(model);
+    builder.enqueue(std::move(batches[0]));
+    int pumps = 0;
+    std::int64_t maxStallUs = 0;
+    drain(builder, pumps, maxStallUs);
+
+    const auto plain = builder.objectOf(plainId);
+    const auto colored = builder.objectOf(coloredId);
+    ASSERT_FALSE(plain.IsNull());
+    ASSERT_FALSE(colored.IsNull());
+    context->AddOrRemoveSelected(plain, false);
+    ASSERT_FALSE(context->HasSelectedShape());
+    ASSERT_EQ(builder.selectedNode(), plainId);
+    context->ClearSelected(false);
+    context->AddOrRemoveSelected(colored, false);
+    ASSERT_FALSE(context->HasSelectedShape());
+    ASSERT_EQ(builder.selectedNode(), coloredId);
+    context->ClearSelected(false);
+    EXPECT_FALSE(builder.selectedNode().has_value());
+
+    builder.reset(nullptr);
+    model.reset();
+    expectDocumentsReleased(before);
+}
+
 TEST(SceneBuilder, ColorGroupsFollowMeshBatch) {
     const int before = documentCount();
     auto doc = newDocument();

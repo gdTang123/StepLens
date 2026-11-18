@@ -56,6 +56,7 @@ public:
 
     void setNodeVisible(model::NodeId id, bool visible);
     void highlightNode(model::NodeId id);
+    [[nodiscard]] std::optional<model::NodeId> selectedNode();
 
     [[nodiscard]] std::shared_ptr<const model::DocumentModel> document() const {
         return m_model;

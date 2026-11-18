@@ -217,12 +217,9 @@ public:
             m_builder->setNodeVisible(id, visible);
     }
     std::optional<model::NodeId> selectedNode() {
-        if (!m_builder || m_context.IsNull() || !m_context->HasSelectedShape())
+        if (!m_builder || m_context.IsNull())
             return std::nullopt;
-        m_context->InitSelected();
-        if (!m_context->MoreSelected())
-            return std::nullopt;
-        return m_builder->nodeOf(m_context->SelectedInteractive());
+        return m_builder->selectedNode();
     }
 
 private:
