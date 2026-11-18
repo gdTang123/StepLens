@@ -178,6 +178,10 @@ opencascade::handle<AIS_InteractiveObject> SceneBuilder::objectOf(model::NodeId 
     return m_map.objectOf(id);
 }
 
+std::vector<opencascade::handle<AIS_InteractiveObject>> SceneBuilder::objectsOf(model::NodeId id) const {
+    return m_map.objectsOf(id);
+}
+
 opencascade::handle<PrototypePrs> SceneBuilder::sharedPrototype(model::PrototypeId id) const {
     if (id >= m_protos.size()) {
         return {};
@@ -271,21 +275,23 @@ void SceneBuilder::erase(const opencascade::handle<AIS_InteractiveObject>& objec
 
 void SceneBuilder::applyVisible(model::NodeId id, bool visible) {
     const model::AssemblyNode& node = m_model->node(id);
-    if (node.prototype != model::kNoPrototype) {
+    const auto objects = m_map.objectsOf(id);
+    if (node.prototype != model::kNoPrototype || !objects.empty()) {
         if (visible) {
             m_hidden.erase(id);
         } else {
             m_hidden.insert(id);
         }
-        const auto object = m_map.objectOf(id);
-        if (!object.IsNull()) {
+        for (const auto& object : objects) {
             if (visible) {
                 show(object);
             } else {
                 erase(object);
             }
         }
-        return;
+        if (node.prototype != model::kNoPrototype) {
+            return;
+        }
     }
     for (const model::NodeId child : node.children) {
         applyVisible(child, visible);
@@ -294,11 +300,12 @@ void SceneBuilder::applyVisible(model::NodeId id, bool visible) {
 
 void SceneBuilder::selectTree(model::NodeId id) {
     const model::AssemblyNode& node = m_model->node(id);
-    if (node.prototype != model::kNoPrototype) {
-        const auto object = m_map.objectOf(id);
+    for (const auto& object : m_map.objectsOf(id)) {
         if (!object.IsNull()) {
             m_ctx->AddOrRemoveSelected(object, false);
         }
+    }
+    if (node.prototype != model::kNoPrototype) {
         return;
     }
     for (const model::NodeId child : node.children) {

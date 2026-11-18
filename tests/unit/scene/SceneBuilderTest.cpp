@@ -5,10 +5,12 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 
+#include "../core/TempDir.h"
 #include "core/CancelToken.h"
 #include "core/OcctLoadContract.h"
 #include "core/ProgressSink.h"
 #include "io/ILoader.h"
+#include "io/LoadInternal.h"
 #include "mesh/Tessellator.h"
 #include "model/DocumentModel.h"
 #include "model/DocumentRelease.h"
@@ -20,6 +22,7 @@
 #include <AIS_InteractiveContext.hxx>
 #include <Aspect_DisplayConnection.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
+#include <IGESControl_Writer.hxx>
 #include <OpenGl_GraphicDriver.hxx>
 #include <SelectMgr_EntityOwner.hxx>
 #include <SelectMgr_Selection.hxx>
@@ -37,6 +40,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <filesystem>
 #include <gtest/gtest.h>
 #include <iostream>
 #include <mutex>
@@ -238,6 +242,95 @@ TEST(SelectionMap, SiblingInstancesStayDistinct) {
     EXPECT_EQ(map.objectOf(2), right);
     EXPECT_NEAR(left->Transformation().TranslationPart().X(), 0.0, 1.0e-9);
     EXPECT_NEAR(right->Transformation().TranslationPart().X(), 40.0, 1.0e-9);
+}
+
+TEST(SelectionMap, MultipleObjectsCanMapToOneNode) {
+    opencascade::handle<AIS_InteractiveObject> first = new AIS_ConnectedInteractive();
+    opencascade::handle<AIS_InteractiveObject> second = new AIS_ConnectedInteractive();
+    steplens::scene::SelectionMap map;
+    map.bind(0, first);
+    map.bind(0, second);
+    EXPECT_EQ(map.nodeOf(first), 0u);
+    EXPECT_EQ(map.nodeOf(second), 0u);
+    EXPECT_EQ(map.objectOf(0), first);
+    const auto objects = map.objectsOf(0);
+    ASSERT_EQ(objects.size(), 2u);
+    EXPECT_EQ(objects[0], first);
+    EXPECT_EQ(objects[1], second);
+}
+
+TEST(SceneBuilder, IgesSingleRootMapsAllPrototypesToRoot) {
+    const int before = documentCount();
+    steplens::test::TempDir dir;
+    const auto path = dir.path() / "two-boxes.iges";
+    IGESControl_Writer writer;
+    ASSERT_TRUE(writer.AddShape(boxAt(0.0, 0.0, 0.0)));
+    ASSERT_TRUE(writer.AddShape(boxAt(40.0, 0.0, 0.0)));
+    ASSERT_TRUE(writer.Write(steplens::io::detail::pathUtf8(path).c_str(), false));
+
+    steplens::ProgressSink sink;
+    sink.reset(static_cast<std::uint64_t>(std::filesystem::file_size(path)));
+    auto loader = steplens::io::makeLoader(path);
+    ASSERT_TRUE(loader);
+    auto loaded = loader->load(path, {}, sink, steplens::CancelToken{});
+    ASSERT_TRUE(loaded.ok()) << loaded.error().message;
+    EXPECT_EQ(loaded.value().schema, "IGES");
+    auto model = requireModel(
+        steplens::model::DocumentModel::build(std::move(loaded.value()), sink, steplens::CancelToken{}));
+    ASSERT_TRUE(model);
+    ASSERT_EQ(model->nodeCount(), 1u);
+    EXPECT_EQ(model->node(0).children.size(), 0u);
+    ASSERT_GE(model->prototypes().size(), 2u);
+    for (const auto& prototype : model->prototypes()) {
+        const auto leaves = model->leafNodesOf(prototype.id);
+        ASSERT_EQ(leaves.size(), 1u);
+        EXPECT_EQ(leaves.front(), 0u);
+    }
+    EXPECT_EQ(model->node(0).prototype, steplens::model::kNoPrototype);
+
+    auto batches = tessellate(*model);
+    ASSERT_EQ(batches.size(), model->prototypes().size());
+    auto context = contextOrEmpty();
+    ASSERT_FALSE(context.IsNull());
+    steplens::scene::SceneBuilder builder(context);
+    builder.reset(model);
+    for (auto& batch : batches) {
+        builder.enqueue(std::move(batch));
+    }
+    int pumps = 0;
+    std::int64_t maxStallUs = 0;
+    drain(builder, pumps, maxStallUs);
+    ASSERT_FALSE(builder.failed()) << builder.lastError();
+    const auto objects = builder.objectsOf(0);
+    ASSERT_EQ(objects.size(), model->prototypes().size());
+    ASSERT_GE(objects.size(), 2u);
+    EXPECT_EQ(builder.objectOf(0), objects.front());
+    for (const auto& object : objects) {
+        EXPECT_EQ(builder.nodeOf(object), 0u);
+    }
+    builder.setNodeVisible(0, false);
+    for (const auto& object : objects) {
+        EXPECT_FALSE(context->IsDisplayed(object));
+    }
+    builder.setNodeVisible(0, true);
+    for (const auto& object : objects) {
+        EXPECT_TRUE(context->IsDisplayed(object));
+    }
+    builder.highlightNode(0);
+    for (const auto& object : objects) {
+        EXPECT_TRUE(context->IsSelected(object));
+    }
+    for (const auto& object : objects) {
+        context->ClearSelected(false);
+        context->AddOrRemoveSelected(object, false);
+        EXPECT_EQ(builder.selectedNode(), 0u);
+    }
+
+    // 此测试验证真实 AIS 映射、显隐和选择；它不验证像素视口或 ViewerWidget 鼠标拾取，GUI 缺口另列。
+    builder.reset(nullptr);
+    model.reset();
+    EXPECT_TRUE(steplens::model::waitForDocumentRelease(std::chrono::seconds(30)));
+    EXPECT_EQ(documentCount(), before);
 }
 
 TEST(SceneBuilder, SamePrototypeIsPresentedOnceAndPickReturnsInstance) {

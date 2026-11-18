@@ -65,6 +65,7 @@ public:
     [[nodiscard]] std::optional<model::NodeId>
     nodeOf(const opencascade::handle<AIS_InteractiveObject>& object) const;
     [[nodiscard]] opencascade::handle<AIS_InteractiveObject> objectOf(model::NodeId id) const;
+    [[nodiscard]] std::vector<opencascade::handle<AIS_InteractiveObject>> objectsOf(model::NodeId id) const;
     [[nodiscard]] const SelectionMap& selectionMap() const {
         return m_map;
     }
