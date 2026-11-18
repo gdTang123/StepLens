@@ -28,3 +28,6 @@ steplens_add_module(core
 if(WIN32)
     target_link_libraries(steplens_core PRIVATE dbghelp shell32 ole32 psapi)
 endif()
+
+target_compile_definitions(steplens_core PRIVATE
+    "STEPLENS_GIT_SHA=\"${STEPLENS_GIT_SHA}\"")
