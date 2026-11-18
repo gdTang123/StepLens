@@ -1,4 +1,5 @@
 #include "../core/TempDir.h"
+#include "../core/TestChildReap.h"
 #include "core/CancelToken.h"
 #include "core/LifecycleTrace.h"
 #include "core/Log.h"
@@ -18,6 +19,7 @@
 #include <atomic>
 #include <cfenv>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -776,6 +778,16 @@ bool promisedFpEqual(const FpSehSnapshot& a, const FpSehSnapshot& b) {
 #endif
 }
 
+void logFpSeh(const char* tag, const FpSehSnapshot& snap) {
+#if defined(_WIN32)
+    std::fprintf(stderr, "%s control=0x%08x mxcsr=0x%08x translator=%p\n", tag, snap.control, snap.mxcsr,
+                 static_cast<void*>(snap.translator));
+#else
+    std::fprintf(stderr, "%s round=%d\n", tag, snap.round);
+#endif
+    std::fflush(stderr);
+}
+
 void forceNonDefaultFp() {
 #if defined(_WIN32)
     unsigned int ignored = 0;
@@ -784,7 +796,8 @@ void forceNonDefaultFp() {
     unsigned int mxcsr = _mm_getcsr();
     mxcsr |= kMxcsrDaz | kMxcsrFtz;
     mxcsr = (mxcsr & ~kMxcsrRc) | 0x2000u;
-    mxcsr &= ~kMxcsrStatus;
+    mxcsr |= kMxcsrMask;
+    mxcsr = (mxcsr & ~kMxcsrStatus) | 0x20u;
     _mm_setcsr(mxcsr);
 #endif
     _set_se_translator(sehSentinel);
@@ -807,6 +820,7 @@ bool roundingStillDownward() {
 int runFirstEntryFpChild(const char* mode) {
     forceNonDefaultFp();
     const auto expected = captureFpSeh();
+    logFpSeh("first-entry-before", expected);
     if (!roundingStillDownward()) {
         return 6;
     }
@@ -816,21 +830,81 @@ int runFirstEntryFpChild(const char* mode) {
     if (steplens::occt::OcctBoundary::armCountOnThisThread() < 1) {
         return 9;
     }
-    if (!promisedFpEqual(captureFpSeh(), expected)) {
+    const auto after = captureFpSeh();
+    logFpSeh("first-entry-after", after);
+    if (!promisedFpEqual(after, expected)) {
         return 11;
     }
     static_cast<void>(mode);
     return 0;
 }
 
+void expectHangChildFailsClosed(const char* tag, const char* markEnv, const char* markValue,
+                                const char* hangEnv, const char* filter,
+                                std::chrono::milliseconds runBudget) {
+#if defined(_WIN32)
+    char module[MAX_PATH]{};
+    ASSERT_GT(GetModuleFileNameA(nullptr, module, MAX_PATH), 0u);
+    SetEnvironmentVariableA(markEnv, markValue);
+    SetEnvironmentVariableA(hangEnv, "1");
+    STARTUPINFOA startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    std::string command = std::string("\"") + module + "\" --gtest_filter=" + filter;
+    WindowsProcessGuard guard;
+    const BOOL created = CreateProcessA(nullptr, command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr,
+                                        &startup, &process);
+    SetEnvironmentVariableA(markEnv, nullptr);
+    SetEnvironmentVariableA(hangEnv, nullptr);
+    ASSERT_TRUE(created) << "启动失败不得记为退出码 0";
+    guard.attach(process);
+    const auto result =
+        waitOrKillWindowsProcess(guard.info.hProcess, runBudget, std::chrono::milliseconds{2000});
+    logTestChildReap(tag, static_cast<long>(GetProcessId(guard.info.hProcess)), result);
+    EXPECT_TRUE(result.timedOut);
+    EXPECT_TRUE(result.killed);
+    EXPECT_TRUE(result.reaped) << "kill 后应在有限时间内回收";
+    EXPECT_NE(result.exitCode, 0);
+    guard.close();
+#else
+    const auto exePath = std::filesystem::read_symlink("/proc/self/exe");
+    const std::string exe = exePath.string();
+    setenv(markEnv, markValue, 1);
+    setenv(hangEnv, "1", 1);
+    const pid_t child = fork();
+    ASSERT_GE(child, 0) << "启动失败不得记为退出码 0";
+    if (child == 0) {
+        execl(exe.c_str(), exe.c_str(), (std::string("--gtest_filter=") + filter).c_str(), nullptr);
+        _exit(127);
+    }
+    unsetenv(markEnv);
+    unsetenv(hangEnv);
+    PosixProcessGuard guard(child);
+    const auto result = waitOrKillPid(child, runBudget, std::chrono::milliseconds{2000});
+    logTestChildReap(tag, static_cast<long>(child), result);
+    EXPECT_TRUE(result.timedOut);
+    EXPECT_TRUE(result.killed);
+    EXPECT_TRUE(result.reaped) << "kill 后应在有限时间内回收";
+    EXPECT_NE(result.exitCode, 0);
+    guard.close();
+#endif
+}
+
 } // namespace
 
 // 验证非 worker 的进程主线程首次入口会恢复调用者 FP 政策。
-// 这不是 QApplication 线程，不能当作 GUI 首入已验证。GUI 首入仍待卫裁定与带 QApplication 的测试。
+// 这不是 QApplication 线程，不能当作 GUI 首入已验证；GUI 首入在 DocumentReleaseGuiFirstEntryTest。
 TEST(DocumentRelease, FirstMainThreadEntryRestoresCallerFpPolicy) {
     const char* childMark = std::getenv("STEPLENS_B2_FP_ENTRY");
     if (childMark != nullptr && std::string(childMark) == "main") {
-        std::exit(runFirstEntryFpChild("main"));
+        if (std::getenv("STEPLENS_B2_HANG_BEFORE_ENTRY") != nullptr) {
+            testChildHangForever();
+        }
+        const int code = runFirstEntryFpChild("main");
+        if (std::getenv("STEPLENS_B2_HANG_AFTER_ENTRY") != nullptr) {
+            testChildHangForever();
+        }
+        std::exit(code);
     }
 
 #if defined(_WIN32)
@@ -842,23 +916,20 @@ TEST(DocumentRelease, FirstMainThreadEntryRestoresCallerFpPolicy) {
     PROCESS_INFORMATION process{};
     std::string command = std::string("\"") + module +
                           "\" --gtest_filter=DocumentRelease.FirstMainThreadEntryRestoresCallerFpPolicy";
-    ASSERT_TRUE(CreateProcessA(nullptr, command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr,
-                               &startup, &process));
+    WindowsProcessGuard guard;
+    const BOOL created = CreateProcessA(nullptr, command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr,
+                                        &startup, &process);
     SetEnvironmentVariableA("STEPLENS_B2_FP_ENTRY", nullptr);
-    const DWORD waitResult = WaitForSingleObject(process.hProcess, 15000);
-    DWORD exitCode = 9;
-    if (waitResult == WAIT_TIMEOUT) {
-        TerminateProcess(process.hProcess, 9);
-        const DWORD reapResult = WaitForSingleObject(process.hProcess, 5000);
-        GetExitCodeProcess(process.hProcess, &exitCode);
-        EXPECT_EQ(reapResult, WAIT_OBJECT_0);
-    } else if (waitResult == WAIT_OBJECT_0) {
-        GetExitCodeProcess(process.hProcess, &exitCode);
-    }
-    CloseHandle(process.hThread);
-    CloseHandle(process.hProcess);
-    EXPECT_EQ(waitResult, WAIT_OBJECT_0);
-    EXPECT_EQ(exitCode, 0u) << "main first-entry FP/SEH restore failed, code=" << exitCode;
+    ASSERT_TRUE(created);
+    guard.attach(process);
+    const auto result = waitOrKillWindowsProcess(guard.info.hProcess, std::chrono::milliseconds{15000},
+                                                 std::chrono::milliseconds{2000});
+    logTestChildReap("first-main", static_cast<long>(GetProcessId(guard.info.hProcess)), result);
+    EXPECT_FALSE(result.timedOut);
+    EXPECT_FALSE(result.waitFailed);
+    EXPECT_TRUE(result.reaped);
+    EXPECT_EQ(result.exitCode, 0);
+    guard.close();
 #else
     const auto exePath = std::filesystem::read_symlink("/proc/self/exe");
     const std::string exe = exePath.string();
@@ -871,11 +942,15 @@ TEST(DocumentRelease, FirstMainThreadEntryRestoresCallerFpPolicy) {
         _exit(127);
     }
     unsetenv("STEPLENS_B2_FP_ENTRY");
-    int status = 0;
-    const pid_t waited = waitpid(child, &status, 0);
-    ASSERT_EQ(waited, child);
-    ASSERT_TRUE(WIFEXITED(status));
-    EXPECT_EQ(WEXITSTATUS(status), 0);
+    PosixProcessGuard guard(child);
+    const auto result =
+        waitOrKillPid(child, std::chrono::milliseconds{15000}, std::chrono::milliseconds{2000});
+    logTestChildReap("first-main", static_cast<long>(child), result);
+    EXPECT_FALSE(result.timedOut);
+    EXPECT_FALSE(result.waitFailed);
+    EXPECT_TRUE(result.reaped);
+    EXPECT_EQ(result.exitCode, 0);
+    guard.close();
 #endif
 }
 
@@ -883,9 +958,15 @@ TEST(DocumentRelease, FirstMainThreadEntryRestoresCallerFpPolicy) {
 TEST(DocumentRelease, FirstOrdinaryWaitThreadEntryRestoresCallerFpPolicy) {
     const char* childMark = std::getenv("STEPLENS_B2_FP_ENTRY");
     if (childMark != nullptr && std::string(childMark) == "waiter") {
+        if (std::getenv("STEPLENS_B2_HANG_BEFORE_ENTRY") != nullptr) {
+            testChildHangForever();
+        }
         int result = 4;
         std::thread waiter([&] { result = runFirstEntryFpChild("waiter"); });
         waiter.join();
+        if (std::getenv("STEPLENS_B2_HANG_AFTER_ENTRY") != nullptr) {
+            testChildHangForever();
+        }
         std::exit(result);
     }
 
@@ -899,23 +980,20 @@ TEST(DocumentRelease, FirstOrdinaryWaitThreadEntryRestoresCallerFpPolicy) {
     std::string command =
         std::string("\"") + module +
         "\" --gtest_filter=DocumentRelease.FirstOrdinaryWaitThreadEntryRestoresCallerFpPolicy";
-    ASSERT_TRUE(CreateProcessA(nullptr, command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr,
-                               &startup, &process));
+    WindowsProcessGuard guard;
+    const BOOL created = CreateProcessA(nullptr, command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr,
+                                        &startup, &process);
     SetEnvironmentVariableA("STEPLENS_B2_FP_ENTRY", nullptr);
-    const DWORD waitResult = WaitForSingleObject(process.hProcess, 15000);
-    DWORD exitCode = 9;
-    if (waitResult == WAIT_TIMEOUT) {
-        TerminateProcess(process.hProcess, 9);
-        const DWORD reapResult = WaitForSingleObject(process.hProcess, 5000);
-        GetExitCodeProcess(process.hProcess, &exitCode);
-        EXPECT_EQ(reapResult, WAIT_OBJECT_0);
-    } else if (waitResult == WAIT_OBJECT_0) {
-        GetExitCodeProcess(process.hProcess, &exitCode);
-    }
-    CloseHandle(process.hThread);
-    CloseHandle(process.hProcess);
-    EXPECT_EQ(waitResult, WAIT_OBJECT_0);
-    EXPECT_EQ(exitCode, 0u) << "ordinary wait first-entry FP/SEH restore failed, code=" << exitCode;
+    ASSERT_TRUE(created);
+    guard.attach(process);
+    const auto result = waitOrKillWindowsProcess(guard.info.hProcess, std::chrono::milliseconds{15000},
+                                                 std::chrono::milliseconds{2000});
+    logTestChildReap("first-wait", static_cast<long>(GetProcessId(guard.info.hProcess)), result);
+    EXPECT_FALSE(result.timedOut);
+    EXPECT_FALSE(result.waitFailed);
+    EXPECT_TRUE(result.reaped);
+    EXPECT_EQ(result.exitCode, 0);
+    guard.close();
 #else
     const auto exePath = std::filesystem::read_symlink("/proc/self/exe");
     const std::string exe = exePath.string();
@@ -928,47 +1006,62 @@ TEST(DocumentRelease, FirstOrdinaryWaitThreadEntryRestoresCallerFpPolicy) {
         _exit(127);
     }
     unsetenv("STEPLENS_B2_FP_ENTRY");
-    int status = 0;
-    const pid_t waited = waitpid(child, &status, 0);
-    ASSERT_EQ(waited, child);
-    ASSERT_TRUE(WIFEXITED(status));
-    EXPECT_EQ(WEXITSTATUS(status), 0);
+    PosixProcessGuard guard(child);
+    const auto result =
+        waitOrKillPid(child, std::chrono::milliseconds{15000}, std::chrono::milliseconds{2000});
+    logTestChildReap("first-wait", static_cast<long>(child), result);
+    EXPECT_FALSE(result.timedOut);
+    EXPECT_FALSE(result.waitFailed);
+    EXPECT_TRUE(result.reaped);
+    EXPECT_EQ(result.exitCode, 0);
+    guard.close();
 #endif
 }
 
 TEST(OcctBoundary, ScopedThreadSignalRestoresRoundingAfterException) {
     forceNonDefaultFp();
     const auto expected = captureFpSeh();
+    logFpSeh("exception-before", expected);
     ASSERT_TRUE(roundingStillDownward());
     try {
         steplens::occt::OcctBoundary::ScopedThreadSignal primed;
+        logFpSeh("exception-in-scope", captureFpSeh());
         throw 1;
     } catch (int) {
     }
-    EXPECT_TRUE(promisedFpEqual(captureFpSeh(), expected));
+    const auto afterEx = captureFpSeh();
+    logFpSeh("exception-after", afterEx);
+    EXPECT_TRUE(promisedFpEqual(afterEx, expected));
     EXPECT_FALSE(steplens::occt::OcctBoundary::scopedThreadSignalRestoreFailed());
 }
 
 TEST(OcctBoundary, ScopedThreadSignalNestingRestoresOuterCallerState) {
     forceNonDefaultFp();
     const auto caller = captureFpSeh();
+    logFpSeh("nest-caller", caller);
     ASSERT_TRUE(roundingStillDownward());
     {
         steplens::occt::OcctBoundary::ScopedThreadSignal outer;
         const auto inOuter = captureFpSeh();
+        logFpSeh("nest-in-outer", inOuter);
         {
             steplens::occt::OcctBoundary::ScopedThreadSignal inner;
+            logFpSeh("nest-in-inner", captureFpSeh());
         }
         const auto afterInner = captureFpSeh();
+        logFpSeh("nest-after-inner", afterInner);
         EXPECT_TRUE(promisedFpEqual(afterInner, inOuter)) << "内层结束不得提前恢复到调用者状态";
     }
-    EXPECT_TRUE(promisedFpEqual(captureFpSeh(), caller));
+    const auto afterOuter = captureFpSeh();
+    logFpSeh("nest-after-outer", afterOuter);
+    EXPECT_TRUE(promisedFpEqual(afterOuter, caller));
     EXPECT_TRUE(roundingStillDownward());
 }
 
 TEST(OcctBoundary, ScopedThreadSignalStateIsPerThread) {
     forceNonDefaultFp();
     const auto caller = captureFpSeh();
+    logFpSeh("cross-caller-before", caller);
     int otherRound = 0;
     bool otherOk = false;
     std::thread worker([&] {
@@ -979,10 +1072,14 @@ TEST(OcctBoundary, ScopedThreadSignalStateIsPerThread) {
         _controlfp_s(&ignored, _RC_UP, _MCW_RC);
 #endif
         const auto expected = captureFpSeh();
+        logFpSeh("cross-worker-before", expected);
         {
             steplens::occt::OcctBoundary::ScopedThreadSignal primed;
+            logFpSeh("cross-worker-in-scope", captureFpSeh());
         }
-        otherOk = promisedFpEqual(captureFpSeh(), expected);
+        const auto afterWorker = captureFpSeh();
+        logFpSeh("cross-worker-after", afterWorker);
+        otherOk = promisedFpEqual(afterWorker, expected);
 #if !defined(_WIN32)
         otherRound = fegetround();
 #else
@@ -992,8 +1089,10 @@ TEST(OcctBoundary, ScopedThreadSignalStateIsPerThread) {
 #endif
     });
     worker.join();
+    const auto callerAfter = captureFpSeh();
+    logFpSeh("cross-caller-after", callerAfter);
     EXPECT_TRUE(otherOk);
-    EXPECT_TRUE(promisedFpEqual(captureFpSeh(), caller));
+    EXPECT_TRUE(promisedFpEqual(callerAfter, caller));
 #if !defined(_WIN32)
     EXPECT_EQ(otherRound, FE_UPWARD);
 #else
@@ -1004,6 +1103,9 @@ TEST(OcctBoundary, ScopedThreadSignalStateIsPerThread) {
 TEST(OcctBoundary, SaveFailureDoesNotArmOrStartRetirer) {
     const char* childMark = std::getenv("STEPLENS_B2_SAVE_FAIL");
     if (childMark != nullptr && *childMark != '\0') {
+        if (std::getenv("STEPLENS_B2_HANG_BEFORE_ENTRY") != nullptr) {
+            testChildHangForever();
+        }
         steplens::occt::OcctBoundary::setScopedThreadSignalSaveHookForTesting([] { return false; });
         try {
             static_cast<void>(model::waitForDocumentRelease(std::chrono::seconds(5)));
@@ -1014,6 +1116,9 @@ TEST(OcctBoundary, SaveFailureDoesNotArmOrStartRetirer) {
             }
             if (steplens::occt::OcctBoundary::scopedThreadSignalRestoreFailed()) {
                 std::exit(14);
+            }
+            if (std::getenv("STEPLENS_B2_HANG_AFTER_ENTRY") != nullptr) {
+                testChildHangForever();
             }
             std::exit(0);
         }
@@ -1027,18 +1132,20 @@ TEST(OcctBoundary, SaveFailureDoesNotArmOrStartRetirer) {
     PROCESS_INFORMATION process{};
     std::string command =
         std::string("\"") + module + "\" --gtest_filter=OcctBoundary.SaveFailureDoesNotArmOrStartRetirer";
-    ASSERT_TRUE(CreateProcessA(nullptr, command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr,
-                               &startup, &process));
+    WindowsProcessGuard guard;
+    const BOOL created = CreateProcessA(nullptr, command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr,
+                                        &startup, &process);
     SetEnvironmentVariableA("STEPLENS_B2_SAVE_FAIL", nullptr);
-    const DWORD waitResult = WaitForSingleObject(process.hProcess, 15000);
-    DWORD exitCode = 9;
-    if (waitResult == WAIT_OBJECT_0) {
-        GetExitCodeProcess(process.hProcess, &exitCode);
-    }
-    CloseHandle(process.hThread);
-    CloseHandle(process.hProcess);
-    EXPECT_EQ(waitResult, WAIT_OBJECT_0);
-    EXPECT_EQ(exitCode, 0u);
+    ASSERT_TRUE(created);
+    guard.attach(process);
+    const auto result = waitOrKillWindowsProcess(guard.info.hProcess, std::chrono::milliseconds{15000},
+                                                 std::chrono::milliseconds{2000});
+    logTestChildReap("save-fail", static_cast<long>(GetProcessId(guard.info.hProcess)), result);
+    EXPECT_FALSE(result.timedOut);
+    EXPECT_FALSE(result.waitFailed);
+    EXPECT_TRUE(result.reaped);
+    EXPECT_EQ(result.exitCode, 0);
+    guard.close();
 #else
     const auto exePath = std::filesystem::read_symlink("/proc/self/exe");
     const std::string exe = exePath.string();
@@ -1051,16 +1158,22 @@ TEST(OcctBoundary, SaveFailureDoesNotArmOrStartRetirer) {
         _exit(127);
     }
     unsetenv("STEPLENS_B2_SAVE_FAIL");
-    int status = 0;
-    ASSERT_EQ(waitpid(child, &status, 0), child);
-    ASSERT_TRUE(WIFEXITED(status));
-    EXPECT_EQ(WEXITSTATUS(status), 0);
+    PosixProcessGuard guard(child);
+    const auto result =
+        waitOrKillPid(child, std::chrono::milliseconds{15000}, std::chrono::milliseconds{2000});
+    logTestChildReap("save-fail", static_cast<long>(child), result);
+    EXPECT_FALSE(result.timedOut);
+    EXPECT_FALSE(result.waitFailed);
+    EXPECT_TRUE(result.reaped);
+    EXPECT_EQ(result.exitCode, 0);
+    guard.close();
 #endif
 }
 
 TEST(OcctBoundary, ArmHookExceptionRollsBackCallerState) {
     forceNonDefaultFp();
     const auto expected = captureFpSeh();
+    logFpSeh("arm-hook-before", expected);
     steplens::occt::OcctBoundary::setScopedThreadSignalArmHookForTesting([] { throw 2; });
     try {
         steplens::occt::OcctBoundary::ScopedThreadSignal primed;
@@ -1069,19 +1182,52 @@ TEST(OcctBoundary, ArmHookExceptionRollsBackCallerState) {
         EXPECT_EQ(value, 2);
     }
     steplens::occt::OcctBoundary::setScopedThreadSignalArmHookForTesting(nullptr);
-    EXPECT_TRUE(promisedFpEqual(captureFpSeh(), expected));
+    const auto afterArmHook = captureFpSeh();
+    logFpSeh("arm-hook-after", afterArmHook);
+    EXPECT_TRUE(promisedFpEqual(afterArmHook, expected));
     EXPECT_FALSE(steplens::occt::OcctBoundary::scopedThreadSignalRestoreFailed());
 }
 
 TEST(OcctBoundary, WorkerArmRemainsWithoutScopedRestore) {
     forceNonDefaultFp();
     const auto before = captureFpSeh();
+    logFpSeh("worker-arm-before", before);
     steplens::occt::OcctBoundary::armWorkerThread();
     const auto afterArm = captureFpSeh();
+    logFpSeh("worker-arm-after", afterArm);
     EXPECT_GE(steplens::occt::OcctBoundary::armCountOnThisThread(), 1);
     // 永久 arm 不会自行回到调用者；若本平台 arm 改变了状态，该差异必须保持。
     EXPECT_TRUE(promisedFpEqual(captureFpSeh(), afterArm));
     if (!promisedFpEqual(afterArm, before)) {
         EXPECT_FALSE(promisedFpEqual(captureFpSeh(), before));
     }
+}
+
+TEST(DocumentRelease, HangBeforeFirstMainEntryFailsClosed) {
+    expectHangChildFailsClosed(
+        "hang-before-first-main", "STEPLENS_B2_FP_ENTRY", "main", "STEPLENS_B2_HANG_BEFORE_ENTRY",
+        "DocumentRelease.FirstMainThreadEntryRestoresCallerFpPolicy", std::chrono::milliseconds{2000});
+}
+
+TEST(DocumentRelease, HangAfterFirstMainEntryCleanupFailsClosed) {
+    expectHangChildFailsClosed(
+        "hang-after-first-main", "STEPLENS_B2_FP_ENTRY", "main", "STEPLENS_B2_HANG_AFTER_ENTRY",
+        "DocumentRelease.FirstMainThreadEntryRestoresCallerFpPolicy", std::chrono::milliseconds{15000});
+}
+
+TEST(TestChildReap, FirstWaitFailureIsNotExitZero) {
+#if defined(_WIN32)
+    const auto result =
+        waitOrKillWindowsProcess(nullptr, std::chrono::milliseconds{100}, std::chrono::milliseconds{100});
+    logTestChildReap("first-wait-fail", 0, result);
+    EXPECT_TRUE(result.waitFailed || result.timedOut);
+    EXPECT_NE(result.exitCode, 0);
+    EXPECT_FALSE(result.reaped && result.exitCode == 0);
+#else
+    const auto result =
+        waitOrKillPid(static_cast<pid_t>(-1), std::chrono::milliseconds{100}, std::chrono::milliseconds{100});
+    logTestChildReap("first-wait-fail", -1, result);
+    EXPECT_NE(result.exitCode, 0);
+    EXPECT_FALSE(result.reaped && result.exitCode == 0);
+#endif
 }

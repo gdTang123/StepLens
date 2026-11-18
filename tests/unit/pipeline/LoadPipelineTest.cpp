@@ -1,4 +1,5 @@
 #include "../core/TempDir.h"
+#include "../core/TestChildReap.h"
 #include "core/LifecycleTrace.h"
 #include "core/OcctLoadContract.h"
 #include "model/DocumentRelease.h"
@@ -1019,7 +1020,8 @@ std::string envOrEmpty(const char* name) {
 //   ctest --test-dir build/msvc -C RelWithDebInfo --no-tests=error --output-on-failure `
 //     -R "^AppExit\.(ViewerTreeCloseEventWhileBusy|ViewerTreeQuitWhenReadyHeldClose|ViewerTreeNormalReturn)$"
 // 每次子进程使用 lifecycle-<SHA>-<用例>-<nonce>.log；测试先建空文件并校验 lifecycle-open SHA。
-// 每个产品进程硬超时 60s，合成 box.step；HeldClose 用 Close gate 因果控制。
+// 成功 spawn 后等待+回收硬上限 60s（不含启动/环境恢复；spawn 失败返回 -1，另闸）。
+// 合成 box.step；HeldClose 用 Close gate 因果控制。
 // 本机无 MSVC 产品主程序，不能把合同测试当作这三路已经跑通。
 // locApp 本体析构无法插桩；companion 只是上界。产品 main 不抢先 prime Application。
 
@@ -1618,29 +1620,36 @@ TEST(AppExitTimeout, KillFailureThenUnreapedIs125) {
 TEST(AppExitTimeout, PreReapedExit7DoesNotSynthesizeSuccess) {
 #if defined(_WIN32)
     PROCESS_INFORMATION process{};
-    ASSERT_TRUE(createSelfChild("STEPLENS_E3_EXIT_CHILD", "7", &process));
-    ASSERT_EQ(WaitForSingleObject(process.hProcess, 5000), WAIT_OBJECT_0);
-    DWORD firstCode = 9;
-    GetExitCodeProcess(process.hProcess, &firstCode);
-    EXPECT_EQ(firstCode, 7u);
+    WindowsProcessGuard guard;
+    ASSERT_TRUE(createSelfChild("STEPLENS_E3_EXIT_CHILD", "7", &process)) << "启动失败不得记为退出码 0";
+    guard.attach(process);
+    const auto first = waitOrKillWindowsProcess(guard.info.hProcess, std::chrono::milliseconds{5000},
+                                                std::chrono::milliseconds{2000});
+    logTestChildReap("pre-reaped-first", static_cast<long>(GetProcessId(guard.info.hProcess)), first);
+    if (!first.reaped || first.timedOut || first.waitFailed || first.exitCode != 7) {
+        ADD_FAILURE() << "first wait did not obtain real exit 7, exit=" << first.exitCode;
+        return;
+    }
     const auto started = std::chrono::steady_clock::now();
-    const auto outcome = waitBudgetedProcess(process.hProcess, started, std::chrono::milliseconds{2000});
-    CloseHandle(process.hThread);
-    CloseHandle(process.hProcess);
+    const auto outcome = waitBudgetedProcess(guard.info.hProcess, started, std::chrono::milliseconds{2000});
     // Windows 句柄在首次等待后仍可取出真实 exit 7，不得变成 0；也可用该真实码。
     EXPECT_TRUE(outcome.reaped);
     EXPECT_EQ(mapChildOutcome(outcome), 7);
     EXPECT_NE(mapChildOutcome(outcome), 0);
+    guard.close();
 #else
     const pid_t pid = fork();
-    ASSERT_GE(pid, 0);
+    ASSERT_GE(pid, 0) << "启动失败不得记为退出码 0";
     if (pid == 0) {
         _exit(7);
     }
-    int status = 0;
-    ASSERT_EQ(waitpid(pid, &status, 0), pid);
-    ASSERT_TRUE(WIFEXITED(status));
-    ASSERT_EQ(WEXITSTATUS(status), 7);
+    PosixProcessGuard guard(pid);
+    const auto first = waitOrKillPid(pid, std::chrono::milliseconds{5000}, std::chrono::milliseconds{2000});
+    logTestChildReap("pre-reaped-first", static_cast<long>(pid), first);
+    if (!first.reaped || first.timedOut || first.waitFailed || first.exitCode != 7) {
+        ADD_FAILURE() << "first wait did not obtain real exit 7, exit=" << first.exitCode;
+        return;
+    }
     const auto started = std::chrono::steady_clock::now();
     const auto outcome = waitBudgetedPid(pid, started, std::chrono::milliseconds{2000});
     EXPECT_FALSE(outcome.reaped);
@@ -1648,6 +1657,7 @@ TEST(AppExitTimeout, PreReapedExit7DoesNotSynthesizeSuccess) {
     EXPECT_EQ(mapChildOutcome(outcome), 125);
     EXPECT_NE(mapChildOutcome(outcome), 0);
     EXPECT_NE(mapChildOutcome(outcome), 7) << "status 已被先收割，helper 不得假装仍持有 exit 7 或成功 0";
+    guard.close();
 #endif
 }
 
