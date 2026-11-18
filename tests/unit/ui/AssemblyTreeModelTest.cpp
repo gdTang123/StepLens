@@ -70,6 +70,7 @@ void visit(const ui::AssemblyTreeModel& tree, const QModelIndex& parent, std::ve
 
 TEST(AssemblyTreeModel, HierarchyNamesVisibilityAndNodeMapping) {
     ensureApplication();
+    qRegisterMetaType<model::NodeId>("steplens::model::NodeId");
     const auto document = buildModel(2);
     ASSERT_TRUE(document);
     ui::AssemblyTreeModel tree;
@@ -78,12 +79,12 @@ TEST(AssemblyTreeModel, HierarchyNamesVisibilityAndNodeMapping) {
 
     const QModelIndex root = tree.index(0, 0);
     ASSERT_TRUE(root.isValid());
-    EXPECT_EQ(tree.data(root).toString(), QStringLiteral("总装"));
+    EXPECT_EQ(tree.data(root, Qt::DisplayRole).toString(), QStringLiteral("总装"));
     ASSERT_EQ(tree.rowCount(root), 2);
     const QModelIndex named = tree.index(0, 0, root);
     const QModelIndex unnamed = tree.index(1, 0, root);
-    EXPECT_EQ(tree.data(named).toString(), QStringLiteral("已命名零件"));
-    EXPECT_EQ(tree.data(unnamed).toString(), QStringLiteral("未命名-3"));
+    EXPECT_EQ(tree.data(named, Qt::DisplayRole).toString(), QStringLiteral("已命名零件"));
+    EXPECT_EQ(tree.data(unnamed, Qt::DisplayRole).toString(), QStringLiteral("未命名-3"));
     EXPECT_EQ(tree.indexOf(static_cast<model::NodeId>(unnamed.internalId())), unnamed);
     EXPECT_EQ(tree.parent(unnamed), root);
 

@@ -20,8 +20,8 @@ public:
     int columnCount(const QModelIndex& = {}) const override {
         return 1;
     }
-    QVariant data(const QModelIndex& index, int role) const override;
-    bool setData(const QModelIndex& index, const QVariant& value, int role) override;
+    QVariant data(const QModelIndex& index, int role = Qt::DisplayRole) const override;
+    bool setData(const QModelIndex& index, const QVariant& value, int role = Qt::EditRole) override;
     Qt::ItemFlags flags(const QModelIndex& index) const override;
     [[nodiscard]] QModelIndex indexOf(model::NodeId id) const;
     [[nodiscard]] std::shared_ptr<const model::DocumentModel> document() const {
