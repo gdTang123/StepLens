@@ -23,6 +23,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <gtest/gtest-spi.h>
 #include <gtest/gtest.h>
 #include <mutex>
 #include <stdexcept>
@@ -780,8 +781,9 @@ bool promisedFpEqual(const FpSehSnapshot& a, const FpSehSnapshot& b) {
 
 void logFpSeh(const char* tag, const FpSehSnapshot& snap) {
 #if defined(_WIN32)
-    std::fprintf(stderr, "%s control=0x%08x mxcsr=0x%08x translator=%p\n", tag, snap.control, snap.mxcsr,
-                 static_cast<void*>(snap.translator));
+    std::fprintf(stderr, "%s control=0x%08x mxcsr=0x%08x translator_is_sentinel=%d translator_is_null=%d\n",
+                 tag, snap.control, snap.mxcsr, snap.translator == sehSentinel ? 1 : 0,
+                 snap.translator == nullptr ? 1 : 0);
 #else
     std::fprintf(stderr, "%s round=%d\n", tag, snap.round);
 #endif
@@ -845,8 +847,8 @@ void expectHangChildFailsClosed(const char* tag, const char* markEnv, const char
 #if defined(_WIN32)
     char module[MAX_PATH]{};
     ASSERT_GT(GetModuleFileNameA(nullptr, module, MAX_PATH), 0u);
-    SetEnvironmentVariableA(markEnv, markValue);
-    SetEnvironmentVariableA(hangEnv, "1");
+    TestEnvRestore mark(markEnv, markValue);
+    TestEnvRestore hang(hangEnv, "1");
     STARTUPINFOA startup{};
     startup.cb = sizeof(startup);
     PROCESS_INFORMATION process{};
@@ -854,8 +856,8 @@ void expectHangChildFailsClosed(const char* tag, const char* markEnv, const char
     WindowsProcessGuard guard;
     const BOOL created = CreateProcessA(nullptr, command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr,
                                         &startup, &process);
-    SetEnvironmentVariableA(markEnv, nullptr);
-    SetEnvironmentVariableA(hangEnv, nullptr);
+    mark.restore();
+    hang.restore();
     ASSERT_TRUE(created) << "启动失败不得记为退出码 0";
     guard.attach(process);
     const auto result =
@@ -863,30 +865,38 @@ void expectHangChildFailsClosed(const char* tag, const char* markEnv, const char
     logTestChildReap(tag, static_cast<long>(GetProcessId(guard.info.hProcess)), result);
     EXPECT_TRUE(result.timedOut);
     EXPECT_TRUE(result.killed);
+    EXPECT_EQ(result.killStatus, 1);
     EXPECT_TRUE(result.reaped) << "kill 后应在有限时间内回收";
     EXPECT_NE(result.exitCode, 0);
-    guard.close();
+    const auto cleanup = guard.close();
+    logTestChildReap((std::string(tag) + "-close").c_str(), static_cast<long>(process.dwProcessId), cleanup);
 #else
     const auto exePath = std::filesystem::read_symlink("/proc/self/exe");
     const std::string exe = exePath.string();
-    setenv(markEnv, markValue, 1);
-    setenv(hangEnv, "1", 1);
-    const pid_t child = fork();
-    ASSERT_GE(child, 0) << "启动失败不得记为退出码 0";
+    TestEnvRestore mark(markEnv, markValue);
+    TestEnvRestore hang(hangEnv, "1");
+    const pid_t child = testFork();
+    if (child != 0) {
+        mark.restore();
+        hang.restore();
+    }
     if (child == 0) {
         execl(exe.c_str(), exe.c_str(), (std::string("--gtest_filter=") + filter).c_str(), nullptr);
         _exit(127);
     }
-    unsetenv(markEnv);
-    unsetenv(hangEnv);
+    ASSERT_GE(child, 0) << "启动失败不得记为退出码 0";
     PosixProcessGuard guard(child);
-    const auto result = waitOrKillPid(child, runBudget, std::chrono::milliseconds{2000});
+    const auto result = waitOrKillPidOwned(guard, runBudget, std::chrono::milliseconds{2000});
     logTestChildReap(tag, static_cast<long>(child), result);
     EXPECT_TRUE(result.timedOut);
     EXPECT_TRUE(result.killed);
+    EXPECT_EQ(result.killStatus, 1);
     EXPECT_TRUE(result.reaped) << "kill 后应在有限时间内回收";
     EXPECT_NE(result.exitCode, 0);
-    guard.close();
+    const auto cleanup = guard.close();
+    logTestChildReap((std::string(tag) + "-close").c_str(), static_cast<long>(child), cleanup);
+    EXPECT_FALSE(cleanup.ownedAtEntry) << "已消费后不得再持有 kill 权";
+    EXPECT_FALSE(cleanup.killed) << "close 不得再杀已注销身份";
 #endif
 }
 
@@ -910,7 +920,7 @@ TEST(DocumentRelease, FirstMainThreadEntryRestoresCallerFpPolicy) {
 #if defined(_WIN32)
     char module[MAX_PATH]{};
     ASSERT_GT(GetModuleFileNameA(nullptr, module, MAX_PATH), 0u);
-    SetEnvironmentVariableA("STEPLENS_B2_FP_ENTRY", "main");
+    TestEnvRestore mark("STEPLENS_B2_FP_ENTRY", "main");
     STARTUPINFOA startup{};
     startup.cb = sizeof(startup);
     PROCESS_INFORMATION process{};
@@ -919,8 +929,8 @@ TEST(DocumentRelease, FirstMainThreadEntryRestoresCallerFpPolicy) {
     WindowsProcessGuard guard;
     const BOOL created = CreateProcessA(nullptr, command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr,
                                         &startup, &process);
-    SetEnvironmentVariableA("STEPLENS_B2_FP_ENTRY", nullptr);
-    ASSERT_TRUE(created);
+    mark.restore();
+    ASSERT_TRUE(created) << "启动失败不得记为退出码 0";
     guard.attach(process);
     const auto result = waitOrKillWindowsProcess(guard.info.hProcess, std::chrono::milliseconds{15000},
                                                  std::chrono::milliseconds{2000});
@@ -929,28 +939,34 @@ TEST(DocumentRelease, FirstMainThreadEntryRestoresCallerFpPolicy) {
     EXPECT_FALSE(result.waitFailed);
     EXPECT_TRUE(result.reaped);
     EXPECT_EQ(result.exitCode, 0);
-    guard.close();
+    const auto cleanup = guard.close();
+    logTestChildReap("first-main-close", static_cast<long>(process.dwProcessId), cleanup);
 #else
     const auto exePath = std::filesystem::read_symlink("/proc/self/exe");
     const std::string exe = exePath.string();
-    setenv("STEPLENS_B2_FP_ENTRY", "main", 1);
-    const pid_t child = fork();
-    ASSERT_GE(child, 0);
+    TestEnvRestore mark("STEPLENS_B2_FP_ENTRY", "main");
+    const pid_t child = testFork();
+    if (child != 0) {
+        mark.restore();
+    }
     if (child == 0) {
         execl(exe.c_str(), exe.c_str(),
               "--gtest_filter=DocumentRelease.FirstMainThreadEntryRestoresCallerFpPolicy", nullptr);
         _exit(127);
     }
-    unsetenv("STEPLENS_B2_FP_ENTRY");
+    ASSERT_GE(child, 0) << "启动失败不得记为退出码 0";
     PosixProcessGuard guard(child);
     const auto result =
-        waitOrKillPid(child, std::chrono::milliseconds{15000}, std::chrono::milliseconds{2000});
+        waitOrKillPidOwned(guard, std::chrono::milliseconds{15000}, std::chrono::milliseconds{2000});
     logTestChildReap("first-main", static_cast<long>(child), result);
     EXPECT_FALSE(result.timedOut);
     EXPECT_FALSE(result.waitFailed);
     EXPECT_TRUE(result.reaped);
     EXPECT_EQ(result.exitCode, 0);
-    guard.close();
+    const auto cleanup = guard.close();
+    logTestChildReap("first-main-close", static_cast<long>(child), cleanup);
+    EXPECT_FALSE(cleanup.ownedAtEntry) << "已消费后不得再持有 kill 权";
+    EXPECT_FALSE(cleanup.killed) << "close 不得再杀已注销身份";
 #endif
 }
 
@@ -973,7 +989,7 @@ TEST(DocumentRelease, FirstOrdinaryWaitThreadEntryRestoresCallerFpPolicy) {
 #if defined(_WIN32)
     char module[MAX_PATH]{};
     ASSERT_GT(GetModuleFileNameA(nullptr, module, MAX_PATH), 0u);
-    SetEnvironmentVariableA("STEPLENS_B2_FP_ENTRY", "waiter");
+    TestEnvRestore mark("STEPLENS_B2_FP_ENTRY", "waiter");
     STARTUPINFOA startup{};
     startup.cb = sizeof(startup);
     PROCESS_INFORMATION process{};
@@ -983,8 +999,8 @@ TEST(DocumentRelease, FirstOrdinaryWaitThreadEntryRestoresCallerFpPolicy) {
     WindowsProcessGuard guard;
     const BOOL created = CreateProcessA(nullptr, command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr,
                                         &startup, &process);
-    SetEnvironmentVariableA("STEPLENS_B2_FP_ENTRY", nullptr);
-    ASSERT_TRUE(created);
+    mark.restore();
+    ASSERT_TRUE(created) << "启动失败不得记为退出码 0";
     guard.attach(process);
     const auto result = waitOrKillWindowsProcess(guard.info.hProcess, std::chrono::milliseconds{15000},
                                                  std::chrono::milliseconds{2000});
@@ -993,28 +1009,34 @@ TEST(DocumentRelease, FirstOrdinaryWaitThreadEntryRestoresCallerFpPolicy) {
     EXPECT_FALSE(result.waitFailed);
     EXPECT_TRUE(result.reaped);
     EXPECT_EQ(result.exitCode, 0);
-    guard.close();
+    const auto cleanup = guard.close();
+    logTestChildReap("first-wait-close", static_cast<long>(process.dwProcessId), cleanup);
 #else
     const auto exePath = std::filesystem::read_symlink("/proc/self/exe");
     const std::string exe = exePath.string();
-    setenv("STEPLENS_B2_FP_ENTRY", "waiter", 1);
-    const pid_t child = fork();
-    ASSERT_GE(child, 0);
+    TestEnvRestore mark("STEPLENS_B2_FP_ENTRY", "waiter");
+    const pid_t child = testFork();
+    if (child != 0) {
+        mark.restore();
+    }
     if (child == 0) {
         execl(exe.c_str(), exe.c_str(),
               "--gtest_filter=DocumentRelease.FirstOrdinaryWaitThreadEntryRestoresCallerFpPolicy", nullptr);
         _exit(127);
     }
-    unsetenv("STEPLENS_B2_FP_ENTRY");
+    ASSERT_GE(child, 0) << "启动失败不得记为退出码 0";
     PosixProcessGuard guard(child);
     const auto result =
-        waitOrKillPid(child, std::chrono::milliseconds{15000}, std::chrono::milliseconds{2000});
+        waitOrKillPidOwned(guard, std::chrono::milliseconds{15000}, std::chrono::milliseconds{2000});
     logTestChildReap("first-wait", static_cast<long>(child), result);
     EXPECT_FALSE(result.timedOut);
     EXPECT_FALSE(result.waitFailed);
     EXPECT_TRUE(result.reaped);
     EXPECT_EQ(result.exitCode, 0);
-    guard.close();
+    const auto cleanup = guard.close();
+    logTestChildReap("first-wait-close", static_cast<long>(child), cleanup);
+    EXPECT_FALSE(cleanup.ownedAtEntry) << "已消费后不得再持有 kill 权";
+    EXPECT_FALSE(cleanup.killed) << "close 不得再杀已注销身份";
 #endif
 }
 
@@ -1126,7 +1148,7 @@ TEST(OcctBoundary, SaveFailureDoesNotArmOrStartRetirer) {
 #if defined(_WIN32)
     char module[MAX_PATH]{};
     ASSERT_GT(GetModuleFileNameA(nullptr, module, MAX_PATH), 0u);
-    SetEnvironmentVariableA("STEPLENS_B2_SAVE_FAIL", "1");
+    TestEnvRestore mark("STEPLENS_B2_SAVE_FAIL", "1");
     STARTUPINFOA startup{};
     startup.cb = sizeof(startup);
     PROCESS_INFORMATION process{};
@@ -1135,8 +1157,8 @@ TEST(OcctBoundary, SaveFailureDoesNotArmOrStartRetirer) {
     WindowsProcessGuard guard;
     const BOOL created = CreateProcessA(nullptr, command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr,
                                         &startup, &process);
-    SetEnvironmentVariableA("STEPLENS_B2_SAVE_FAIL", nullptr);
-    ASSERT_TRUE(created);
+    mark.restore();
+    ASSERT_TRUE(created) << "启动失败不得记为退出码 0";
     guard.attach(process);
     const auto result = waitOrKillWindowsProcess(guard.info.hProcess, std::chrono::milliseconds{15000},
                                                  std::chrono::milliseconds{2000});
@@ -1145,28 +1167,34 @@ TEST(OcctBoundary, SaveFailureDoesNotArmOrStartRetirer) {
     EXPECT_FALSE(result.waitFailed);
     EXPECT_TRUE(result.reaped);
     EXPECT_EQ(result.exitCode, 0);
-    guard.close();
+    const auto cleanup = guard.close();
+    logTestChildReap("save-fail-close", static_cast<long>(process.dwProcessId), cleanup);
 #else
     const auto exePath = std::filesystem::read_symlink("/proc/self/exe");
     const std::string exe = exePath.string();
-    setenv("STEPLENS_B2_SAVE_FAIL", "1", 1);
-    const pid_t child = fork();
-    ASSERT_GE(child, 0);
+    TestEnvRestore mark("STEPLENS_B2_SAVE_FAIL", "1");
+    const pid_t child = testFork();
+    if (child != 0) {
+        mark.restore();
+    }
     if (child == 0) {
         execl(exe.c_str(), exe.c_str(), "--gtest_filter=OcctBoundary.SaveFailureDoesNotArmOrStartRetirer",
               nullptr);
         _exit(127);
     }
-    unsetenv("STEPLENS_B2_SAVE_FAIL");
+    ASSERT_GE(child, 0) << "启动失败不得记为退出码 0";
     PosixProcessGuard guard(child);
     const auto result =
-        waitOrKillPid(child, std::chrono::milliseconds{15000}, std::chrono::milliseconds{2000});
+        waitOrKillPidOwned(guard, std::chrono::milliseconds{15000}, std::chrono::milliseconds{2000});
     logTestChildReap("save-fail", static_cast<long>(child), result);
     EXPECT_FALSE(result.timedOut);
     EXPECT_FALSE(result.waitFailed);
     EXPECT_TRUE(result.reaped);
     EXPECT_EQ(result.exitCode, 0);
-    guard.close();
+    const auto cleanup = guard.close();
+    logTestChildReap("save-fail-close", static_cast<long>(child), cleanup);
+    EXPECT_FALSE(cleanup.ownedAtEntry) << "已消费后不得再持有 kill 权";
+    EXPECT_FALSE(cleanup.killed) << "close 不得再杀已注销身份";
 #endif
 }
 
@@ -1231,3 +1259,231 @@ TEST(TestChildReap, FirstWaitFailureIsNotExitZero) {
     EXPECT_FALSE(result.reaped && result.exitCode == 0);
 #endif
 }
+
+struct TestChildReapHookReset {
+    ~TestChildReapHookReset() {
+        testUnconfirmedCleanupHook = nullptr;
+        testCloseHook = nullptr;
+#if defined(_WIN32)
+        testTerminateProcessHook = nullptr;
+        testWaitForSingleObjectHook = nullptr;
+#else
+        testWaitpidHook = nullptr;
+        testKillHook = nullptr;
+        testForkHook = nullptr;
+        testForkFailRemaining = 0;
+#endif
+    }
+};
+
+#if !defined(_WIN32)
+pid_t spawnDirectHangChild() {
+    const pid_t child = ::fork();
+    if (child == 0) {
+        testChildHangForever();
+    }
+    return child;
+}
+
+TEST(TestChildReap, GuardDestructorReapsAfterEarlyReturn) {
+    TestChildReapHookReset reset;
+    TestChildReap seen{};
+    testCloseHook = [&](const char*, long, const TestChildReap& result) { seen = result; };
+    const pid_t child = spawnDirectHangChild();
+    ASSERT_GT(child, 0) << "启动失败不得记为退出码 0";
+    [](pid_t pid) {
+        PosixProcessGuard guard(pid);
+        return;
+    }(child);
+    logTestChildReap("dtor-early-return", static_cast<long>(child), seen);
+    EXPECT_TRUE(seen.ownedAtEntry);
+    EXPECT_TRUE(seen.killed);
+    EXPECT_EQ(seen.killStatus, 1);
+    EXPECT_TRUE(seen.reaped);
+    EXPECT_NE(seen.exitCode, 0);
+}
+
+TEST(TestChildReap, GuardDestructorReapsAfterFatalAssert) {
+    TestChildReapHookReset reset;
+    TestChildReap seen{};
+    testCloseHook = [&](const char*, long, const TestChildReap& result) { seen = result; };
+    static pid_t fatalChild = -1;
+    fatalChild = spawnDirectHangChild();
+    ASSERT_GT(fatalChild, 0) << "启动失败不得记为退出码 0";
+    EXPECT_FATAL_FAILURE(
+        {
+            PosixProcessGuard guard(fatalChild);
+            ASSERT_TRUE(false) << "injected fatal";
+        },
+        "injected fatal");
+    logTestChildReap("dtor-fatal-assert", static_cast<long>(fatalChild), seen);
+    EXPECT_TRUE(seen.ownedAtEntry);
+    EXPECT_TRUE(seen.killed);
+    EXPECT_EQ(seen.killStatus, 1);
+    EXPECT_TRUE(seen.reaped);
+    EXPECT_NE(seen.exitCode, 0);
+}
+
+TEST(TestChildReap, GuardDestructorReapsAfterException) {
+    TestChildReapHookReset reset;
+    TestChildReap seen{};
+    testCloseHook = [&](const char*, long, const TestChildReap& result) { seen = result; };
+    const pid_t child = spawnDirectHangChild();
+    ASSERT_GT(child, 0) << "启动失败不得记为退出码 0";
+    try {
+        PosixProcessGuard guard(child);
+        throw 1;
+    } catch (int) {
+    }
+    logTestChildReap("dtor-exception", static_cast<long>(child), seen);
+    EXPECT_TRUE(seen.ownedAtEntry);
+    EXPECT_TRUE(seen.killed);
+    EXPECT_EQ(seen.killStatus, 1);
+    EXPECT_TRUE(seen.reaped);
+    EXPECT_NE(seen.exitCode, 0);
+}
+
+TEST(TestChildReap, InjectedKillFailureIsUnconfirmedNotSuccess) {
+    TestChildReapHookReset reset;
+    bool unconfirmed = false;
+    TestChildReap reported{};
+    testUnconfirmedCleanupHook = [&](const char*, long, const TestChildReap& result) {
+        unconfirmed = true;
+        reported = result;
+        return true;
+    };
+    testWaitpidHook = [](pid_t, int*, int) { return static_cast<pid_t>(0); };
+    testKillHook = [](pid_t, int) {
+        errno = EPERM;
+        return -1;
+    };
+    PosixProcessGuard guard(static_cast<pid_t>(4242));
+    const auto result = guard.close("inject-kill-fail");
+    logTestChildReap("inject-kill-fail", 4242, result);
+    EXPECT_TRUE(result.ownedAtEntry);
+    EXPECT_TRUE(result.killed) << "killed 只表示尝试过";
+    EXPECT_EQ(result.killStatus, 0);
+    EXPECT_FALSE(result.reaped);
+    EXPECT_NE(result.exitCode, 0);
+    EXPECT_TRUE(unconfirmed);
+    EXPECT_FALSE(result.killStatus == 1 && result.killed) << "不能把尝试 kill 当成功";
+}
+
+TEST(TestChildReap, InjectedReapFailureIsUnconfirmedAfterKillAttempt) {
+    TestChildReapHookReset reset;
+    bool unconfirmed = false;
+    testUnconfirmedCleanupHook = [&](const char*, long, const TestChildReap&) {
+        unconfirmed = true;
+        return true;
+    };
+    testWaitpidHook = [](pid_t, int*, int) { return static_cast<pid_t>(0); };
+    testKillHook = [](pid_t, int) { return 0; };
+    PosixProcessGuard guard(static_cast<pid_t>(4242));
+    const auto result = guard.close("inject-reap-fail");
+    logTestChildReap("inject-reap-fail", 4242, result);
+    EXPECT_TRUE(result.killed);
+    EXPECT_EQ(result.killStatus, 1);
+    EXPECT_FALSE(result.reaped) << "尝试 kill 成功仍须确认回收";
+    EXPECT_NE(result.exitCode, 0);
+    EXPECT_TRUE(unconfirmed);
+}
+
+TEST(TestChildReap, CloseAfterConsumeDoesNotWaitOrKillReusedPid) {
+    TestChildReapHookReset reset;
+    const pid_t fake = static_cast<pid_t>(4242);
+    int waitCalls = 0;
+    int killCalls = 0;
+    int phase = 0;
+    testWaitpidHook = [&](pid_t pid, int* status, int) {
+        EXPECT_EQ(pid, fake);
+        ++waitCalls;
+        if (phase == 0) {
+            *status = 7 << 8;
+            return pid;
+        }
+        ADD_FAILURE() << "已注销后不得再 waitpid";
+        return pid;
+    };
+    testKillHook = [&](pid_t, int) {
+        ++killCalls;
+        ADD_FAILURE() << "已注销后不得再 kill";
+        return 0;
+    };
+    PosixProcessGuard guard(fake);
+    const auto first =
+        waitOrKillPidOwned(guard, std::chrono::milliseconds{100}, std::chrono::milliseconds{100});
+    logTestChildReap("consume-exit7", static_cast<long>(fake), first);
+    EXPECT_TRUE(first.reaped);
+    EXPECT_EQ(first.exitCode, 7);
+    EXPECT_FALSE(guard.ownsKill());
+    phase = 1;
+    const auto cleanup = guard.close("consume-close");
+    logTestChildReap("consume-close", static_cast<long>(fake), cleanup);
+    EXPECT_FALSE(cleanup.ownedAtEntry);
+    EXPECT_FALSE(cleanup.killed);
+    EXPECT_EQ(killCalls, 0);
+    EXPECT_EQ(waitCalls, 1);
+    EXPECT_NE(first.exitCode, 0);
+}
+
+TEST(TestChildReap, DtorAfterConsumeDoesNotWaitOrKillReusedPid) {
+    TestChildReapHookReset reset;
+    const pid_t fake = static_cast<pid_t>(4243);
+    int waitCalls = 0;
+    int killCalls = 0;
+    int phase = 0;
+    testWaitpidHook = [&](pid_t pid, int* status, int) {
+        EXPECT_EQ(pid, fake);
+        ++waitCalls;
+        if (phase == 0) {
+            *status = 7 << 8;
+            return pid;
+        }
+        ADD_FAILURE() << "析构不得再 waitpid 已注销身份";
+        return pid;
+    };
+    testKillHook = [&](pid_t, int) {
+        ++killCalls;
+        ADD_FAILURE() << "析构不得再 kill 已注销身份";
+        return 0;
+    };
+    {
+        PosixProcessGuard guard(fake);
+        const auto first =
+            waitOrKillPidOwned(guard, std::chrono::milliseconds{100}, std::chrono::milliseconds{100});
+        EXPECT_TRUE(first.reaped);
+        EXPECT_EQ(first.exitCode, 7);
+        EXPECT_FALSE(guard.ownsKill());
+        phase = 1;
+    }
+    EXPECT_EQ(killCalls, 0);
+    EXPECT_EQ(waitCalls, 1);
+}
+#endif
+
+#if defined(_WIN32)
+TEST(TestChildReap, InjectedWindowsReapFailureIsUnconfirmedNotSuccess) {
+    TestChildReapHookReset reset;
+    bool unconfirmed = false;
+    testUnconfirmedCleanupHook = [&](const char*, long, const TestChildReap&) {
+        unconfirmed = true;
+        return true;
+    };
+    testWaitForSingleObjectHook = [](HANDLE, DWORD) { return WAIT_TIMEOUT; };
+    testTerminateProcessHook = [](HANDLE, UINT) { return FALSE; };
+    WindowsProcessGuard guard;
+    PROCESS_INFORMATION info{};
+    info.hProcess = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(0x1));
+    info.hThread = nullptr;
+    info.dwProcessId = 4242;
+    guard.attach(info);
+    const auto result = guard.close("inject-win-kill-fail");
+    logTestChildReap("inject-win-kill-fail", 4242, result);
+    EXPECT_TRUE(result.killed);
+    EXPECT_EQ(result.killStatus, 0);
+    EXPECT_FALSE(result.reaped);
+    EXPECT_NE(result.exitCode, 0);
+    EXPECT_TRUE(unconfirmed);
+    // close 仍应走到 CloseHandle；此处句柄为假值，目标实跑再核真实句柄路径
+}
+#endif

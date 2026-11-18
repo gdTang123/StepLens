@@ -1628,6 +1628,8 @@ TEST(AppExitTimeout, PreReapedExit7DoesNotSynthesizeSuccess) {
     logTestChildReap("pre-reaped-first", static_cast<long>(GetProcessId(guard.info.hProcess)), first);
     if (!first.reaped || first.timedOut || first.waitFailed || first.exitCode != 7) {
         ADD_FAILURE() << "first wait did not obtain real exit 7, exit=" << first.exitCode;
+        const auto cleanup = guard.close();
+        logTestChildReap("pre-reaped-close", static_cast<long>(process.dwProcessId), cleanup);
         return;
     }
     const auto started = std::chrono::steady_clock::now();
@@ -1636,28 +1638,37 @@ TEST(AppExitTimeout, PreReapedExit7DoesNotSynthesizeSuccess) {
     EXPECT_TRUE(outcome.reaped);
     EXPECT_EQ(mapChildOutcome(outcome), 7);
     EXPECT_NE(mapChildOutcome(outcome), 0);
-    guard.close();
+    const auto cleanup = guard.close();
+    logTestChildReap("pre-reaped-close", static_cast<long>(process.dwProcessId), cleanup);
 #else
-    const pid_t pid = fork();
-    ASSERT_GE(pid, 0) << "启动失败不得记为退出码 0";
+    const pid_t pid = testFork();
     if (pid == 0) {
         _exit(7);
     }
+    ASSERT_GE(pid, 0) << "启动失败不得记为退出码 0";
     PosixProcessGuard guard(pid);
-    const auto first = waitOrKillPid(pid, std::chrono::milliseconds{5000}, std::chrono::milliseconds{2000});
+    const auto first =
+        waitOrKillPidOwned(guard, std::chrono::milliseconds{5000}, std::chrono::milliseconds{2000});
     logTestChildReap("pre-reaped-first", static_cast<long>(pid), first);
     if (!first.reaped || first.timedOut || first.waitFailed || first.exitCode != 7) {
         ADD_FAILURE() << "first wait did not obtain real exit 7, exit=" << first.exitCode;
+        const auto cleanup = guard.close();
+        logTestChildReap("pre-reaped-close", static_cast<long>(pid), cleanup);
         return;
     }
+    EXPECT_FALSE(guard.ownsKill());
+    const pid_t watched = pid; // 非拥有诊断输入，第二次不得再带 kill 权
     const auto started = std::chrono::steady_clock::now();
-    const auto outcome = waitBudgetedPid(pid, started, std::chrono::milliseconds{2000});
+    const auto outcome = waitBudgetedPid(watched, started, std::chrono::milliseconds{2000});
     EXPECT_FALSE(outcome.reaped);
     EXPECT_EQ(outcome.status, ChildReapStatus::NotReaped);
     EXPECT_EQ(mapChildOutcome(outcome), 125);
     EXPECT_NE(mapChildOutcome(outcome), 0);
     EXPECT_NE(mapChildOutcome(outcome), 7) << "status 已被先收割，helper 不得假装仍持有 exit 7 或成功 0";
-    guard.close();
+    const auto cleanup = guard.close();
+    logTestChildReap("pre-reaped-close", static_cast<long>(watched), cleanup);
+    EXPECT_FALSE(cleanup.ownedAtEntry);
+    EXPECT_FALSE(cleanup.killed);
 #endif
 }
 
