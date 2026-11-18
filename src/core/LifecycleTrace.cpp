@@ -1,6 +1,7 @@
 #include "core/LifecycleTrace.h"
 
 #include <atomic>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
@@ -10,6 +11,7 @@
 #if defined(_WIN32)
 #include <Windows.h>
 #else
+#include <cerrno>
 #include <fcntl.h>
 #include <unistd.h>
 #endif
@@ -69,10 +71,33 @@ void lifecycleTrace(std::string_view event, std::string_view identity, int exitC
     const auto bytes =
         static_cast<unsigned long>(length < static_cast<int>(sizeof(line)) ? length : sizeof(line) - 1);
 #if defined(_WIN32)
-    DWORD written = 0;
-    WriteFile(trace.file, line, bytes, &written, nullptr);
+    const char* cursor = line;
+    unsigned long remaining = bytes;
+    while (remaining > 0) {
+        DWORD written = 0;
+        if (WriteFile(trace.file, cursor, remaining, &written, nullptr) == 0 || written == 0) {
+            return;
+        }
+        cursor += written;
+        remaining -= written;
+    }
 #else
-    static_cast<void>(::write(trace.file, line, bytes));
+    const char* cursor = line;
+    size_t remaining = static_cast<size_t>(bytes);
+    while (remaining > 0) {
+        const ssize_t written = ::write(trace.file, cursor, remaining);
+        if (written < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return;
+        }
+        if (written == 0) {
+            return;
+        }
+        cursor += static_cast<size_t>(written);
+        remaining -= static_cast<size_t>(written);
+    }
 #endif
 }
 
