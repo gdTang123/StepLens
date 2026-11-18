@@ -109,6 +109,10 @@ public:
         return m_model != nullptr;
     }
 
+    [[nodiscard]] std::shared_ptr<const steplens::model::DocumentModel> document() const {
+        return m_model;
+    }
+
     [[nodiscard]] int resets() const {
         return m_resets;
     }
@@ -296,6 +300,89 @@ TEST(LoadPipeline, CancelMidLoadReturnsToIdleCube) {
     EXPECT_NE(releaseThread, std::this_thread::get_id());
     EXPECT_EQ(documentCount(), baseline);
     static_cast<void>(probeGuard);
+}
+
+TEST(LoadPipeline, CancelNewLoadBeforeAdoptKeepsPreviousModel) {
+    steplens::test::TempDir dir;
+    const std::filesystem::path fileA = dir.path() / "a.step";
+    const std::filesystem::path fileB = dir.path() / "b.step";
+    ASSERT_TRUE(writeBoxStep(fileA));
+    ASSERT_TRUE(writeBoxStep(fileB));
+
+    RecordingHost host(std::this_thread::get_id());
+    steplens::LoadPipeline pipeline(host);
+    pipeline.open(fileA);
+    ASSERT_TRUE(driveUntil(
+        pipeline,
+        [](const steplens::LoadPipeline::Snapshot& shot) {
+            return shot.activity == steplens::LoadActivity::Ready;
+        },
+        std::chrono::seconds(60)));
+    const auto displayedA = host.document();
+    ASSERT_NE(displayedA, nullptr);
+    const int clears = host.clears();
+    const int resets = host.resets();
+
+    std::atomic<bool> probeEntered{false};
+    std::atomic<bool> releaseProbe{false};
+    pipeline.setBeforePublishForTest([&](const steplens::CancelToken& token) {
+        probeEntered.store(true, std::memory_order_release);
+        while (!releaseProbe.load(std::memory_order_acquire) && !token.isCancelled()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    });
+    pipeline.open(fileB);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+    while (!probeEntered.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    ASSERT_TRUE(probeEntered.load(std::memory_order_acquire));
+    EXPECT_EQ(host.resets(), resets);
+
+    pipeline.cancel();
+    releaseProbe.store(true, std::memory_order_release);
+    ASSERT_TRUE(pipeline.waitUntilSettled(std::chrono::seconds(30)));
+    pipeline.tick();
+    EXPECT_EQ(host.clears(), clears);
+    EXPECT_EQ(host.document(), displayedA);
+    EXPECT_EQ(pipeline.snapshot().activity, steplens::LoadActivity::Ready);
+}
+
+TEST(LoadPipeline, CancelAfterNewModelAdoptedClearsDisplay) {
+    steplens::test::TempDir dir;
+    const std::filesystem::path fileA = dir.path() / "a.step";
+    const std::filesystem::path fileB = dir.path() / "b.step";
+    ASSERT_TRUE(writeBoxStep(fileA));
+    ASSERT_TRUE(writeBoxStep(fileB));
+
+    RecordingHost host(std::this_thread::get_id());
+    steplens::LoadPipeline pipeline(host);
+    pipeline.open(fileA);
+    ASSERT_TRUE(driveUntil(
+        pipeline,
+        [](const steplens::LoadPipeline::Snapshot& shot) {
+            return shot.activity == steplens::LoadActivity::Ready;
+        },
+        std::chrono::seconds(60)));
+
+    host.holdDisplay();
+    pipeline.open(fileB);
+    ASSERT_TRUE(driveUntil(
+        pipeline,
+        [&](const steplens::LoadPipeline::Snapshot& shot) {
+            return shot.activity == steplens::LoadActivity::Loading && host.resets() >= 2;
+        },
+        std::chrono::seconds(60)));
+    const auto displayedB = host.document();
+    ASSERT_NE(displayedB, nullptr);
+    const int clears = host.clears();
+
+    pipeline.cancel();
+    EXPECT_EQ(host.clears(), clears + 1);
+    EXPECT_FALSE(host.holdsModel());
+    EXPECT_NE(host.document(), displayedB);
+    ASSERT_TRUE(pipeline.waitUntilSettled(std::chrono::seconds(30)));
+    ASSERT_TRUE(steplens::model::waitForDocumentRelease(std::chrono::seconds(30)));
 }
 
 TEST(LoadPipeline, EscapeAfterReadyKeepsModel) {
