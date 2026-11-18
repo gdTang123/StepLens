@@ -11,6 +11,7 @@
 #include "core/ProgressSink.h"
 #include "io/ILoader.h"
 #include "model/DocumentModel.h"
+#include "model/DocumentRelease.h"
 
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <IFSelect_ReturnStatus.hxx>
@@ -26,6 +27,7 @@
 #include <gp_Trsf.hxx>
 #include <gp_Vec.hxx>
 
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -43,6 +45,13 @@ namespace {
 int documentCount() {
     std::lock_guard lock(steplens::xcafDocumentMutex());
     return XCAFApp_Application::GetApplication()->NbDocuments();
+}
+
+void expectDocumentsReleased(int before) {
+    // 必须先交还全部 DocumentModel shared_ptr，以及仍指向同一份 XCAF 文档的测试 handle，再等待。
+    // wait 成功只表示 pending==0，仍须断言 documentCount()==before；超时就让测试失败，禁止回退期望值。
+    ASSERT_TRUE(steplens::model::waitForDocumentRelease(std::chrono::seconds(30)));
+    EXPECT_EQ(documentCount(), before);
 }
 
 opencascade::handle<TDocStd_Document> newDocument() {
@@ -157,7 +166,7 @@ TEST(DocumentModel, StepAssemblyDedupsPrototypeAndKeepsWorldBoxes) {
     steplens::ProgressSink sink;
     sink.reset(1234);
     auto model = requireModel(steplens::model::DocumentModel::build(
-        loadedFrom(doc, 25.4, "AUTOMOTIVE_DESIGN"), sink, steplens::CancelToken{}));
+        loadedFrom(std::move(doc), 25.4, "AUTOMOTIVE_DESIGN"), sink, steplens::CancelToken{}));
     ASSERT_TRUE(model);
     EXPECT_EQ(sink.fileBytes(), 1234u);
     EXPECT_DOUBLE_EQ(model->lengthUnitToMm(), 25.4);
@@ -209,7 +218,7 @@ TEST(DocumentModel, StepAssemblyDedupsPrototypeAndKeepsWorldBoxes) {
     const TopoDS_Shape nestedWorld = model->worldShapeOf(nested.id);
     EXPECT_NEAR(nestedWorld.Location().Transformation().TranslationPart().X(), 5.0, 1.0e-6);
     model.reset();
-    EXPECT_EQ(documentCount(), before);
+    expectDocumentsReleased(before);
 }
 
 TEST(DocumentModel, StepFacesGroupByColor) {
@@ -246,7 +255,7 @@ TEST(DocumentModel, StepFacesGroupByColor) {
     }
     EXPECT_EQ(grouped, 6);
     model.reset();
-    EXPECT_EQ(documentCount(), before);
+    expectDocumentsReleased(before);
 }
 
 TEST(DocumentModel, StepFreeShapesStaySeparate) {
@@ -267,7 +276,7 @@ TEST(DocumentModel, StepFreeShapesStaySeparate) {
     EXPECT_TRUE(model->node(0).isAssembly);
     EXPECT_EQ(model->node(0).children.size(), 5u);
     model.reset();
-    EXPECT_EQ(documentCount(), before);
+    expectDocumentsReleased(before);
 }
 
 TEST(DocumentModel, IgesFewEntitiesKeepOneRootAndSeparatePrototypes) {
@@ -306,7 +315,7 @@ TEST(DocumentModel, IgesFewEntitiesKeepOneRootAndSeparatePrototypes) {
     model->worldBox().Get(ignored, ignored, ignored, xmax, ignored, ignored);
     EXPECT_GT(xmax, 200.0);
     model.reset();
-    EXPECT_EQ(documentCount(), before);
+    expectDocumentsReleased(before);
 }
 
 TEST(DocumentModel, IgesChunkingCapsVirtualPrototypes) {
@@ -353,7 +362,7 @@ TEST(DocumentModel, IgesChunkingCapsVirtualPrototypes) {
     EXPECT_EQ(grouped, faces);
     EXPECT_GT(redBuckets.size(), 1u);
     model.reset();
-    EXPECT_EQ(documentCount(), before);
+    expectDocumentsReleased(before);
 }
 
 TEST(DocumentModel, CancelDuringBuildReleasesDocument) {
@@ -374,6 +383,29 @@ TEST(DocumentModel, CancelDuringBuildReleasesDocument) {
     EXPECT_EQ(result.error().code, steplens::ErrorCode::Cancelled);
     EXPECT_EQ(documentCount(), before);
     EXPECT_TRUE(sink.cancelFrozen());
+}
+
+TEST(DocumentModel, HeldReferenceDoesNotSettleUntilLastDrop) {
+    const int before = documentCount();
+    auto doc = newDocument();
+    auto shapes = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
+    shapes->AddShape(BRepPrimAPI_MakeBox(1.0, 1.0, 1.0).Shape(), false);
+    steplens::ProgressSink sink;
+    sink.reset(1);
+    auto model = requireModel(steplens::model::DocumentModel::build(
+        loadedFrom(std::move(doc), 1.0, "AP214"), sink, steplens::CancelToken{}));
+    ASSERT_TRUE(model);
+    auto held = model;
+
+    steplens::model::retireDocument(model);
+    model.reset();
+    EXPECT_FALSE(steplens::model::waitForDocumentRelease(std::chrono::milliseconds(80)));
+    EXPECT_GT(steplens::model::documentsPendingRelease(), 0);
+    EXPECT_NE(documentCount(), before);
+
+    held.reset();
+    ASSERT_TRUE(steplens::model::waitForDocumentRelease(std::chrono::seconds(30)));
+    EXPECT_EQ(documentCount(), before);
 }
 
 TEST(DocumentModel, StepRoundTripKeepsInstanceCount) {
@@ -420,7 +452,7 @@ TEST(DocumentModel, StepRoundTripKeepsInstanceCount) {
     EXPECT_EQ(model->nodeCount(), 3u);
     EXPECT_GT(model->lengthUnitToMm(), 0.0);
     model.reset();
-    EXPECT_EQ(documentCount(), before);
+    expectDocumentsReleased(before);
 }
 
 TEST(DocumentModel, SampleStepCountsWhenPresent) {
@@ -475,5 +507,5 @@ TEST(DocumentModel, SampleStepCountsWhenPresent) {
     EXPECT_EQ(assemblyModel->prototypes().size(), 5u);
     EXPECT_EQ(instances, 18u);
     assemblyModel.reset();
-    EXPECT_EQ(documentCount(), before);
+    expectDocumentsReleased(before);
 }
