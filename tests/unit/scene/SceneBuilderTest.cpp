@@ -333,6 +333,74 @@ TEST(SceneBuilder, IgesSingleRootMapsAllPrototypesToRoot) {
     EXPECT_EQ(documentCount(), before);
 }
 
+TEST(SceneBuilder, IgesRootHideBeforeEnqueueKeepsLaterObjectsHidden) {
+    const int before = documentCount();
+    steplens::test::TempDir dir;
+    const auto path = dir.path() / "two-boxes.iges";
+    IGESControl_Writer writer;
+    ASSERT_TRUE(writer.AddShape(boxAt(0.0, 0.0, 0.0)));
+    ASSERT_TRUE(writer.AddShape(boxAt(40.0, 0.0, 0.0)));
+    ASSERT_TRUE(writer.Write(steplens::io::detail::pathUtf8(path).c_str(), false));
+
+    steplens::ProgressSink sink;
+    sink.reset(static_cast<std::uint64_t>(std::filesystem::file_size(path)));
+    auto loader = steplens::io::makeLoader(path);
+    ASSERT_TRUE(loader);
+    auto loaded = loader->load(path, {}, sink, steplens::CancelToken{});
+    ASSERT_TRUE(loaded.ok()) << loaded.error().message;
+    EXPECT_EQ(loaded.value().schema, "IGES");
+    auto model = requireModel(
+        steplens::model::DocumentModel::build(std::move(loaded.value()), sink, steplens::CancelToken{}));
+    ASSERT_TRUE(model);
+    ASSERT_EQ(model->nodeCount(), 1u);
+    EXPECT_EQ(model->node(0).children.size(), 0u);
+    EXPECT_EQ(model->node(0).prototype, steplens::model::kNoPrototype);
+    ASSERT_GE(model->prototypes().size(), 2u);
+    for (const auto& prototype : model->prototypes()) {
+        const auto leaves = model->leafNodesOf(prototype.id);
+        ASSERT_EQ(leaves.size(), 1u);
+        EXPECT_EQ(leaves.front(), 0u);
+    }
+
+    auto batches = tessellate(*model);
+    ASSERT_EQ(batches.size(), model->prototypes().size());
+    auto context = contextOrEmpty();
+    ASSERT_FALSE(context.IsNull());
+    steplens::scene::SceneBuilder builder(context);
+    builder.reset(model);
+    ASSERT_TRUE(builder.objectsOf(0).empty());
+    builder.setNodeVisible(0, false);
+
+    std::vector<opencascade::handle<AIS_InteractiveObject>> objects;
+    for (auto& batch : batches) {
+        builder.enqueue(std::move(batch));
+        int pumps = 0;
+        std::int64_t maxStallUs = 0;
+        drain(builder, pumps, maxStallUs);
+        ASSERT_FALSE(builder.failed()) << builder.lastError();
+        objects = builder.objectsOf(0);
+        ASSERT_FALSE(objects.empty());
+        for (const auto& object : objects) {
+            EXPECT_FALSE(context->IsDisplayed(object)) << "materialized object must stay hidden";
+            EXPECT_EQ(builder.nodeOf(object), 0u);
+        }
+    }
+    ASSERT_EQ(objects.size(), model->prototypes().size());
+    ASSERT_GE(objects.size(), 2u);
+
+    builder.setNodeVisible(0, true);
+    for (const auto& object : objects) {
+        EXPECT_TRUE(context->IsDisplayed(object));
+        EXPECT_EQ(builder.nodeOf(object), 0u);
+    }
+    EXPECT_EQ(builder.objectOf(0), objects.front());
+
+    builder.reset(nullptr);
+    model.reset();
+    EXPECT_TRUE(steplens::model::waitForDocumentRelease(std::chrono::seconds(30)));
+    EXPECT_EQ(documentCount(), before);
+}
+
 TEST(SceneBuilder, SamePrototypeIsPresentedOnceAndPickReturnsInstance) {
     const int before = documentCount();
     auto doc = newDocument();
