@@ -4,6 +4,7 @@
 
 #include <QImage>
 #include <QOpenGLWidget>
+#include <QPointF>
 #include <QString>
 #include <QStringList>
 #include <QWidget>
@@ -57,6 +58,7 @@ public:
     void setStandardView(StandardView view);
     void redraw();
     [[nodiscard]] bool showingModel() const;
+    [[nodiscard]] std::shared_ptr<const model::DocumentModel> document() const;
     [[nodiscard]] SceneHost& sceneHost();
     [[nodiscard]] QImage grabView();
     void highlightNode(model::NodeId id);
@@ -104,6 +106,7 @@ private:
 
     struct State;
     std::unique_ptr<State> m_state;
+    QPointF m_leftPressPosition;
 };
 
 } // namespace steplens

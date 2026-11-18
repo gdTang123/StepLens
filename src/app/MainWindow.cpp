@@ -321,7 +321,8 @@ void MainWindow::refreshUi() {
     }
     m_pipeline->tick();
     if (m_treePanel != nullptr) {
-        const auto current = m_pipeline->currentModel();
+        const auto published = m_pipeline->currentModel();
+        const auto current = published ? published : m_viewer->document();
         if (current != m_treeDocument) {
             m_treeDocument = current;
             m_treePanel->setDocument(current);

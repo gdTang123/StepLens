@@ -5,7 +5,9 @@
 #include "ui/AssemblyTreeModel.h"
 
 #include <QAbstractItemModelTester>
+#include <QCoreApplication>
 #include <QElapsedTimer>
+#include <QSignalSpy>
 
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <TCollection_ExtendedString.hxx>
@@ -21,6 +23,14 @@
 namespace {
 
 using namespace steplens;
+
+void ensureApplication() {
+    static int argc = 1;
+    static char name[] = "AssemblyTreeModelTest";
+    static char* argv[] = {name, nullptr};
+    static QCoreApplication application(argc, argv);
+    (void)application;
+}
 
 std::shared_ptr<const model::DocumentModel> buildModel(std::size_t instanceCount, bool withAssembly = true) {
     opencascade::handle<TDocStd_Document> document;
@@ -59,10 +69,11 @@ void visit(const ui::AssemblyTreeModel& tree, const QModelIndex& parent, std::ve
 } // namespace
 
 TEST(AssemblyTreeModel, HierarchyNamesVisibilityAndNodeMapping) {
+    ensureApplication();
     const auto document = buildModel(2);
     ASSERT_TRUE(document);
     ui::AssemblyTreeModel tree;
-    QAbstractItemModelTester tester(&tree, QAbstractItemModelTester::FailureReportingMode::QtTest);
+    QAbstractItemModelTester tester(&tree, QAbstractItemModelTester::FailureReportingMode::Fatal);
     tree.setDocument(document);
 
     const QModelIndex root = tree.index(0, 0);
@@ -76,28 +87,37 @@ TEST(AssemblyTreeModel, HierarchyNamesVisibilityAndNodeMapping) {
     EXPECT_EQ(tree.indexOf(static_cast<model::NodeId>(unnamed.internalId())), unnamed);
     EXPECT_EQ(tree.parent(unnamed), root);
 
+    QSignalSpy visibilitySpy(&tree, &ui::AssemblyTreeModel::visibilityChanged);
     ASSERT_TRUE(tree.setData(root, Qt::Unchecked, Qt::CheckStateRole));
     EXPECT_EQ(tree.data(named, Qt::CheckStateRole).toInt(), Qt::Unchecked);
     EXPECT_EQ(tree.data(unnamed, Qt::CheckStateRole).toInt(), Qt::Unchecked);
+    bool childReportedHidden = false;
+    for (const auto& emission : visibilitySpy) {
+        if (emission.at(0).value<model::NodeId>() == static_cast<model::NodeId>(named.internalId()))
+            childReportedHidden = !emission.at(1).toBool();
+    }
+    EXPECT_TRUE(childReportedHidden);
     ASSERT_TRUE(tree.setData(root, Qt::Checked, Qt::CheckStateRole));
     EXPECT_EQ(tree.data(named, Qt::CheckStateRole).toInt(), Qt::Checked);
 }
 
 TEST(AssemblyTreeModel, UnstructuredDocumentIsOneRoot) {
+    ensureApplication();
     const auto document = buildModel(0, false);
     ASSERT_TRUE(document);
     ui::AssemblyTreeModel tree;
-    QAbstractItemModelTester tester(&tree, QAbstractItemModelTester::FailureReportingMode::QtTest);
+    QAbstractItemModelTester tester(&tree, QAbstractItemModelTester::FailureReportingMode::Fatal);
     tree.setDocument(document);
     EXPECT_EQ(tree.rowCount(), 1);
     EXPECT_EQ(tree.rowCount(tree.index(0, 0)), 0);
 }
 
 TEST(AssemblyTreeModel, TwoThousandNodesExpandAndMapWithinBudget) {
+    ensureApplication();
     const auto document = buildModel(1999);
     ASSERT_TRUE(document);
     ui::AssemblyTreeModel tree;
-    QAbstractItemModelTester tester(&tree, QAbstractItemModelTester::FailureReportingMode::QtTest);
+    QAbstractItemModelTester tester(&tree, QAbstractItemModelTester::FailureReportingMode::Fatal);
     QElapsedTimer timer;
     timer.start();
     tree.setDocument(document);

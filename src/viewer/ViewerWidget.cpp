@@ -9,6 +9,7 @@
 #include <QDebug>
 #include <QDragEnterEvent>
 #include <QDropEvent>
+#include <QLineF>
 #include <QMimeData>
 #include <QMouseEvent>
 #include <QOpenGLContext>
@@ -201,6 +202,10 @@ public:
             return 0;
         }
         return m_builder->pending();
+    }
+
+    [[nodiscard]] std::shared_ptr<const model::DocumentModel> document() const {
+        return m_builder ? m_builder->document() : nullptr;
     }
 
     void highlightNode(model::NodeId id) {
@@ -502,12 +507,20 @@ void ViewerWidget::setNodeVisible(model::NodeId id, bool visible) {
         host->setNodeVisible(id, visible);
 }
 
+std::shared_ptr<const model::DocumentModel> ViewerWidget::document() const {
+    if (const auto* host = dynamic_cast<const ViewerSceneHost*>(m_state->scene.get()))
+        return host->document();
+    return nullptr;
+}
+
 void ViewerWidget::mousePressEvent(QMouseEvent* event) {
 #if STEPLENS_USE_WNT_WINDOW
     QWidget::mousePressEvent(event);
 #else
     QOpenGLWidget::mousePressEvent(event);
 #endif
+    if (event->button() == Qt::LeftButton)
+        m_leftPressPosition = event->position();
     if (!m_state->paintReady) {
         return;
     }
@@ -532,7 +545,8 @@ void ViewerWidget::mouseReleaseEvent(QMouseEvent* event) {
                                           mouseModifiers(event->modifiers()), false)) {
         update();
     }
-    if (event->button() == Qt::LeftButton && !m_state->context.IsNull() && !m_state->view.IsNull()) {
+    if (event->button() == Qt::LeftButton && QLineF(m_leftPressPosition, event->position()).length() <= 6.0 &&
+        !m_state->context.IsNull() && !m_state->view.IsNull()) {
         m_state->context->MoveTo(point.x(), point.y(), m_state->view, false);
         m_state->context->SelectDetected();
         if (auto* host = dynamic_cast<ViewerSceneHost*>(m_state->scene.get())) {
