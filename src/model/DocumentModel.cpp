@@ -25,6 +25,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdio>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -37,9 +38,22 @@ namespace steplens::model {
 namespace {
 
 std::atomic<bool> g_failNextControlBlock{false};
+std::atomic<bool> g_controlBlockAllocatorFailed{false};
 
 std::atomic<bool> g_failNextClose{false};
 std::atomic<bool> g_lastCloseFailed{false};
+std::atomic<std::uint64_t> g_closeFailureCount{0};
+
+template <class T> struct FailingControlBlockAllocator {
+    using value_type = T;
+    FailingControlBlockAllocator() noexcept = default;
+    template <class U> FailingControlBlockAllocator(const FailingControlBlockAllocator<U>&) noexcept {}
+    T* allocate(std::size_t) {
+        g_controlBlockAllocatorFailed.store(true, std::memory_order_release);
+        throw std::bad_alloc{};
+    }
+    void deallocate(T*, std::size_t) noexcept {}
+};
 
 // 8.0 弃用了 TDF_LabelSequence 这个名字。7.9.3 里它就是这个序列。
 using LabelSequence = NCollection_Sequence<TDF_Label>;
@@ -118,9 +132,36 @@ void closeDocument(opencascade::handle<TDocStd_Document>& doc) noexcept {
             XCAFApp_Application::GetApplication()->Close(doc);
             g_lastCloseFailed.store(false, std::memory_order_release);
         }
-    } catch (...) {
-        // pending 归零只表示释放任务结束。Close 抛错时 Application 仍可能登记该文档。
+    } catch (const std::exception& error) {
+        // OCCT V7_8_1 TDocStd_Application::Close 先清 Owner、BeforeClose，再经
+        // CDF_Application::Close 执行 myDirectory->Remove 和 aDocument->Close()。
+        // 若异常发生在真正 Close 前，文档仍登记在 myDirectory（NbDocuments 是其 Length）。
+        // Nullify 只丢本地 handle，Application 仍持有会话登记：这是进程内泄漏，同一
+        // Application 的其它文档仍共用它；只在进程退出（或 quick_exit 放弃析构）时
+        // 由 OS/静态 Handle 回收。本轮不二次 Close，因 OCCT Close 异常安全性未知。
+        g_closeFailureCount.fetch_add(1, std::memory_order_acq_rel);
         g_lastCloseFailed.store(true, std::memory_order_release);
+        try {
+            const std::string message = std::string("XCAF document Close failed: ") + error.what();
+            Log::error(message);
+            if (!Log::ready()) {
+                std::fprintf(stderr, "%s\n", message.c_str());
+            }
+        } catch (...) {
+            std::fputs("XCAF document Close failed (diagnostic unavailable)\n", stderr);
+        }
+    } catch (...) {
+        g_closeFailureCount.fetch_add(1, std::memory_order_acq_rel);
+        g_lastCloseFailed.store(true, std::memory_order_release);
+        try {
+            constexpr char message[] = "XCAF document Close failed (unknown exception)";
+            Log::error(message);
+            if (!Log::ready()) {
+                std::fputs("XCAF document Close failed (unknown exception)\n", stderr);
+            }
+        } catch (...) {
+            std::fputs("XCAF document Close failed (diagnostic unavailable)\n", stderr);
+        }
     }
     doc.Nullify();
 }
@@ -776,8 +817,19 @@ bool lastDocumentCloseFailed() noexcept {
     return g_lastCloseFailed.load(std::memory_order_acquire);
 }
 
+std::uint64_t documentCloseFailureCount() noexcept {
+    return g_closeFailureCount.load(std::memory_order_acquire);
+}
+
 void failNextDocumentControlBlockForTesting(bool fail) noexcept {
+    if (fail) {
+        g_controlBlockAllocatorFailed.store(false, std::memory_order_release);
+    }
     g_failNextControlBlock.store(fail, std::memory_order_release);
+}
+
+bool lastDocumentControlBlockAllocatorFailed() noexcept {
+    return g_controlBlockAllocatorFailed.load(std::memory_order_acquire);
 }
 
 DocumentModel::DocumentModel(BuildKey, opencascade::handle<TDocStd_Document> doc, double lengthUnitToMm)
@@ -811,12 +863,14 @@ DocumentModel::build(io::LoadedDocument document, ProgressSink& progress, const 
             }
             auto* raw = new DocumentModel(BuildKey{}, owner.get(), unit);
             owner.detach();
-            if (g_failNextControlBlock.exchange(false, std::memory_order_acq_rel)) {
-                destroyDocumentModel(raw);
-                throw std::bad_alloc{};
-            }
-            std::shared_ptr<const DocumentModel> model{
-                raw, [](const DocumentModel* p) noexcept { destroyDocumentModel(p); }};
+            const auto deleter = [](const DocumentModel* p) noexcept { destroyDocumentModel(p); };
+            std::shared_ptr<const DocumentModel> model = [&] {
+                if (g_failNextControlBlock.exchange(false, std::memory_order_acq_rel)) {
+                    return std::shared_ptr<const DocumentModel>(
+                        raw, deleter, FailingControlBlockAllocator<const DocumentModel>{});
+                }
+                return std::shared_ptr<const DocumentModel>(raw, deleter);
+            }();
             auto* mutableModel = const_cast<DocumentModel*>(model.get());
             mutableModel->m_nodes = std::move(built.nodes);
             mutableModel->m_prototypes = std::move(built.prototypes);

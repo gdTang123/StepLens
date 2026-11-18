@@ -4,6 +4,7 @@
 // Retirer 在进程退出时继续接收尾投递，等所有模型 Close 完成后再退出。快退不改，也不声称 Close 已完成。
 
 #include <chrono>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <thread>
@@ -17,12 +18,16 @@ void handoffDocument(std::shared_ptr<const DocumentModel> model) noexcept;
 void destroyDocumentModel(const DocumentModel* model) noexcept;
 void noteDocumentConstructed() noexcept;
 
-// 测试缝：仅影响下一次模型交接，在 owner.detach() 后模拟控制块分配失败。
+// 测试缝：仅影响下一次模型交接，在 owner.detach() 后用局部失败 allocator 走三参数 shared_ptr。
 void failNextDocumentControlBlockForTesting(bool fail) noexcept;
+// 最近一次控制块失败是否进入了局部 allocator::allocate（真实标准库路径）。
+[[nodiscard]] bool lastDocumentControlBlockAllocatorFailed() noexcept;
 // 测试缝：在真实 XCAF Close 调用前注入异常；析构仍会完成清理。
 void failNextDocumentCloseForTesting(bool fail) noexcept;
 // 只报告最近一次 XCAF Close 是否失败；pending 归零仅说明释放任务结束，不代表 Close 成功。
 [[nodiscard]] bool lastDocumentCloseFailed() noexcept;
+// 进程内累计 Close 失败次数，只增不减；测试应比较调用前后的差值。
+[[nodiscard]] std::uint64_t documentCloseFailureCount() noexcept;
 
 [[nodiscard]] int documentsPendingRelease() noexcept;
 

@@ -1,4 +1,6 @@
+#include "../core/TempDir.h"
 #include "core/CancelToken.h"
+#include "core/Log.h"
 #include "core/OcctLoadContract.h"
 #include "core/ProgressSink.h"
 #include "io/ILoader.h"
@@ -10,10 +12,14 @@
 #include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
 
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <fstream>
 #include <gtest/gtest.h>
 #include <mutex>
+#include <thread>
+#include <vector>
 
 #if defined(_WIN32)
 #include <Windows.h>
@@ -86,11 +92,21 @@ TEST(DocumentRelease, ControlBlockFailureAfterDetachUsesDeleterOnce) {
     EXPECT_EQ(documentCount(), countBefore);
     EXPECT_EQ(probeCount, 1);
     EXPECT_NE(destroyed, caller);
+    EXPECT_TRUE(model::lastDocumentControlBlockAllocatorFailed());
     model::setDocumentReleaseProbe({});
 }
 
 TEST(DocumentRelease, CloseFailureIsReportedAndReleaseStillSettles) {
     ASSERT_TRUE(model::waitForDocumentRelease(std::chrono::seconds(30)));
+    steplens::test::TempDir logDir;
+    ASSERT_TRUE(steplens::Log::initialize(logDir.path()));
+    struct LogGuard {
+        ~LogGuard() {
+            steplens::Log::shutdown();
+        }
+    } logGuard;
+    const auto failuresBefore = model::documentCloseFailureCount();
+    const int documentsBefore = documentCount();
     auto docModel = makeModel();
     ASSERT_TRUE(docModel);
     const auto caller = std::this_thread::get_id();
@@ -105,9 +121,22 @@ TEST(DocumentRelease, CloseFailureIsReportedAndReleaseStillSettles) {
     EXPECT_TRUE(model::waitForDocumentRelease(std::chrono::seconds(30)));
     EXPECT_EQ(model::documentsPendingRelease(), 0);
     EXPECT_TRUE(model::lastDocumentCloseFailed());
+    EXPECT_EQ(model::documentCloseFailureCount(), failuresBefore + 1);
+    EXPECT_EQ(documentCount(), documentsBefore + 1);
     EXPECT_EQ(probeCount, 1);
     EXPECT_NE(destroyed, caller);
-    // Close 未执行成功时 NbDocuments 可能不回落；不得把 pending=0 当成 Close 成功。
+    auto nextModel = makeModel();
+    ASSERT_TRUE(nextModel);
+    nextModel.reset();
+    EXPECT_TRUE(model::waitForDocumentRelease(std::chrono::seconds(30)));
+    EXPECT_FALSE(model::lastDocumentCloseFailed());
+    EXPECT_EQ(model::documentCloseFailureCount(), failuresBefore + 1);
+    EXPECT_EQ(model::documentsPendingRelease(), 0);
+    EXPECT_EQ(documentCount(), documentsBefore + 1);
+    steplens::Log::shutdown();
+    std::ifstream logFile(logDir.path() / "steplens.log");
+    const std::string logged((std::istreambuf_iterator<char>(logFile)), std::istreambuf_iterator<char>());
+    EXPECT_NE(logged.find("XCAF document Close failed"), std::string::npos) << logged;
     model::setDocumentReleaseProbe({});
 }
 
@@ -182,6 +211,47 @@ TEST(DocumentRelease, LastUnretiredReferenceIsReleasedOffCallerThread) {
     docModel.reset();
     EXPECT_TRUE(model::waitForDocumentRelease(std::chrono::seconds(30)));
     EXPECT_NE(destroyed, caller);
+    model::setDocumentReleaseProbe({});
+}
+
+TEST(DocumentRelease, ConcurrentLastReferencesDrainOffCallerThreads) {
+    ASSERT_TRUE(model::waitForDocumentRelease(std::chrono::seconds(30)));
+    const int baselineDocuments = documentCount();
+    constexpr int threadCount = 8;
+    constexpr int modelsPerThread = 4;
+    constexpr int totalModels = threadCount * modelsPerThread;
+    std::atomic<int> probeCount{0};
+    std::atomic<bool> allBackground{true};
+    const auto caller = std::this_thread::get_id();
+    model::setDocumentReleaseProbe([&](std::thread::id id) {
+        if (id == caller) {
+            allBackground.store(false, std::memory_order_relaxed);
+        }
+        probeCount.fetch_add(1, std::memory_order_relaxed);
+    });
+    std::vector<std::shared_ptr<const steplens::model::DocumentModel>> models;
+    models.reserve(totalModels);
+    for (int i = 0; i < totalModels; ++i) {
+        auto item = makeModel();
+        ASSERT_TRUE(item);
+        models.push_back(std::move(item));
+    }
+    std::vector<std::thread> workers;
+    for (int thread = 0; thread < threadCount; ++thread) {
+        workers.emplace_back([&, thread] {
+            for (int index = thread; index < totalModels; index += threadCount) {
+                models[index].reset();
+            }
+        });
+    }
+    for (auto& worker : workers) {
+        worker.join();
+    }
+    EXPECT_TRUE(model::waitForDocumentRelease(std::chrono::seconds(30)));
+    EXPECT_EQ(probeCount.load(), totalModels);
+    EXPECT_TRUE(allBackground.load());
+    EXPECT_EQ(model::documentsPendingRelease(), 0);
+    EXPECT_EQ(documentCount(), baselineDocuments);
     model::setDocumentReleaseProbe({});
 }
 
