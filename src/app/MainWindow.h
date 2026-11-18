@@ -1,5 +1,7 @@
 #pragma once
 
+#include "app/StatusNotice.h"
+
 #include <QMainWindow>
 #include <QString>
 
@@ -56,7 +58,7 @@ private:
     QLabel* m_hint = nullptr;
     QLabel* m_fileLabel = nullptr;
     QString m_dumpDir;
-    QString m_memoryNotice;
+    StatusNotice m_memoryNotice;
     bool m_recentFileRecorded = false;
     bool m_overlayShotSaved = false;
     bool m_modelShotSaved = false;

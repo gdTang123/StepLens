@@ -37,14 +37,16 @@ public:
     [[nodiscard]] MeshSettings mesh() const;
     [[nodiscard]] MemorySettings memory() const;
     [[nodiscard]] QStringList recentFiles() const;
-    void addRecentFile(const QString& path);
+    [[nodiscard]] bool addRecentFile(const QString& path);
     [[nodiscard]] QString fileName() const;
     [[nodiscard]] QSettings::Format format() const;
     static Settings& instance();
 
 private:
     void initialize(const QString& executableDirectory, const QString& fallbackRoot);
+    bool saveWithFallback();
     std::unique_ptr<QSettings> m_ini;
+    QString m_fallbackPath;
 };
 
 } // namespace steplens

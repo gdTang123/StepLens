@@ -3,7 +3,9 @@ qt_add_executable(StepLens
     settings/Settings.h
     settings/Settings.cpp
     MainWindow.h
-    MainWindow.cpp)
+    MainWindow.cpp
+    StatusNotice.h
+    StatusNotice.cpp)
 
 target_link_libraries(StepLens PRIVATE
     steplens::core

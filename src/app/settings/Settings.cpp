@@ -4,6 +4,7 @@
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QFileInfo>
 #include <QStandardPaths>
 #include <QTemporaryFile>
 
@@ -58,6 +59,7 @@ Settings::Settings(const QString& executableDirectory, const QString& fallbackRo
 
 void Settings::initialize(const QString& executableDirectory, const QString& fallbackRoot) {
     const QString fallbackDirectory = absoluteFallbackDirectory(fallbackRoot);
+    m_fallbackPath = QDir(fallbackDirectory).filePath(QStringLiteral("StepLens.ini"));
     QString path;
     if (writableDirectory(executableDirectory)) {
         path = QDir(executableDirectory).filePath(QStringLiteral("StepLens.ini"));
@@ -67,10 +69,9 @@ void Settings::initialize(const QString& executableDirectory, const QString& fal
     }
     // IniFormat with an explicit file path: never NativeFormat, never the Windows registry.
     m_ini = openSettings(path);
-    const QString fallbackPath = QDir(fallbackDirectory).filePath(QStringLiteral("StepLens.ini"));
-    if (m_ini->status() != QSettings::NoError && path != fallbackPath) {
+    if (m_ini->status() != QSettings::NoError && path != m_fallbackPath) {
         QDir().mkpath(fallbackDirectory);
-        m_ini = openSettings(fallbackPath);
+        m_ini = openSettings(m_fallbackPath);
     }
 }
 
@@ -106,14 +107,32 @@ QStringList Settings::recentFiles() const {
     return m_ini->value("recentFiles").toStringList();
 }
 
-void Settings::addRecentFile(const QString& path) {
+bool Settings::addRecentFile(const QString& path) {
     QStringList files = recentFiles();
     files.removeAll(path);
     files.prepend(path);
     while (files.size() > 10)
         files.removeLast();
     m_ini->setValue("recentFiles", files);
+    return saveWithFallback();
+}
+
+bool Settings::saveWithFallback() {
     m_ini->sync();
+    if (m_ini->status() == QSettings::NoError)
+        return true;
+
+    const QStringList keys = m_ini->allKeys();
+    QVariantMap values;
+    for (const QString& key : keys)
+        values.insert(key, m_ini->value(key));
+
+    QDir().mkpath(QFileInfo(m_fallbackPath).absolutePath());
+    m_ini = std::make_unique<QSettings>(m_fallbackPath, QSettings::IniFormat);
+    for (auto it = values.cbegin(); it != values.cend(); ++it)
+        m_ini->setValue(it.key(), it.value());
+    m_ini->sync();
+    return m_ini->status() == QSettings::NoError;
 }
 
 QString Settings::fileName() const {

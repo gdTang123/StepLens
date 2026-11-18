@@ -172,9 +172,6 @@ if(NOT STEPLENS_CORE_ONLY)
     # mesh 公开链 TKV3d（FillTriangles），不链 vis，所以 TKOpenGl 仍然进不来。
     target_link_libraries(steplens_tests PRIVATE steplens::occtsupport steplens::mesh)
     target_link_libraries(steplens_tests PRIVATE Qt6::Core)
-    if(WIN32)
-        target_link_libraries(steplens_tests PRIVATE advapi32)
-    endif()
     target_compile_definitions(steplens_tests PRIVATE "STEPLENS_EXPECTED_OCCT=\"${STEPLENS_EXPECTED_OCCT}\"")
 
     # 场景测试单独成可执行文件：它要链 TKOpenGl，不能并进上面这份。
