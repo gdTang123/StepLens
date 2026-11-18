@@ -362,8 +362,8 @@ void MainWindow::refreshUi() {
     }
     m_pipeline->tick();
     if (m_treePanel != nullptr) {
-        const auto published = m_pipeline->currentModel();
-        const auto current = published ? published : m_viewer->document();
+        // currentModel 是待交付邮箱，adopt 前读它会把 B 的树接到仍是 A 的视口。
+        const auto current = m_viewer->document();
         if (current != m_treeDocument) {
             m_treeDocument = current;
             m_treePanel->setDocument(current);

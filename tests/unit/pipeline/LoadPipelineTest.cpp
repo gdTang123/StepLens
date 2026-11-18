@@ -348,6 +348,48 @@ TEST(LoadPipeline, CancelNewLoadBeforeAdoptKeepsPreviousModel) {
     EXPECT_EQ(pipeline.snapshot().activity, steplens::LoadActivity::Ready);
 }
 
+TEST(LoadPipeline, CurrentModelMailboxIsNotAdoptedDisplay) {
+    steplens::test::TempDir dir;
+    const std::filesystem::path fileA = dir.path() / "a.step";
+    const std::filesystem::path fileB = dir.path() / "b.step";
+    ASSERT_TRUE(writeBoxStep(fileA));
+    ASSERT_TRUE(writeBoxStep(fileB));
+
+    RecordingHost host(std::this_thread::get_id());
+    steplens::LoadPipeline pipeline(host);
+    pipeline.open(fileA);
+    ASSERT_TRUE(driveUntil(
+        pipeline,
+        [](const steplens::LoadPipeline::Snapshot& shot) {
+            return shot.activity == steplens::LoadActivity::Ready;
+        },
+        std::chrono::seconds(60)));
+    const auto displayedA = host.document();
+    ASSERT_NE(displayedA, nullptr);
+    const int resets = host.resets();
+
+    pipeline.open(fileB);
+    std::shared_ptr<const steplens::model::DocumentModel> publishedB;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+    while (std::chrono::steady_clock::now() < deadline) {
+        publishedB = pipeline.currentModel();
+        if (publishedB && publishedB != displayedA) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    ASSERT_NE(publishedB, nullptr);
+    EXPECT_NE(publishedB, displayedA);
+    EXPECT_EQ(host.resets(), resets);
+    EXPECT_EQ(host.document(), displayedA);
+    EXPECT_NE(publishedB, host.document());
+
+    pipeline.cancel();
+    ASSERT_TRUE(pipeline.waitUntilSettled(std::chrono::seconds(30)));
+    pipeline.tick();
+    EXPECT_EQ(host.document(), displayedA);
+}
+
 TEST(LoadPipeline, CancelAfterNewModelAdoptedClearsDisplay) {
     steplens::test::TempDir dir;
     const std::filesystem::path fileA = dir.path() / "a.step";
