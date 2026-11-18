@@ -1568,21 +1568,21 @@ TEST(TestEnvRestore, WindowsThreeStateExplicitRestore) {
 TEST(TestEnvRestore, WindowsThreeStateScopeEarlyReturn) {
     const char* name = "STEPLENS_TEST_ENV_RESTORE_SCOPE";
     SetEnvironmentVariableA(name, nullptr);
-    [] {
+    [name] {
         TestEnvRestore restore(name, "tmp-unset");
         return;
     }();
     expectWin32EnvUnset(name);
 
     ASSERT_TRUE(SetEnvironmentVariableA(name, ""));
-    [] {
+    [name] {
         TestEnvRestore restore(name, "tmp-empty");
         return;
     }();
     expectWin32EnvPresentEmpty(name);
 
     ASSERT_TRUE(SetEnvironmentVariableA(name, "kept-value"));
-    [] {
+    [name] {
         TestEnvRestore restore(name, "tmp-value");
         return;
     }();
