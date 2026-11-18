@@ -495,13 +495,17 @@ QImage ViewerWidget::grabView() {
 }
 
 void ViewerWidget::highlightNode(model::NodeId id) {
-    if (auto* host = dynamic_cast<ViewerSceneHost*>(m_state->scene.get()))
+    if (auto* host = dynamic_cast<ViewerSceneHost*>(m_state->scene.get())) {
         host->highlightNode(id);
+        redraw();
+    }
 }
 
 void ViewerWidget::setNodeVisible(model::NodeId id, bool visible) {
-    if (auto* host = dynamic_cast<ViewerSceneHost*>(m_state->scene.get()))
+    if (auto* host = dynamic_cast<ViewerSceneHost*>(m_state->scene.get())) {
         host->setNodeVisible(id, visible);
+        redraw();
+    }
 }
 
 std::shared_ptr<const model::DocumentModel> ViewerWidget::document() const {
