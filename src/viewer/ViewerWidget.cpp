@@ -9,7 +9,6 @@
 #include <QDebug>
 #include <QDragEnterEvent>
 #include <QDropEvent>
-#include <QLineF>
 #include <QMimeData>
 #include <QMouseEvent>
 #include <QOpenGLContext>
@@ -521,7 +520,7 @@ void ViewerWidget::mousePressEvent(QMouseEvent* event) {
     QOpenGLWidget::mousePressEvent(event);
 #endif
     if (event->button() == Qt::LeftButton)
-        m_leftPressPosition = event->position();
+        m_clickGesture.press(event->position().x(), event->position().y());
     if (!m_state->paintReady) {
         return;
     }
@@ -546,8 +545,9 @@ void ViewerWidget::mouseReleaseEvent(QMouseEvent* event) {
                                           mouseModifiers(event->modifiers()), false)) {
         update();
     }
-    if (event->button() == Qt::LeftButton && QLineF(m_leftPressPosition, event->position()).length() <= 6.0 &&
-        !m_state->context.IsNull() && !m_state->view.IsNull()) {
+    if (event->button() == Qt::LeftButton &&
+        m_clickGesture.isClick(event->position().x(), event->position().y()) && !m_state->context.IsNull() &&
+        !m_state->view.IsNull()) {
         m_state->context->MoveTo(point.x(), point.y(), m_state->view, false);
         m_state->context->SelectDetected();
         if (auto* host = dynamic_cast<ViewerSceneHost*>(m_state->scene.get())) {
@@ -563,6 +563,8 @@ void ViewerWidget::mouseMoveEvent(QMouseEvent* event) {
 #else
     QOpenGLWidget::mouseMoveEvent(event);
 #endif
+    if (event->buttons().testFlag(Qt::LeftButton))
+        m_clickGesture.move(event->position().x(), event->position().y());
     if (!m_state->paintReady) {
         return;
     }

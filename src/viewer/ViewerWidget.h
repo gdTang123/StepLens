@@ -1,10 +1,10 @@
 #pragma once
 
 #include "model/DocumentModel.h"
+#include "viewer/ClickGesture.h"
 
 #include <QImage>
 #include <QOpenGLWidget>
-#include <QPointF>
 #include <QString>
 #include <QStringList>
 #include <QWidget>
@@ -106,7 +106,7 @@ private:
 
     struct State;
     std::unique_ptr<State> m_state;
-    QPointF m_leftPressPosition;
+    viewer::ClickGesture m_clickGesture;
 };
 
 } // namespace steplens
