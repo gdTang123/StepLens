@@ -2,6 +2,7 @@
 steplens_add_module(core
     Version.cpp
     AppPaths.cpp
+    MemoryMonitor.cpp
     ProgressSink.cpp
     LoadSession.cpp
     LoadCoordinator.cpp
@@ -19,8 +20,9 @@ steplens_add_module(core
     TaskScheduler.h
     Log.h
     CrashDump.h
-    AppPaths.h)
+    AppPaths.h
+    MemoryMonitor.h)
 
 if(WIN32)
-    target_link_libraries(steplens_core PRIVATE dbghelp shell32 ole32)
+    target_link_libraries(steplens_core PRIVATE dbghelp shell32 ole32 psapi)
 endif()
