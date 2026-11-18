@@ -1,5 +1,16 @@
 # 无头契约测试单独成可执行文件，带 occt-contract 标签。完整 MSVC 构建仍把同一份源码编进 steplens_tests。
 
+# 非 MSVC 宿主：给 OcctBoundary.h 的 _WIN32 声明做全局 struct 标签兼容编译。
+# 不是 <eh.h> / MSVC ABI 证明，见 SehTranslatorGlobalTagCheck.cpp 文件头的受控边界。
+if(NOT MSVC AND TARGET steplens_occtboundary)
+    add_library(steplens_seh_translator_global_tag_check OBJECT occt/SehTranslatorGlobalTagCheck.cpp)
+    target_include_directories(steplens_seh_translator_global_tag_check PRIVATE "${CMAKE_SOURCE_DIR}/src")
+    target_compile_definitions(steplens_seh_translator_global_tag_check PRIVATE _WIN32)
+    target_compile_features(steplens_seh_translator_global_tag_check PRIVATE cxx_std_20)
+    steplens_apply_warnings(steplens_seh_translator_global_tag_check)
+    set_target_properties(steplens_seh_translator_global_tag_check PROPERTIES FOLDER "tests")
+endif()
+
 # steplens-bench 的 CLI 合同。可执行文件在 tools/bench，这里只跑它。
 # gtest_discover_tests 由调用方在 include(GoogleTest) 之后执行。
 function(steplens_add_bench_cli_test)

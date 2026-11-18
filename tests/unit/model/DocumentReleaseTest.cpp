@@ -30,6 +30,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 #if defined(_WIN32)
@@ -739,6 +740,11 @@ struct FpSehSnapshot {
 
 #if defined(_WIN32)
 void sehSentinel(unsigned, struct _EXCEPTION_POINTERS*) {}
+static_assert(std::is_same_v<_se_translator_function, steplens::occt::OcctBoundary::SehTranslatorForTesting>);
+static_assert(
+    std::is_convertible_v<decltype(&sehSentinel), steplens::occt::OcctBoundary::SehTranslatorForTesting>);
+static_assert(std::is_convertible_v<void (*)(unsigned, struct ::_EXCEPTION_POINTERS*),
+                                    steplens::occt::OcctBoundary::SehTranslatorForTesting>);
 #endif
 
 FpSehSnapshot captureFpSeh() {
@@ -750,9 +756,9 @@ FpSehSnapshot captureFpSeh() {
     snap.hasMxcsr = true;
 #endif
     auto noop = [](unsigned, struct _EXCEPTION_POINTERS*) {};
-    const auto previous = _set_se_translator(noop);
+    const auto previous = steplens::occt::OcctBoundary::exchangeSehTranslatorForTesting(noop);
     snap.translator = previous;
-    _set_se_translator(previous);
+    steplens::occt::OcctBoundary::exchangeSehTranslatorForTesting(previous);
 #else
     snap.round = fegetround();
     static_cast<void>(fegetenv(&snap.env));
@@ -803,7 +809,7 @@ void forceNonDefaultFp() {
     mxcsr = (mxcsr & ~kMxcsrStatus) | 0x20u;
     _mm_setcsr(mxcsr);
 #endif
-    _set_se_translator(sehSentinel);
+    steplens::occt::OcctBoundary::exchangeSehTranslatorForTesting(sehSentinel);
 #else
     static_cast<void>(fesetround(FE_DOWNWARD));
     feclearexcept(FE_ALL_EXCEPT);

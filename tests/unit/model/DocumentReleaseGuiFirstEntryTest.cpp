@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <gtest/gtest.h>
 #include <string>
+#include <type_traits>
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -40,6 +41,11 @@ constexpr unsigned kMxcsrFtz = 0x8000u;
 constexpr unsigned kMxcsrPromised = kMxcsrStatus | kMxcsrDaz | kMxcsrMask | kMxcsrRc | kMxcsrFtz;
 
 void sehSentinel(unsigned, struct _EXCEPTION_POINTERS*) {}
+static_assert(std::is_same_v<_se_translator_function, steplens::occt::OcctBoundary::SehTranslatorForTesting>);
+static_assert(
+    std::is_convertible_v<decltype(&sehSentinel), steplens::occt::OcctBoundary::SehTranslatorForTesting>);
+static_assert(std::is_convertible_v<void (*)(unsigned, struct ::_EXCEPTION_POINTERS*),
+                                    steplens::occt::OcctBoundary::SehTranslatorForTesting>);
 #endif
 
 int runGuiFirstEntry() {
@@ -68,7 +74,7 @@ int runGuiFirstEntry() {
     std::fprintf(stderr, "gui-first-before control=0x%08x mxcsr=0x%08x\n", expectedControl, expectedMxcsr);
     std::fflush(stderr);
     auto noop = [](unsigned, struct _EXCEPTION_POINTERS*) {};
-    const auto previous = _set_se_translator(sehSentinel);
+    const auto previous = steplens::occt::OcctBoundary::exchangeSehTranslatorForTesting(sehSentinel);
     static_cast<void>(previous);
     if (!steplens::model::waitForDocumentRelease(std::chrono::seconds(10))) {
         return 8;
@@ -88,8 +94,8 @@ int runGuiFirstEntry() {
     if ((afterMxcsr & kMxcsrPromised) != (expectedMxcsr & kMxcsrPromised)) {
         return 15;
     }
-    const auto translator = _set_se_translator(noop);
-    _set_se_translator(translator);
+    const auto translator = steplens::occt::OcctBoundary::exchangeSehTranslatorForTesting(noop);
+    steplens::occt::OcctBoundary::exchangeSehTranslatorForTesting(translator);
     if (translator != sehSentinel) {
         return 16;
     }
