@@ -16,15 +16,25 @@
 #include <XCAFDoc_ShapeTool.hxx>
 
 #include <atomic>
+#include <cfenv>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
+
+#if defined(_WIN32)
+#include <eh.h>
+#include <float.h>
+#if defined(_M_X64) || defined(__x86_64__)
+#include <xmmintrin.h>
+#endif
+#endif
 
 #if defined(_WIN32)
 #include <Windows.h>
@@ -698,4 +708,380 @@ TEST(DocumentRelease, DelayedFinalReferenceDropIsDrained) {
     delayedDrop.join();
     EXPECT_TRUE(model::waitForDocumentRelease(std::chrono::seconds(30)));
     EXPECT_EQ(model::documentsPendingRelease(), 0);
+}
+
+namespace {
+
+#if defined(_WIN32) && (defined(_M_X64) || defined(__x86_64__))
+constexpr unsigned kMxcsrStatus = 0x003Fu;
+constexpr unsigned kMxcsrDaz = 0x0040u;
+constexpr unsigned kMxcsrMask = 0x1F80u;
+constexpr unsigned kMxcsrRc = 0x6000u;
+constexpr unsigned kMxcsrFtz = 0x8000u;
+constexpr unsigned kMxcsrPromised = kMxcsrStatus | kMxcsrDaz | kMxcsrMask | kMxcsrRc | kMxcsrFtz;
+#endif
+
+struct FpSehSnapshot {
+#if defined(_WIN32)
+    unsigned int control = 0;
+    unsigned int mxcsr = 0;
+    bool hasMxcsr = false;
+    _se_translator_function translator = nullptr;
+#else
+    fenv_t env{};
+    int round = 0;
+#endif
+};
+
+#if defined(_WIN32)
+void sehSentinel(unsigned, struct _EXCEPTION_POINTERS*) {}
+#endif
+
+FpSehSnapshot captureFpSeh() {
+    FpSehSnapshot snap;
+#if defined(_WIN32)
+    _controlfp_s(&snap.control, 0, 0);
+#if defined(_M_X64) || defined(__x86_64__)
+    snap.mxcsr = _mm_getcsr();
+    snap.hasMxcsr = true;
+#endif
+    auto noop = [](unsigned, struct _EXCEPTION_POINTERS*) {};
+    const auto previous = _set_se_translator(noop);
+    snap.translator = previous;
+    _set_se_translator(previous);
+#else
+    snap.round = fegetround();
+    static_cast<void>(fegetenv(&snap.env));
+#endif
+    return snap;
+}
+
+bool promisedFpEqual(const FpSehSnapshot& a, const FpSehSnapshot& b) {
+#if defined(_WIN32)
+    const unsigned legal = _MCW_EM | _MCW_RC | _MCW_DN;
+    if ((a.control & legal) != (b.control & legal)) {
+        return false;
+    }
+    if (a.hasMxcsr != b.hasMxcsr) {
+        return false;
+    }
+#if defined(_M_X64) || defined(__x86_64__)
+    if (a.hasMxcsr && (a.mxcsr & kMxcsrPromised) != (b.mxcsr & kMxcsrPromised)) {
+        return false;
+    }
+#endif
+    return a.translator == b.translator;
+#else
+    return a.round == b.round;
+#endif
+}
+
+void forceNonDefaultFp() {
+#if defined(_WIN32)
+    unsigned int ignored = 0;
+    _controlfp_s(&ignored, _RC_DOWN, _MCW_RC);
+#if defined(_M_X64) || defined(__x86_64__)
+    unsigned int mxcsr = _mm_getcsr();
+    mxcsr |= kMxcsrDaz | kMxcsrFtz;
+    mxcsr = (mxcsr & ~kMxcsrRc) | 0x2000u;
+    mxcsr &= ~kMxcsrStatus;
+    _mm_setcsr(mxcsr);
+#endif
+    _set_se_translator(sehSentinel);
+#else
+    static_cast<void>(fesetround(FE_DOWNWARD));
+    feclearexcept(FE_ALL_EXCEPT);
+#endif
+}
+
+bool roundingStillDownward() {
+#if defined(_WIN32)
+    unsigned int control = 0;
+    _controlfp_s(&control, 0, 0);
+    return (control & _MCW_RC) == _RC_DOWN;
+#else
+    return fegetround() == FE_DOWNWARD;
+#endif
+}
+
+int runFirstEntryFpChild(const char* mode) {
+    forceNonDefaultFp();
+    const auto expected = captureFpSeh();
+    if (!roundingStillDownward()) {
+        return 6;
+    }
+    if (!model::waitForDocumentRelease(std::chrono::seconds(10))) {
+        return 8;
+    }
+    if (steplens::occt::OcctBoundary::armCountOnThisThread() < 1) {
+        return 9;
+    }
+    if (!promisedFpEqual(captureFpSeh(), expected)) {
+        return 11;
+    }
+    static_cast<void>(mode);
+    return 0;
+}
+
+} // namespace
+
+// 验证非 worker 的进程主线程首次入口会恢复调用者 FP 政策。
+// 这不是 QApplication 线程，不能当作 GUI 首入已验证。GUI 首入仍待卫裁定与带 QApplication 的测试。
+TEST(DocumentRelease, FirstMainThreadEntryRestoresCallerFpPolicy) {
+    const char* childMark = std::getenv("STEPLENS_B2_FP_ENTRY");
+    if (childMark != nullptr && std::string(childMark) == "main") {
+        std::exit(runFirstEntryFpChild("main"));
+    }
+
+#if defined(_WIN32)
+    char module[MAX_PATH]{};
+    ASSERT_GT(GetModuleFileNameA(nullptr, module, MAX_PATH), 0u);
+    SetEnvironmentVariableA("STEPLENS_B2_FP_ENTRY", "main");
+    STARTUPINFOA startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    std::string command = std::string("\"") + module +
+                          "\" --gtest_filter=DocumentRelease.FirstMainThreadEntryRestoresCallerFpPolicy";
+    ASSERT_TRUE(CreateProcessA(nullptr, command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr,
+                               &startup, &process));
+    SetEnvironmentVariableA("STEPLENS_B2_FP_ENTRY", nullptr);
+    const DWORD waitResult = WaitForSingleObject(process.hProcess, 15000);
+    DWORD exitCode = 9;
+    if (waitResult == WAIT_TIMEOUT) {
+        TerminateProcess(process.hProcess, 9);
+        const DWORD reapResult = WaitForSingleObject(process.hProcess, 5000);
+        GetExitCodeProcess(process.hProcess, &exitCode);
+        EXPECT_EQ(reapResult, WAIT_OBJECT_0);
+    } else if (waitResult == WAIT_OBJECT_0) {
+        GetExitCodeProcess(process.hProcess, &exitCode);
+    }
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    EXPECT_EQ(waitResult, WAIT_OBJECT_0);
+    EXPECT_EQ(exitCode, 0u) << "main first-entry FP/SEH restore failed, code=" << exitCode;
+#else
+    const auto exePath = std::filesystem::read_symlink("/proc/self/exe");
+    const std::string exe = exePath.string();
+    setenv("STEPLENS_B2_FP_ENTRY", "main", 1);
+    const pid_t child = fork();
+    ASSERT_GE(child, 0);
+    if (child == 0) {
+        execl(exe.c_str(), exe.c_str(),
+              "--gtest_filter=DocumentRelease.FirstMainThreadEntryRestoresCallerFpPolicy", nullptr);
+        _exit(127);
+    }
+    unsetenv("STEPLENS_B2_FP_ENTRY");
+    int status = 0;
+    const pid_t waited = waitpid(child, &status, 0);
+    ASSERT_EQ(waited, child);
+    ASSERT_TRUE(WIFEXITED(status));
+    EXPECT_EQ(WEXITSTATUS(status), 0);
+#endif
+}
+
+// 普通 wait 线程首次入口。同样不是 QApplication/GUI 验证。
+TEST(DocumentRelease, FirstOrdinaryWaitThreadEntryRestoresCallerFpPolicy) {
+    const char* childMark = std::getenv("STEPLENS_B2_FP_ENTRY");
+    if (childMark != nullptr && std::string(childMark) == "waiter") {
+        int result = 4;
+        std::thread waiter([&] { result = runFirstEntryFpChild("waiter"); });
+        waiter.join();
+        std::exit(result);
+    }
+
+#if defined(_WIN32)
+    char module[MAX_PATH]{};
+    ASSERT_GT(GetModuleFileNameA(nullptr, module, MAX_PATH), 0u);
+    SetEnvironmentVariableA("STEPLENS_B2_FP_ENTRY", "waiter");
+    STARTUPINFOA startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    std::string command =
+        std::string("\"") + module +
+        "\" --gtest_filter=DocumentRelease.FirstOrdinaryWaitThreadEntryRestoresCallerFpPolicy";
+    ASSERT_TRUE(CreateProcessA(nullptr, command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr,
+                               &startup, &process));
+    SetEnvironmentVariableA("STEPLENS_B2_FP_ENTRY", nullptr);
+    const DWORD waitResult = WaitForSingleObject(process.hProcess, 15000);
+    DWORD exitCode = 9;
+    if (waitResult == WAIT_TIMEOUT) {
+        TerminateProcess(process.hProcess, 9);
+        const DWORD reapResult = WaitForSingleObject(process.hProcess, 5000);
+        GetExitCodeProcess(process.hProcess, &exitCode);
+        EXPECT_EQ(reapResult, WAIT_OBJECT_0);
+    } else if (waitResult == WAIT_OBJECT_0) {
+        GetExitCodeProcess(process.hProcess, &exitCode);
+    }
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    EXPECT_EQ(waitResult, WAIT_OBJECT_0);
+    EXPECT_EQ(exitCode, 0u) << "ordinary wait first-entry FP/SEH restore failed, code=" << exitCode;
+#else
+    const auto exePath = std::filesystem::read_symlink("/proc/self/exe");
+    const std::string exe = exePath.string();
+    setenv("STEPLENS_B2_FP_ENTRY", "waiter", 1);
+    const pid_t child = fork();
+    ASSERT_GE(child, 0);
+    if (child == 0) {
+        execl(exe.c_str(), exe.c_str(),
+              "--gtest_filter=DocumentRelease.FirstOrdinaryWaitThreadEntryRestoresCallerFpPolicy", nullptr);
+        _exit(127);
+    }
+    unsetenv("STEPLENS_B2_FP_ENTRY");
+    int status = 0;
+    const pid_t waited = waitpid(child, &status, 0);
+    ASSERT_EQ(waited, child);
+    ASSERT_TRUE(WIFEXITED(status));
+    EXPECT_EQ(WEXITSTATUS(status), 0);
+#endif
+}
+
+TEST(OcctBoundary, ScopedThreadSignalRestoresRoundingAfterException) {
+    forceNonDefaultFp();
+    const auto expected = captureFpSeh();
+    ASSERT_TRUE(roundingStillDownward());
+    try {
+        steplens::occt::OcctBoundary::ScopedThreadSignal primed;
+        throw 1;
+    } catch (int) {
+    }
+    EXPECT_TRUE(promisedFpEqual(captureFpSeh(), expected));
+    EXPECT_FALSE(steplens::occt::OcctBoundary::scopedThreadSignalRestoreFailed());
+}
+
+TEST(OcctBoundary, ScopedThreadSignalNestingRestoresOuterCallerState) {
+    forceNonDefaultFp();
+    const auto caller = captureFpSeh();
+    ASSERT_TRUE(roundingStillDownward());
+    {
+        steplens::occt::OcctBoundary::ScopedThreadSignal outer;
+        const auto inOuter = captureFpSeh();
+        {
+            steplens::occt::OcctBoundary::ScopedThreadSignal inner;
+        }
+        const auto afterInner = captureFpSeh();
+        EXPECT_TRUE(promisedFpEqual(afterInner, inOuter)) << "内层结束不得提前恢复到调用者状态";
+    }
+    EXPECT_TRUE(promisedFpEqual(captureFpSeh(), caller));
+    EXPECT_TRUE(roundingStillDownward());
+}
+
+TEST(OcctBoundary, ScopedThreadSignalStateIsPerThread) {
+    forceNonDefaultFp();
+    const auto caller = captureFpSeh();
+    int otherRound = 0;
+    bool otherOk = false;
+    std::thread worker([&] {
+#if !defined(_WIN32)
+        static_cast<void>(fesetround(FE_UPWARD));
+#else
+        unsigned int ignored = 0;
+        _controlfp_s(&ignored, _RC_UP, _MCW_RC);
+#endif
+        const auto expected = captureFpSeh();
+        {
+            steplens::occt::OcctBoundary::ScopedThreadSignal primed;
+        }
+        otherOk = promisedFpEqual(captureFpSeh(), expected);
+#if !defined(_WIN32)
+        otherRound = fegetround();
+#else
+        unsigned int control = 0;
+        _controlfp_s(&control, 0, 0);
+        otherRound = static_cast<int>(control & _MCW_RC);
+#endif
+    });
+    worker.join();
+    EXPECT_TRUE(otherOk);
+    EXPECT_TRUE(promisedFpEqual(captureFpSeh(), caller));
+#if !defined(_WIN32)
+    EXPECT_EQ(otherRound, FE_UPWARD);
+#else
+    EXPECT_EQ(otherRound, static_cast<int>(_RC_UP));
+#endif
+}
+
+TEST(OcctBoundary, SaveFailureDoesNotArmOrStartRetirer) {
+    const char* childMark = std::getenv("STEPLENS_B2_SAVE_FAIL");
+    if (childMark != nullptr && *childMark != '\0') {
+        steplens::occt::OcctBoundary::setScopedThreadSignalSaveHookForTesting([] { return false; });
+        try {
+            static_cast<void>(model::waitForDocumentRelease(std::chrono::seconds(5)));
+            std::exit(12);
+        } catch (const std::exception&) {
+            if (steplens::occt::OcctBoundary::armCountOnThisThread() != 0) {
+                std::exit(13);
+            }
+            if (steplens::occt::OcctBoundary::scopedThreadSignalRestoreFailed()) {
+                std::exit(14);
+            }
+            std::exit(0);
+        }
+    }
+#if defined(_WIN32)
+    char module[MAX_PATH]{};
+    ASSERT_GT(GetModuleFileNameA(nullptr, module, MAX_PATH), 0u);
+    SetEnvironmentVariableA("STEPLENS_B2_SAVE_FAIL", "1");
+    STARTUPINFOA startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    std::string command =
+        std::string("\"") + module + "\" --gtest_filter=OcctBoundary.SaveFailureDoesNotArmOrStartRetirer";
+    ASSERT_TRUE(CreateProcessA(nullptr, command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr,
+                               &startup, &process));
+    SetEnvironmentVariableA("STEPLENS_B2_SAVE_FAIL", nullptr);
+    const DWORD waitResult = WaitForSingleObject(process.hProcess, 15000);
+    DWORD exitCode = 9;
+    if (waitResult == WAIT_OBJECT_0) {
+        GetExitCodeProcess(process.hProcess, &exitCode);
+    }
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    EXPECT_EQ(waitResult, WAIT_OBJECT_0);
+    EXPECT_EQ(exitCode, 0u);
+#else
+    const auto exePath = std::filesystem::read_symlink("/proc/self/exe");
+    const std::string exe = exePath.string();
+    setenv("STEPLENS_B2_SAVE_FAIL", "1", 1);
+    const pid_t child = fork();
+    ASSERT_GE(child, 0);
+    if (child == 0) {
+        execl(exe.c_str(), exe.c_str(), "--gtest_filter=OcctBoundary.SaveFailureDoesNotArmOrStartRetirer",
+              nullptr);
+        _exit(127);
+    }
+    unsetenv("STEPLENS_B2_SAVE_FAIL");
+    int status = 0;
+    ASSERT_EQ(waitpid(child, &status, 0), child);
+    ASSERT_TRUE(WIFEXITED(status));
+    EXPECT_EQ(WEXITSTATUS(status), 0);
+#endif
+}
+
+TEST(OcctBoundary, ArmHookExceptionRollsBackCallerState) {
+    forceNonDefaultFp();
+    const auto expected = captureFpSeh();
+    steplens::occt::OcctBoundary::setScopedThreadSignalArmHookForTesting([] { throw 2; });
+    try {
+        steplens::occt::OcctBoundary::ScopedThreadSignal primed;
+        FAIL() << "arm hook should throw";
+    } catch (int value) {
+        EXPECT_EQ(value, 2);
+    }
+    steplens::occt::OcctBoundary::setScopedThreadSignalArmHookForTesting(nullptr);
+    EXPECT_TRUE(promisedFpEqual(captureFpSeh(), expected));
+    EXPECT_FALSE(steplens::occt::OcctBoundary::scopedThreadSignalRestoreFailed());
+}
+
+TEST(OcctBoundary, WorkerArmRemainsWithoutScopedRestore) {
+    forceNonDefaultFp();
+    const auto before = captureFpSeh();
+    steplens::occt::OcctBoundary::armWorkerThread();
+    const auto afterArm = captureFpSeh();
+    EXPECT_GE(steplens::occt::OcctBoundary::armCountOnThisThread(), 1);
+    // 永久 arm 不会自行回到调用者；若本平台 arm 改变了状态，该差异必须保持。
+    EXPECT_TRUE(promisedFpEqual(captureFpSeh(), afterArm));
+    if (!promisedFpEqual(afterArm, before)) {
+        EXPECT_FALSE(promisedFpEqual(captureFpSeh(), before));
+    }
 }

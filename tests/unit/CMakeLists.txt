@@ -141,7 +141,8 @@ if(STEPLENS_OCCT_CONTRACT)
     target_link_libraries(steplens_pipeline_tests PRIVATE steplens::pipeline GTest::gtest_main)
     target_compile_definitions(steplens_pipeline_tests PRIVATE
         "STEPLENS_EXPECTED_OCCT=\"${STEPLENS_EXPECTED_OCCT}\""
-        "STEPLENS_GIT_SHA=\"${STEPLENS_GIT_SHA}\"")
+        "STEPLENS_GIT_SHA=\"${STEPLENS_GIT_SHA}\""
+        "STEPLENS_BUILD_IDENTITY_FILE=\"${CMAKE_BINARY_DIR}/steplens-build-identity.txt\"")
     steplens_apply_warnings(steplens_pipeline_tests)
     steplens_apply_exceptions(steplens_pipeline_tests OFF)
     set_target_properties(steplens_pipeline_tests PROPERTIES FOLDER "tests")
@@ -151,6 +152,26 @@ if(STEPLENS_OCCT_CONTRACT)
             TIMEOUT 120
             LABELS "unit;occt-contract"
             ENVIRONMENT "ASAN_OPTIONS=halt_on_error=1:detect_leaks=0")
+
+    # QApplication 首入验证。Windows MSVC x64 上核完整 MXCSR/SEH；本机无 MSVC 时由目标 CI 跑。
+    find_package(Qt6 QUIET COMPONENTS Widgets)
+    if(TARGET Qt6::Widgets)
+        add_executable(steplens_gui_first_entry_tests model/DocumentReleaseGuiFirstEntryTest.cpp)
+        target_include_directories(steplens_gui_first_entry_tests PRIVATE "${CMAKE_SOURCE_DIR}/src")
+        target_link_libraries(steplens_gui_first_entry_tests PRIVATE
+            steplens::model
+            Qt6::Widgets
+            GTest::gtest_main)
+        steplens_apply_warnings(steplens_gui_first_entry_tests)
+        steplens_apply_exceptions(steplens_gui_first_entry_tests OFF)
+        set_target_properties(steplens_gui_first_entry_tests PROPERTIES FOLDER "tests")
+        gtest_discover_tests(steplens_gui_first_entry_tests
+            DISCOVERY_MODE PRE_TEST
+            PROPERTIES
+                LABELS "unit;gui-first-entry"
+                ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    endif()
+
     return()
 endif()
 
@@ -174,9 +195,10 @@ target_include_directories(steplens_tests PRIVATE "${CMAKE_SOURCE_DIR}/src")
 if(NOT STEPLENS_CORE_ONLY)
     add_executable(steplens_ui_tests
         ui/AssemblyTreeModelTest.cpp
-        ui/AssemblyTreeReleaseTest.cpp)
+        ui/AssemblyTreeReleaseTest.cpp
+        model/DocumentReleaseGuiFirstEntryTest.cpp)
     target_include_directories(steplens_ui_tests PRIVATE "${CMAKE_SOURCE_DIR}/src")
-    target_link_libraries(steplens_ui_tests PRIVATE steplens::ui Qt6::Test GTest::gtest_main)
+    target_link_libraries(steplens_ui_tests PRIVATE steplens::ui steplens::model Qt6::Widgets Qt6::Test GTest::gtest_main)
     steplens_apply_warnings(steplens_ui_tests)
     steplens_apply_exceptions(steplens_ui_tests OFF)
     set_target_properties(steplens_ui_tests PROPERTIES FOLDER "tests")
@@ -235,7 +257,8 @@ if(NOT STEPLENS_CORE_ONLY)
     target_link_libraries(steplens_pipeline_tests PRIVATE steplens::pipeline GTest::gtest_main)
     target_compile_definitions(steplens_pipeline_tests PRIVATE
         "STEPLENS_EXPECTED_OCCT=\"${STEPLENS_EXPECTED_OCCT}\""
-        "STEPLENS_GIT_SHA=\"${STEPLENS_GIT_SHA}\"")
+        "STEPLENS_GIT_SHA=\"${STEPLENS_GIT_SHA}\""
+        "STEPLENS_BUILD_IDENTITY_FILE=\"${CMAKE_BINARY_DIR}/steplens-build-identity.txt\"")
     if(TARGET StepLens)
         file(GENERATE
             OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/app_exit/$<CONFIG>/steplens_app_exe.h"

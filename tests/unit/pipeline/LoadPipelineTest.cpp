@@ -1,4 +1,5 @@
 #include "../core/TempDir.h"
+#include "core/LifecycleTrace.h"
 #include "core/OcctLoadContract.h"
 #include "model/DocumentRelease.h"
 #include "pipeline/LoadPipeline.h"
@@ -17,6 +18,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -27,11 +29,42 @@
 #include <string_view>
 #include <thread>
 
-bool lifecycleLogMatchesSha(const std::string& log, std::string_view sha) {
-    if (sha.empty() || sha == "unknown")
-        return false;
-    const std::string expected = std::string("event=lifecycle-open identity=") + std::string(sha) + " ";
-    return log.find(expected) != std::string::npos;
+// 产品 AppExit 与负验共用的验收：空日志、未知身份、或出现任何非本构建 SHA 的
+// lifecycle-open 都拒绝。不能只搜到当前 SHA 就放过夹带旧绿的文件。
+struct ProductLifecycleLogVerdict {
+    bool accepted = false;
+    const char* reason = "rejected";
+};
+
+ProductLifecycleLogVerdict acceptProductLifecycleLog(const std::string& log, std::string_view sha) {
+    if (sha.empty() || sha == "unknown") {
+        return {false, "build-sha-invalid"};
+    }
+    if (log.empty()) {
+        return {false, "log-empty"};
+    }
+    const std::string prefix = "event=lifecycle-open identity=";
+    bool sawExpected = false;
+    for (std::size_t pos = 0;;) {
+        pos = log.find(prefix, pos);
+        if (pos == std::string::npos) {
+            break;
+        }
+        const std::size_t start = pos + prefix.size();
+        const std::size_t end = log.find_first_of(" \n", start);
+        const std::string ident =
+            log.substr(start, end == std::string::npos ? std::string::npos : end - start);
+        if (ident == sha) {
+            sawExpected = true;
+        } else {
+            return {false, "foreign-lifecycle-open-identity"};
+        }
+        pos = start;
+    }
+    if (!sawExpected) {
+        return {false, "missing-build-sha"};
+    }
+    return {true, "accepted"};
 }
 
 TEST(AppExitLogBinding, RejectsPreexistingOldGreenLog) {
@@ -40,7 +73,303 @@ TEST(AppExitLogBinding, RejectsPreexistingOldGreenLog) {
     const std::string oldGreen = "1 tid=1 event=lifecycle-open identity=old-sha exit=0\n"
                                  "2 tid=1 event=main-normal-return identity=pending=0 exit=0\n"
                                  "3 tid=2 event=retirer-end identity=pending=0 live=0 inflight=0 exit=0\n";
-    ASSERT_FALSE(lifecycleLogMatchesSha(oldGreen, STEPLENS_GIT_SHA));
+    steplens::test::TempDir dir;
+    const auto planted = dir.path() / "preexisting-old-green.log";
+    {
+        std::ofstream out(planted, std::ios::binary | std::ios::trunc);
+        ASSERT_TRUE(static_cast<bool>(out));
+        out << oldGreen;
+        ASSERT_TRUE(static_cast<bool>(out));
+    }
+    std::ifstream in(planted, std::ios::binary);
+    const std::string leftover((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    // 预置旧绿文件且本次不写产品日志：不得把残留文件当成当前构建通过。
+    ASSERT_EQ(leftover, oldGreen);
+    const auto plantedVerdict = acceptProductLifecycleLog(leftover, STEPLENS_GIT_SHA);
+    ASSERT_FALSE(plantedVerdict.accepted);
+    EXPECT_STREQ(plantedVerdict.reason, "foreign-lifecycle-open-identity");
+    const auto mixed = leftover + "4 tid=1 event=lifecycle-open identity=" + STEPLENS_GIT_SHA + " exit=0\n";
+    const auto mixedVerdict = acceptProductLifecycleLog(mixed, STEPLENS_GIT_SHA);
+    ASSERT_FALSE(mixedVerdict.accepted) << "夹带旧绿不得因同时含当前 SHA 而通过";
+    EXPECT_STREQ(mixedVerdict.reason, "foreign-lifecycle-open-identity");
+}
+
+TEST(AppExitLogBinding, EmptyLogIsRejectedByTheSameAcceptanceFunction) {
+    const auto verdict = acceptProductLifecycleLog(std::string{}, STEPLENS_GIT_SHA);
+    ASSERT_FALSE(verdict.accepted);
+    EXPECT_STREQ(verdict.reason, "log-empty");
+}
+
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+#if !defined(_WIN32)
+#include <csignal>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
+
+namespace {
+struct HangChildBoot {
+    HangChildBoot() {
+        if (const char* exitMark = std::getenv("STEPLENS_E3_EXIT_CHILD");
+            exitMark != nullptr && *exitMark != '\0') {
+#if defined(_WIN32)
+            ExitProcess(static_cast<UINT>(std::atoi(exitMark)));
+#else
+            _exit(std::atoi(exitMark));
+#endif
+        }
+        const char* mark = std::getenv("STEPLENS_E3_HANG_CHILD");
+        if (mark == nullptr || *mark == '\0') {
+            return;
+        }
+#if defined(_WIN32)
+        Sleep(INFINITE);
+#else
+        for (;;) {
+            pause();
+        }
+#endif
+    }
+} g_hangChildBoot;
+} // namespace
+
+enum class ChildReapStatus { Exited, KilledAndReaped, AlreadyExited, NotReaped };
+
+struct ChildWaitOutcome {
+    ChildReapStatus status = ChildReapStatus::NotReaped;
+    int exitCode = 125;
+    int killStatus = -1;
+    bool reaped = false;
+};
+
+[[nodiscard]] int mapChildOutcome(const ChildWaitOutcome& outcome) {
+    switch (outcome.status) {
+    case ChildReapStatus::Exited:
+    case ChildReapStatus::AlreadyExited:
+        return outcome.exitCode;
+    case ChildReapStatus::KilledAndReaped:
+        return 124;
+    case ChildReapStatus::NotReaped:
+        return 125;
+    }
+    return 125;
+}
+
+[[nodiscard]] std::chrono::steady_clock::time_point runDeadlineOf(std::chrono::steady_clock::time_point start,
+                                                                  std::chrono::milliseconds budget) {
+    auto reserve = std::min(std::chrono::milliseconds{5000}, budget / 5);
+    if (reserve < std::chrono::milliseconds{250}) {
+        reserve = std::min(budget / 2, std::chrono::milliseconds{250});
+    }
+    if (reserve > budget) {
+        reserve = budget;
+    }
+    return start + (budget - reserve);
+}
+
+#if defined(_WIN32)
+[[nodiscard]] DWORD remainingMsUntil(std::chrono::steady_clock::time_point until) {
+    const auto left = until - std::chrono::steady_clock::now();
+    if (left <= std::chrono::steady_clock::duration::zero()) {
+        return 0;
+    }
+    return static_cast<DWORD>(std::chrono::duration_cast<std::chrono::milliseconds>(left).count());
+}
+
+using WindowsKillFn = std::function<BOOL(HANDLE)>;
+
+[[nodiscard]] ChildWaitOutcome waitBudgetedProcess(HANDLE process,
+                                                   std::chrono::steady_clock::time_point start,
+                                                   std::chrono::milliseconds budget,
+                                                   WindowsKillFn killFn = {}) {
+    const auto deadline = start + budget;
+    const auto runDeadline = runDeadlineOf(start, budget);
+    ChildWaitOutcome outcome;
+    auto takeExit = [&](ChildReapStatus status) {
+        DWORD code = 1;
+        GetExitCodeProcess(process, &code);
+        outcome.status = status;
+        outcome.reaped = true;
+        outcome.exitCode = static_cast<int>(code);
+        return outcome;
+    };
+    const DWORD waited = WaitForSingleObject(process, remainingMsUntil(runDeadline));
+    if (waited == WAIT_OBJECT_0) {
+        return takeExit(ChildReapStatus::Exited);
+    }
+    BOOL killed = FALSE;
+    if (killFn) {
+        killed = killFn(process);
+    } else {
+        killed = TerminateProcess(process, 1);
+    }
+    outcome.killStatus = killed ? 1 : 0;
+    const DWORD reap = WaitForSingleObject(process, remainingMsUntil(deadline));
+    if (reap == WAIT_OBJECT_0) {
+        return takeExit(killed ? ChildReapStatus::KilledAndReaped : ChildReapStatus::AlreadyExited);
+    }
+    outcome.status = ChildReapStatus::NotReaped;
+    outcome.reaped = false;
+    outcome.exitCode = 125;
+    return outcome;
+}
+
+void forceReapProcessFinite(HANDLE process, std::chrono::milliseconds cap) {
+    TerminateProcess(process, 1);
+    const auto deadline = std::chrono::steady_clock::now() + cap;
+    const DWORD reap = WaitForSingleObject(process, remainingMsUntil(deadline));
+    if (reap != WAIT_OBJECT_0) {
+        ADD_FAILURE() << "cleanup 有限等待仍未回收，不能声称无遗留";
+    }
+}
+#else
+using PosixKillFn = std::function<int(pid_t)>;
+
+[[nodiscard]] ChildWaitOutcome waitBudgetedPid(pid_t pid, std::chrono::steady_clock::time_point start,
+                                               std::chrono::milliseconds budget, PosixKillFn killFn = {}) {
+    const auto deadline = start + budget;
+    const auto runDeadline = runDeadlineOf(start, budget);
+    ChildWaitOutcome outcome;
+    int status = 0;
+    auto poll = [&] {
+        const pid_t done = waitpid(pid, &status, WNOHANG);
+        if (done < 0 && errno == EINTR) {
+            return pid_t{0};
+        }
+        return done;
+    };
+    auto takeExit = [&](ChildReapStatus st) {
+        outcome.status = st;
+        outcome.reaped = true;
+        if (WIFEXITED(status)) {
+            outcome.exitCode = WEXITSTATUS(status);
+        } else if (WIFSIGNALED(status)) {
+            outcome.exitCode = 128 + WTERMSIG(status);
+        } else {
+            outcome.exitCode = 1;
+        }
+        return outcome;
+    };
+    for (;;) {
+        const pid_t done = poll();
+        if (done == pid) {
+            return takeExit(ChildReapStatus::Exited);
+        }
+        if (done < 0 && errno == ECHILD) {
+            // POSIX ECHILD 只表示拿不到 status，不得合成产品成功 0。
+            outcome.status = ChildReapStatus::NotReaped;
+            outcome.reaped = false;
+            outcome.exitCode = 125;
+            return outcome;
+        }
+        if (std::chrono::steady_clock::now() >= runDeadline) {
+            break;
+        }
+        const auto slice = (runDeadline - std::chrono::steady_clock::now()) > std::chrono::milliseconds{20}
+                               ? std::chrono::milliseconds{20}
+                               : std::chrono::milliseconds{1};
+        std::this_thread::sleep_for(slice);
+    }
+    const int kr = killFn ? killFn(pid) : kill(pid, SIGKILL);
+    outcome.killStatus = (kr == 0) ? 1 : 0;
+    for (;;) {
+        const pid_t done = poll();
+        if (done == pid) {
+            return takeExit(outcome.killStatus == 1 ? ChildReapStatus::KilledAndReaped
+                                                    : ChildReapStatus::AlreadyExited);
+        }
+        if (done < 0 && errno == ECHILD) {
+            // POSIX ECHILD 只表示拿不到 status，不得合成产品成功 0。
+            outcome.status = ChildReapStatus::NotReaped;
+            outcome.reaped = false;
+            outcome.exitCode = 125;
+            return outcome;
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            outcome.status = ChildReapStatus::NotReaped;
+            outcome.reaped = false;
+            outcome.exitCode = 125;
+            return outcome;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    }
+}
+
+void forceReapPidFinite(pid_t pid, std::chrono::milliseconds cap) {
+    static_cast<void>(kill(pid, SIGKILL));
+    const auto deadline = std::chrono::steady_clock::now() + cap;
+    int status = 0;
+    while (std::chrono::steady_clock::now() <= deadline) {
+        const pid_t done = waitpid(pid, &status, WNOHANG);
+        if (done == pid || (done < 0 && errno == ECHILD)) {
+            return;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    }
+    ADD_FAILURE() << "cleanup 有限等待仍未回收 pid=" << pid << "，不能声称无遗留";
+}
+#endif
+
+TEST(AppExitLogBinding, ProductWritesCompileShaAndIgnoresInjectedEnv) {
+    ASSERT_FALSE(std::string_view{STEPLENS_GIT_SHA}.empty());
+    ASSERT_STRNE(STEPLENS_GIT_SHA, "unknown");
+    steplens::test::TempDir dir;
+    const auto path = dir.path() / "injected-env.log";
+#if defined(_WIN32)
+    SetEnvironmentVariableA("STEPLENS_LIFECYCLE_LOG", path.string().c_str());
+    SetEnvironmentVariableA("STEPLENS_LIFECYCLE_SHA", "injected-fake-sha");
+#else
+    setenv("STEPLENS_LIFECYCLE_LOG", path.string().c_str(), 1);
+    setenv("STEPLENS_LIFECYCLE_SHA", "injected-fake-sha", 1);
+#endif
+    steplens::initializeLifecycleTrace();
+#if defined(_WIN32)
+    SetEnvironmentVariableA("STEPLENS_LIFECYCLE_LOG", nullptr);
+    SetEnvironmentVariableA("STEPLENS_LIFECYCLE_SHA", nullptr);
+#else
+    unsetenv("STEPLENS_LIFECYCLE_LOG");
+    unsetenv("STEPLENS_LIFECYCLE_SHA");
+#endif
+    std::ifstream in(path, std::ios::binary);
+    ASSERT_TRUE(static_cast<bool>(in));
+    const std::string log((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    ASSERT_FALSE(log.empty()) << "产品未写出生命周期日志";
+    const auto verdict = acceptProductLifecycleLog(log, STEPLENS_GIT_SHA);
+    EXPECT_TRUE(verdict.accepted) << verdict.reason << "\n" << log;
+    EXPECT_EQ(log.find("identity=injected-fake-sha "), std::string::npos) << log;
+}
+
+TEST(AppExitLogBinding, CompileShaMatchesCMakeIdentityFile) {
+    ASSERT_FALSE(std::string_view{STEPLENS_GIT_SHA}.empty());
+    ASSERT_STRNE(STEPLENS_GIT_SHA, "unknown");
+#ifndef STEPLENS_BUILD_IDENTITY_FILE
+    FAIL() << "缺少 STEPLENS_BUILD_IDENTITY_FILE";
+#else
+    std::ifstream in(STEPLENS_BUILD_IDENTITY_FILE);
+    ASSERT_TRUE(static_cast<bool>(in)) << STEPLENS_BUILD_IDENTITY_FILE;
+    std::string line;
+    std::string fileSha;
+    std::string fileTree;
+    while (std::getline(in, line)) {
+        if (line.rfind("sha=", 0) == 0) {
+            fileSha = line.substr(4);
+        } else if (line.rfind("tree=", 0) == 0) {
+            fileTree = line.substr(5);
+        }
+    }
+    EXPECT_EQ(fileSha, STEPLENS_GIT_SHA);
+    EXPECT_EQ(fileSha.size(), 40u);
+    EXPECT_EQ(fileTree.size(), 40u);
+    EXPECT_NE(fileTree, "unknown");
+#endif
 }
 
 #if defined(STEPLENS_HAS_APP) && defined(_WIN32)
@@ -719,6 +1048,7 @@ void setEnvValue(const char* name, const std::string& value) {
 #endif
 }
 
+// timeout 只覆盖成功 spawn 之后的等待与有限回收，不含启动过程；spawn 失败返回 -1，另闸。
 int runProductApp(const std::filesystem::path& file, std::chrono::milliseconds timeout,
                   const AppSpawnOptions& options) {
     const auto restorePlatform = envOrEmpty("QT_QPA_PLATFORM");
@@ -737,7 +1067,7 @@ int runProductApp(const std::filesystem::path& file, std::chrono::milliseconds t
     setEnvValue("STEPLENS_RELEASE_DELAY_MS", {});
     setEnvValue("STEPLENS_HOLD_CLOSE_UNTIL_AFTER_WINDOW",
                 options.holdCloseUntilAfterWindow ? "1" : std::string{});
-    setEnvValue("STEPLENS_LIFECYCLE_SHA", STEPLENS_GIT_SHA);
+    setEnvValue("STEPLENS_LIFECYCLE_SHA", {});
     setEnvValue("STEPLENS_LIFECYCLE_LOG", options.lifecycleLog.string());
 #if defined(_WIN32)
     const std::wstring exe = std::filesystem::path(kStepLensExe).wstring();
@@ -763,18 +1093,14 @@ int runProductApp(const std::filesystem::path& file, std::chrono::milliseconds t
     if (created == 0) {
         return -1;
     }
-    const DWORD waited = WaitForSingleObject(process.hProcess, static_cast<DWORD>(timeout.count()));
-    DWORD code = 1;
-    if (waited == WAIT_OBJECT_0) {
-        GetExitCodeProcess(process.hProcess, &code);
-    } else {
-        TerminateProcess(process.hProcess, 1);
-        WaitForSingleObject(process.hProcess, INFINITE);
-        code = 124;
-    }
+    const auto started = std::chrono::steady_clock::now();
+    const auto outcome = waitBudgetedProcess(process.hProcess, started, timeout);
+    std::fprintf(stderr, "product-child status=%d reaped=%d kill=%d exit=%d\n",
+                 static_cast<int>(outcome.status), static_cast<int>(outcome.reaped), outcome.killStatus,
+                 outcome.exitCode);
     CloseHandle(process.hThread);
     CloseHandle(process.hProcess);
-    return static_cast<int>(code);
+    return mapChildOutcome(outcome);
 #else
     const std::string path = pathUtf8(file);
     const pid_t pid = fork();
@@ -802,29 +1128,12 @@ int runProductApp(const std::filesystem::path& file, std::chrono::milliseconds t
     setEnvValue("STEPLENS_HOLD_CLOSE_UNTIL_AFTER_WINDOW", restoreHeld);
     setEnvValue("STEPLENS_LIFECYCLE_SHA", restoreSha);
     setEnvValue("STEPLENS_LIFECYCLE_LOG", restoreLife);
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
-    int status = 0;
-    for (;;) {
-        const pid_t done = waitpid(pid, &status, WNOHANG);
-        if (done == pid) {
-            if (WIFEXITED(status)) {
-                return WEXITSTATUS(status);
-            }
-            return 128 + WTERMSIG(status);
-        }
-        if (std::chrono::steady_clock::now() >= deadline) {
-            kill(pid, SIGKILL);
-            pid_t reaped = -1;
-            do {
-                reaped = waitpid(pid, &status, 0);
-            } while (reaped < 0 && errno == EINTR);
-            if (reaped != pid && !(reaped < 0 && errno == ECHILD)) {
-                return 125;
-            }
-            return 124;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    }
+    const auto started = std::chrono::steady_clock::now();
+    const auto outcome = waitBudgetedPid(pid, started, timeout);
+    std::fprintf(stderr, "product-child status=%d reaped=%d kill=%d exit=%d\n",
+                 static_cast<int>(outcome.status), static_cast<int>(outcome.reaped), outcome.killStatus,
+                 outcome.exitCode);
+    return mapChildOutcome(outcome);
 #endif
 }
 
@@ -836,9 +1145,8 @@ int eventIdentityPos(const std::string& log, std::string_view event, std::string
 }
 
 void expectLifecycleIdentity(const std::string& log) {
-    EXPECT_TRUE(lifecycleLogMatchesSha(log, STEPLENS_GIT_SHA))
-        << "生命周期日志缺少本次构建 SHA 或 SHA 不符：" << STEPLENS_GIT_SHA << "\n"
-        << log;
+    const auto verdict = acceptProductLifecycleLog(log, STEPLENS_GIT_SHA);
+    EXPECT_TRUE(verdict.accepted) << verdict.reason << " 期望构建 SHA=" << STEPLENS_GIT_SHA << "\n" << log;
 }
 
 std::string readFileIfExists(const std::filesystem::path& path) {
@@ -869,7 +1177,18 @@ std::filesystem::path lifecycleLogFor(const char* name) {
     const std::string filename = std::string("lifecycle-") + STEPLENS_GIT_SHA + "-" + name + "-" +
                                  std::to_string(stamp) + "-" + std::to_string(nonce.fetch_add(1)) + ".log";
     const auto path = exeLogsDir() / filename;
-    std::ofstream fresh(path, std::ios::binary | std::ios::trunc);
+    {
+        std::ofstream fresh(path, std::ios::binary | std::ios::trunc);
+        if (!fresh) {
+            ADD_FAILURE() << "未能创建或截断独立生命周期日志：" << path;
+            return path;
+        }
+    }
+    std::error_code sizeError;
+    const auto size = std::filesystem::file_size(path, sizeError);
+    if (sizeError || size != 0) {
+        ADD_FAILURE() << "独立生命周期日志截断后仍非空或不存在：" << path;
+    }
     return path;
 }
 
@@ -1141,6 +1460,196 @@ TEST(AppExit, ViewerTreeNormalReturn) {
 }
 
 #endif
+
+#if defined(_WIN32)
+bool createSelfChild(const char* envName, const char* envValue, PROCESS_INFORMATION* process) {
+    SetEnvironmentVariableA(envName, envValue);
+    char module[MAX_PATH]{};
+    if (GetModuleFileNameA(nullptr, module, MAX_PATH) == 0) {
+        SetEnvironmentVariableA(envName, nullptr);
+        return false;
+    }
+    STARTUPINFOA startup{};
+    startup.cb = sizeof(startup);
+    startup.dwFlags = STARTF_USESHOWWINDOW;
+    startup.wShowWindow = SW_HIDE;
+    std::string command = std::string("\"") + module + "\"";
+    ZeroMemory(process, sizeof(*process));
+    const BOOL created = CreateProcessA(module, command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+                                        nullptr, nullptr, &startup, process);
+    SetEnvironmentVariableA(envName, nullptr);
+    return created != 0;
+}
+#endif
+
+TEST(AppExitTimeout, HangChildIsKilledAndReapedWithinBudget) {
+    const auto budget = std::chrono::milliseconds{2000};
+    const auto started = std::chrono::steady_clock::now();
+#if defined(_WIN32)
+    PROCESS_INFORMATION process{};
+    ASSERT_TRUE(createSelfChild("STEPLENS_E3_HANG_CHILD", "1", &process));
+    const auto outcome = waitBudgetedProcess(process.hProcess, started, budget);
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+#else
+    const pid_t pid = fork();
+    ASSERT_GE(pid, 0);
+    if (pid == 0) {
+        for (;;) {
+            pause();
+        }
+    }
+    const auto outcome = waitBudgetedPid(pid, started, budget);
+#endif
+    EXPECT_EQ(outcome.status, ChildReapStatus::KilledAndReaped);
+    EXPECT_TRUE(outcome.reaped);
+    EXPECT_EQ(outcome.killStatus, 1);
+    EXPECT_EQ(mapChildOutcome(outcome), 124);
+    EXPECT_LT(std::chrono::steady_clock::now() - started, budget + std::chrono::milliseconds{1000});
+}
+
+TEST(AppExitTimeout, AlreadyExitedChildReportsExitedAndIsReaped) {
+    const auto budget = std::chrono::milliseconds{2000};
+    const auto started = std::chrono::steady_clock::now();
+#if defined(_WIN32)
+    PROCESS_INFORMATION process{};
+    ASSERT_TRUE(createSelfChild("STEPLENS_E3_EXIT_CHILD", "7", &process));
+    const auto outcome = waitBudgetedProcess(process.hProcess, started, budget);
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    EXPECT_EQ(outcome.status, ChildReapStatus::Exited);
+    EXPECT_TRUE(outcome.reaped);
+    EXPECT_EQ(mapChildOutcome(outcome), 7);
+#else
+    const pid_t pid = fork();
+    ASSERT_GE(pid, 0);
+    if (pid == 0) {
+        _exit(7);
+    }
+    const auto outcome = waitBudgetedPid(pid, started, budget);
+    EXPECT_EQ(outcome.status, ChildReapStatus::Exited);
+    EXPECT_TRUE(outcome.reaped);
+    EXPECT_EQ(mapChildOutcome(outcome), 7);
+#endif
+}
+
+TEST(AppExitTimeout, TinyBudgetDoesNotBlockAndUnreapedIs125) {
+    const auto budget = std::chrono::milliseconds{1};
+    const auto started = std::chrono::steady_clock::now();
+#if defined(_WIN32)
+    PROCESS_INFORMATION process{};
+    ASSERT_TRUE(createSelfChild("STEPLENS_E3_HANG_CHILD", "1", &process));
+    const auto outcome = waitBudgetedProcess(process.hProcess, started, budget);
+    EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::milliseconds{1000});
+    if (!outcome.reaped) {
+        EXPECT_EQ(outcome.status, ChildReapStatus::NotReaped);
+        EXPECT_EQ(mapChildOutcome(outcome), 125);
+        forceReapProcessFinite(process.hProcess, std::chrono::milliseconds{2000});
+    } else {
+        EXPECT_TRUE(outcome.status == ChildReapStatus::KilledAndReaped ||
+                    outcome.status == ChildReapStatus::AlreadyExited);
+        EXPECT_NE(mapChildOutcome(outcome), 125);
+    }
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+#else
+    const pid_t pid = fork();
+    ASSERT_GE(pid, 0);
+    if (pid == 0) {
+        for (;;) {
+            pause();
+        }
+    }
+    const auto outcome = waitBudgetedPid(pid, started, budget);
+    EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::milliseconds{1000});
+    if (!outcome.reaped) {
+        EXPECT_EQ(outcome.status, ChildReapStatus::NotReaped);
+        EXPECT_EQ(mapChildOutcome(outcome), 125);
+        forceReapPidFinite(pid, std::chrono::milliseconds{2000});
+    } else {
+        EXPECT_TRUE(outcome.status == ChildReapStatus::KilledAndReaped ||
+                    outcome.status == ChildReapStatus::AlreadyExited);
+        EXPECT_NE(mapChildOutcome(outcome), 125);
+        // 已回收则不得再报 125，也不能把未回收说成无遗留。
+    }
+#endif
+}
+
+TEST(AppExitTimeout, KillFailureThenUnreapedIs125) {
+    const auto budget = std::chrono::milliseconds{400};
+    const auto started = std::chrono::steady_clock::now();
+#if defined(_WIN32)
+    PROCESS_INFORMATION process{};
+    ASSERT_TRUE(createSelfChild("STEPLENS_E3_HANG_CHILD", "1", &process));
+    const auto outcome =
+        waitBudgetedProcess(process.hProcess, started, budget, [](HANDLE) -> BOOL { return FALSE; });
+    EXPECT_EQ(outcome.killStatus, 0);
+    if (!outcome.reaped) {
+        EXPECT_EQ(outcome.status, ChildReapStatus::NotReaped);
+        EXPECT_EQ(mapChildOutcome(outcome), 125);
+        forceReapProcessFinite(process.hProcess, std::chrono::milliseconds{2000});
+    } else {
+        EXPECT_EQ(outcome.status, ChildReapStatus::AlreadyExited);
+        EXPECT_NE(mapChildOutcome(outcome), 125);
+    }
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+#else
+    const pid_t pid = fork();
+    ASSERT_GE(pid, 0);
+    if (pid == 0) {
+        for (;;) {
+            pause();
+        }
+    }
+    const auto outcome = waitBudgetedPid(pid, started, budget, [](pid_t) { return -1; });
+    EXPECT_EQ(outcome.killStatus, 0);
+    if (!outcome.reaped) {
+        EXPECT_EQ(outcome.status, ChildReapStatus::NotReaped);
+        EXPECT_EQ(mapChildOutcome(outcome), 125);
+        forceReapPidFinite(pid, std::chrono::milliseconds{2000});
+    } else {
+        EXPECT_EQ(outcome.status, ChildReapStatus::AlreadyExited);
+        EXPECT_NE(mapChildOutcome(outcome), 125);
+    }
+#endif
+}
+
+TEST(AppExitTimeout, PreReapedExit7DoesNotSynthesizeSuccess) {
+#if defined(_WIN32)
+    PROCESS_INFORMATION process{};
+    ASSERT_TRUE(createSelfChild("STEPLENS_E3_EXIT_CHILD", "7", &process));
+    ASSERT_EQ(WaitForSingleObject(process.hProcess, 5000), WAIT_OBJECT_0);
+    DWORD firstCode = 9;
+    GetExitCodeProcess(process.hProcess, &firstCode);
+    EXPECT_EQ(firstCode, 7u);
+    const auto started = std::chrono::steady_clock::now();
+    const auto outcome = waitBudgetedProcess(process.hProcess, started, std::chrono::milliseconds{2000});
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    // Windows 句柄在首次等待后仍可取出真实 exit 7，不得变成 0；也可用该真实码。
+    EXPECT_TRUE(outcome.reaped);
+    EXPECT_EQ(mapChildOutcome(outcome), 7);
+    EXPECT_NE(mapChildOutcome(outcome), 0);
+#else
+    const pid_t pid = fork();
+    ASSERT_GE(pid, 0);
+    if (pid == 0) {
+        _exit(7);
+    }
+    int status = 0;
+    ASSERT_EQ(waitpid(pid, &status, 0), pid);
+    ASSERT_TRUE(WIFEXITED(status));
+    ASSERT_EQ(WEXITSTATUS(status), 7);
+    const auto started = std::chrono::steady_clock::now();
+    const auto outcome = waitBudgetedPid(pid, started, std::chrono::milliseconds{2000});
+    EXPECT_FALSE(outcome.reaped);
+    EXPECT_EQ(outcome.status, ChildReapStatus::NotReaped);
+    EXPECT_EQ(mapChildOutcome(outcome), 125);
+    EXPECT_NE(mapChildOutcome(outcome), 0);
+    EXPECT_NE(mapChildOutcome(outcome), 7) << "status 已被先收割，helper 不得假装仍持有 exit 7 或成功 0";
+#endif
+}
 
 TEST(LoadPipeline, MissingFileDoesNotStartALoad) {
     RecordingHost host(std::this_thread::get_id());

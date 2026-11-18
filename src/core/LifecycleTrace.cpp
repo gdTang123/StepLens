@@ -49,10 +49,11 @@ void initializeLifecycleTrace() {
         trace.file = ::open(path, O_WRONLY | O_CREAT | O_APPEND, 0600);
 #endif
     }
-    const char* sha = std::getenv("STEPLENS_LIFECYCLE_SHA");
-    if (sha != nullptr && *sha != '\0') {
-        lifecycleTrace("lifecycle-open", sha);
-    }
+    // 身份是本二进制编译期 STEPLENS_GIT_SHA，禁止回显环境注入值。
+#ifndef STEPLENS_GIT_SHA
+#define STEPLENS_GIT_SHA "unknown"
+#endif
+    lifecycleTrace("lifecycle-open", STEPLENS_GIT_SHA);
 }
 
 void lifecycleTrace(std::string_view event, std::string_view identity, int exitCode) noexcept {

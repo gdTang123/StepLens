@@ -33,9 +33,10 @@ std::atomic<DocumentReleaseDependencyHook> g_beforeDependencyLockHook{nullptr};
 std::atomic<DocumentReleaseDependencyHook> g_afterDependencyLockHook{nullptr};
 
 void ensureReleaseDependencies() {
-    // 先设置当前实际调用线程的 OCCT 边界，再用生产路径共用的锁保护单例检查与赋值。
+    // 在实际 GetApplication 线程上短暂满足 OcctBoundary，返回前恢复调用者 FP/SEH。
+    // 再用生产路径共用的锁保护单例检查与赋值。
     // 首次 instance() 不得已持这把非递归锁：ctor/dtor 簿记与 Close 返回后才进 instance。
-    occt::OcctBoundary::armWorkerThread();
+    occt::OcctBoundary::ScopedThreadSignal primed;
     auto& xcafMutex = steplens::xcafDocumentMutex();
     if (auto hook = g_beforeDependencyLockHook.load(std::memory_order_acquire)) {
         hook();

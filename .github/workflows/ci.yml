@@ -333,7 +333,27 @@ jobs:
           if ($ctestText -match '\[  SKIPPED \]|No tests were found|Not Run') {
             throw "offscreen AppExit 被跳过或未发现，不能算成功"
           }
+          # 产品身份是编译期 STEPLENS_GIT_SHA（cmake 写入的构建身份），不是环境注入，也不写死 63e/7f4。
+          # 必须实际比较：cmake 身份 == 当前 checkout；合成 merge 的树 == 第二父（受审 HEAD）树。
           $sha = (git rev-parse HEAD).Trim()
+          $tree = (git rev-parse "HEAD^{tree}").Trim()
+          $parents = @(& git rev-parse "HEAD^@" 2>$null)
+          $idFile = Join-Path (Get-Location) "build\msvc\steplens-build-identity.txt"
+          if (-not (Test-Path -LiteralPath $idFile)) { throw "缺少构建身份文件 $idFile" }
+          $idText = Get-Content -LiteralPath $idFile -Raw
+          if ($idText -notmatch "(?m)^sha=([0-9a-f]{40})$") { throw "构建身份缺 sha: $idText" }
+          $cmakeSha = $Matches[1]
+          if ($idText -notmatch "(?m)^tree=([0-9a-f]{40})$") { throw "构建身份缺 tree: $idText" }
+          $cmakeTree = $Matches[1]
+          Write-Host "ci_identity checkout_head=$sha checkout_tree=$tree cmake_sha=$cmakeSha cmake_tree=$cmakeTree parent_count=$($parents.Count) parents=$($parents -join ' ') github_sha=$env:GITHUB_SHA"
+          if ($cmakeSha -ne $sha) { throw "CMake 编译 SHA $cmakeSha 与当前 checkout $sha 不一致（过期重配/未重配）" }
+          if ($cmakeTree -ne $tree) { throw "CMake 编译 tree $cmakeTree 与当前 checkout tree $tree 不一致" }
+          if ($parents.Count -ge 2) {
+            $second = (git rev-parse "HEAD^2").Trim()
+            $secondTree = (git rev-parse "HEAD^2^{tree}").Trim()
+            Write-Host "ci_identity synthetic_merge=1 second_parent=$second second_parent_tree=$secondTree trees_equal=$($tree -eq $secondTree)"
+            if ($tree -ne $secondTree) { throw "合成 merge 树 $tree 与第二父（受审 HEAD）树 $secondTree 不同，不能把本次身份写成受审提交" }
+          }
           $lifeFiles = @(Get-ChildItem -LiteralPath $lifeDir -Filter "lifecycle-$sha-*.log" -File)
           if ($lifeFiles.Count -lt 3) { throw "本轮 offscreen 生命周期日志不足 3 份（SHA $sha）" }
           foreach ($lifeFile in $lifeFiles) {
@@ -375,7 +395,27 @@ jobs:
           if ($ctestText -match '\[  SKIPPED \]|No tests were found|Not Run') {
             throw "Viewer AppExit 被跳过或未发现，不能算成功"
           }
+          # 产品身份是编译期 STEPLENS_GIT_SHA（cmake 写入的构建身份），不是环境注入，也不写死 63e/7f4。
+          # 必须实际比较：cmake 身份 == 当前 checkout；合成 merge 的树 == 第二父（受审 HEAD）树。
           $sha = (git rev-parse HEAD).Trim()
+          $tree = (git rev-parse "HEAD^{tree}").Trim()
+          $parents = @(& git rev-parse "HEAD^@" 2>$null)
+          $idFile = Join-Path (Get-Location) "build\msvc\steplens-build-identity.txt"
+          if (-not (Test-Path -LiteralPath $idFile)) { throw "缺少构建身份文件 $idFile" }
+          $idText = Get-Content -LiteralPath $idFile -Raw
+          if ($idText -notmatch "(?m)^sha=([0-9a-f]{40})$") { throw "构建身份缺 sha: $idText" }
+          $cmakeSha = $Matches[1]
+          if ($idText -notmatch "(?m)^tree=([0-9a-f]{40})$") { throw "构建身份缺 tree: $idText" }
+          $cmakeTree = $Matches[1]
+          Write-Host "ci_identity checkout_head=$sha checkout_tree=$tree cmake_sha=$cmakeSha cmake_tree=$cmakeTree parent_count=$($parents.Count) parents=$($parents -join ' ') github_sha=$env:GITHUB_SHA"
+          if ($cmakeSha -ne $sha) { throw "CMake 编译 SHA $cmakeSha 与当前 checkout $sha 不一致（过期重配/未重配）" }
+          if ($cmakeTree -ne $tree) { throw "CMake 编译 tree $cmakeTree 与当前 checkout tree $tree 不一致" }
+          if ($parents.Count -ge 2) {
+            $second = (git rev-parse "HEAD^2").Trim()
+            $secondTree = (git rev-parse "HEAD^2^{tree}").Trim()
+            Write-Host "ci_identity synthetic_merge=1 second_parent=$second second_parent_tree=$secondTree trees_equal=$($tree -eq $secondTree)"
+            if ($tree -ne $secondTree) { throw "合成 merge 树 $tree 与第二父（受审 HEAD）树 $secondTree 不同，不能把本次身份写成受审提交" }
+          }
           $lifeFiles = @(Get-ChildItem -LiteralPath $lifeDir -Filter "lifecycle-$sha-*.log" -File)
           if ($lifeFiles.Count -lt 3) { throw "本轮 Viewer/tree 生命周期日志不足 3 份（SHA $sha）" }
           foreach ($lifeFile in $lifeFiles) {
