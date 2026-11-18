@@ -35,10 +35,24 @@ TraceState& state() {
 } // namespace
 
 void initializeLifecycleTrace() {
+#if defined(_WIN32)
+    const DWORD pathSize = GetEnvironmentVariableA("STEPLENS_LIFECYCLE_LOG", nullptr, 0);
+    if (pathSize == 0) {
+        return;
+    }
+    std::string pathBuffer(static_cast<size_t>(pathSize) + 1, '\0');
+    const DWORD pathLength = GetEnvironmentVariableA("STEPLENS_LIFECYCLE_LOG", pathBuffer.data(),
+                                                     static_cast<DWORD>(pathBuffer.size()));
+    if (pathLength == 0 || pathLength >= pathBuffer.size()) {
+        return;
+    }
+    const char* path = pathBuffer.c_str();
+#else
     const char* path = std::getenv("STEPLENS_LIFECYCLE_LOG");
     if (path == nullptr || *path == '\0') {
         return;
     }
+#endif
     auto& trace = state();
     {
         std::lock_guard lock(trace.mutex);
