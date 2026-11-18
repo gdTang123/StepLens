@@ -93,6 +93,40 @@ inline void testChildHangForever() {
 #endif
 }
 
+#if defined(_WIN32)
+inline bool readWin32Environment(const char* name, bool* present, std::string* value) noexcept {
+    *present = false;
+    value->clear();
+    DWORD cap = 256;
+    std::string buf;
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        buf.assign(cap, '\0');
+        SetLastError(ERROR_SUCCESS);
+        const DWORD n = GetEnvironmentVariableA(name, buf.data(), cap);
+        const DWORD err = GetLastError();
+        if (n == 0) {
+            if (err == ERROR_ENVVAR_NOT_FOUND) {
+                *present = false;
+                return true;
+            }
+            if (err == ERROR_SUCCESS) {
+                *present = true;
+                value->clear();
+                return true;
+            }
+            return false;
+        }
+        if (n < cap) {
+            *present = true;
+            value->assign(buf.c_str(), n);
+            return true;
+        }
+        cap = n > cap ? n : cap + 1;
+    }
+    return false;
+}
+#endif
+
 class TestEnvRestore {
 public:
     TestEnvRestore() = default;
@@ -107,19 +141,18 @@ public:
 
     void assign(const char* name, const char* value) {
         restore();
-        name_ = name;
 #if defined(_WIN32)
-        char buf[32767];
-        const DWORD n = GetEnvironmentVariableA(name, buf, static_cast<DWORD>(sizeof(buf)));
-        if (n > 0 && n < sizeof(buf)) {
-            had_ = true;
-            previous_ = buf;
-        } else {
-            had_ = false;
-            previous_.clear();
+        bool present = false;
+        std::string previous;
+        if (!readWin32Environment(name, &present, &previous)) {
+            return;
         }
+        name_ = name;
+        had_ = present;
+        previous_ = std::move(previous);
         SetEnvironmentVariableA(name, value);
 #else
+        name_ = name;
         if (const char* prev = std::getenv(name)) {
             had_ = true;
             previous_ = prev;
