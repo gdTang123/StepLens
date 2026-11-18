@@ -21,6 +21,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest-spi.h>
@@ -1485,5 +1486,107 @@ TEST(TestChildReap, InjectedWindowsReapFailureIsUnconfirmedNotSuccess) {
     EXPECT_NE(result.exitCode, 0);
     EXPECT_TRUE(unconfirmed);
     // close 仍应走到 CloseHandle；此处句柄为假值，目标实跑再核真实句柄路径
+}
+#endif
+
+#if defined(_WIN32)
+void expectWin32EnvUnset(const char* name) {
+    char buf[8]{};
+    SetLastError(ERROR_SUCCESS);
+    const DWORD n = GetEnvironmentVariableA(name, buf, static_cast<DWORD>(sizeof(buf)));
+    const DWORD err = GetLastError();
+    EXPECT_EQ(n, 0u);
+    EXPECT_EQ(err, static_cast<DWORD>(ERROR_ENVVAR_NOT_FOUND));
+}
+
+void expectWin32EnvPresentEmpty(const char* name) {
+    char buf[8]{};
+    SetLastError(ERROR_SUCCESS);
+    const DWORD n = GetEnvironmentVariableA(name, buf, static_cast<DWORD>(sizeof(buf)));
+    const DWORD err = GetLastError();
+    EXPECT_EQ(n, 0u);
+    EXPECT_NE(err, static_cast<DWORD>(ERROR_ENVVAR_NOT_FOUND));
+}
+
+void expectWin32EnvPresentValue(const char* name, const char* expected) {
+    char buf[1024]{};
+    SetLastError(ERROR_SUCCESS);
+    const DWORD n = GetEnvironmentVariableA(name, buf, static_cast<DWORD>(sizeof(buf)));
+    const DWORD err = GetLastError();
+    EXPECT_NE(err, static_cast<DWORD>(ERROR_ENVVAR_NOT_FOUND));
+    ASSERT_GT(n, 0u);
+    ASSERT_LT(n, static_cast<DWORD>(sizeof(buf)));
+    EXPECT_EQ(n, static_cast<DWORD>(std::strlen(expected)));
+    EXPECT_STREQ(buf, expected);
+}
+
+TEST(TestEnvRestore, WindowsThreeStateExplicitRestore) {
+    const char* name = "STEPLENS_TEST_ENV_RESTORE_TRI";
+    SetEnvironmentVariableA(name, nullptr);
+    expectWin32EnvUnset(name);
+    {
+        TestEnvRestore restore(name, "tmp-unset");
+        restore.restore();
+        expectWin32EnvUnset(name);
+    }
+
+    ASSERT_TRUE(SetEnvironmentVariableA(name, ""));
+    expectWin32EnvPresentEmpty(name);
+    {
+        TestEnvRestore restore(name, "tmp-empty");
+        restore.restore();
+        expectWin32EnvPresentEmpty(name);
+    }
+
+    ASSERT_TRUE(SetEnvironmentVariableA(name, "origin-value"));
+    expectWin32EnvPresentValue(name, "origin-value");
+    {
+        TestEnvRestore restore(name, "tmp-value");
+        restore.restore();
+        expectWin32EnvPresentValue(name, "origin-value");
+    }
+
+    const std::string longValue(400, 'L');
+    ASSERT_TRUE(SetEnvironmentVariableA(name, longValue.c_str()));
+    {
+        TestEnvRestore restore(name, "tmp-long");
+        restore.restore();
+        bool present = false;
+        std::string value;
+        ASSERT_TRUE(readWin32Environment(name, &present, &value));
+        EXPECT_TRUE(present);
+        EXPECT_EQ(value, longValue);
+        char probe[8]{};
+        SetLastError(ERROR_SUCCESS);
+        const DWORD n = GetEnvironmentVariableA(name, probe, 8);
+        EXPECT_GE(n, 8u);
+        EXPECT_NE(GetLastError(), static_cast<DWORD>(ERROR_ENVVAR_NOT_FOUND));
+    }
+    SetEnvironmentVariableA(name, nullptr);
+}
+
+TEST(TestEnvRestore, WindowsThreeStateScopeEarlyReturn) {
+    const char* name = "STEPLENS_TEST_ENV_RESTORE_SCOPE";
+    SetEnvironmentVariableA(name, nullptr);
+    [] {
+        TestEnvRestore restore(name, "tmp-unset");
+        return;
+    }();
+    expectWin32EnvUnset(name);
+
+    ASSERT_TRUE(SetEnvironmentVariableA(name, ""));
+    [] {
+        TestEnvRestore restore(name, "tmp-empty");
+        return;
+    }();
+    expectWin32EnvPresentEmpty(name);
+
+    ASSERT_TRUE(SetEnvironmentVariableA(name, "kept-value"));
+    [] {
+        TestEnvRestore restore(name, "tmp-value");
+        return;
+    }();
+    expectWin32EnvPresentValue(name, "kept-value");
+    SetEnvironmentVariableA(name, nullptr);
 }
 #endif
