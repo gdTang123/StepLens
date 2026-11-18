@@ -279,23 +279,20 @@ void SceneBuilder::erase(const opencascade::handle<AIS_InteractiveObject>& objec
 
 void SceneBuilder::applyVisible(model::NodeId id, bool visible) {
     const model::AssemblyNode& node = m_model->node(id);
-    const auto objects = m_map.objectsOf(id);
-    if (node.prototype != model::kNoPrototype || !objects.empty()) {
+    if (visible) {
+        m_hidden.erase(id);
+    } else {
+        m_hidden.insert(id);
+    }
+    for (const auto& object : m_map.objectsOf(id)) {
         if (visible) {
-            m_hidden.erase(id);
+            show(object);
         } else {
-            m_hidden.insert(id);
+            erase(object);
         }
-        for (const auto& object : objects) {
-            if (visible) {
-                show(object);
-            } else {
-                erase(object);
-            }
-        }
-        if (node.prototype != model::kNoPrototype) {
-            return;
-        }
+    }
+    if (node.prototype != model::kNoPrototype) {
+        return;
     }
     for (const model::NodeId child : node.children) {
         applyVisible(child, visible);
