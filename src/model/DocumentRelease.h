@@ -48,6 +48,9 @@ void setDocumentReleaseGate(DocumentReleaseGate gate) noexcept;
 using DocumentReleaseEnqueueGate = void (*)();
 void setDocumentReleaseEnqueueGate(DocumentReleaseEnqueueGate gate) noexcept;
 
+// 测试缝：Retirer join 完成、等待准入 producer 归零之前调用。回调只释放 producer；生产路径为空。
+void setDocumentReleaseAfterJoinHookForTesting(void (*hook)()) noexcept;
+
 // DocumentModel 析构一开始就调用。探针看到的线程就是 Close 所在的线程。
 void noteDocumentDestructorThread();
 

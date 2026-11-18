@@ -38,6 +38,19 @@
 
 namespace {
 namespace model = steplens::model;
+std::atomic<bool> enqueueGateEntered{false};
+std::atomic<bool> releaseEnqueueGate{false};
+void blockProducerBeforeNotify() {
+    steplens::lifecycleTrace("producer-enqueue-gate");
+    enqueueGateEntered.store(true, std::memory_order_release);
+    while (!releaseEnqueueGate.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+    }
+    steplens::lifecycleTrace("producer-enqueue-gate-release");
+}
+void releaseProducerAfterJoin() {
+    releaseEnqueueGate.store(true, std::memory_order_release);
+}
 std::shared_ptr<const steplens::model::DocumentModel> makeModel() {
     using namespace steplens;
     io::LoadedDocument loaded;
@@ -74,6 +87,35 @@ int documentCount() {
     return XCAFApp_Application::GetApplication()->NbDocuments();
 }
 } // namespace
+
+TEST(DocumentRelease, FirstWaitBeforeDocumentStillDrainsToBaseline) {
+    std::atomic<bool> start{false};
+    std::atomic<bool> waitResult{false};
+    std::atomic<int> observedPending{-1};
+    std::thread waiter([&] {
+        while (!start.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        waitResult.store(model::waitForDocumentRelease(std::chrono::seconds(10)), std::memory_order_release);
+    });
+    std::thread observer([&] {
+        while (!start.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        observedPending.store(model::documentsPendingRelease(), std::memory_order_release);
+    });
+    start.store(true, std::memory_order_release);
+    waiter.join();
+    observer.join();
+    ASSERT_TRUE(waitResult.load(std::memory_order_acquire));
+    EXPECT_EQ(observedPending.load(std::memory_order_acquire), 0);
+    const int baseline = documentCount();
+    auto docModel = makeModel();
+    ASSERT_TRUE(docModel);
+    docModel.reset();
+    ASSERT_TRUE(model::waitForDocumentRelease(std::chrono::seconds(10)));
+    EXPECT_EQ(documentCount(), baseline);
+}
 
 TEST(DocumentRelease, ControlBlockFailureAfterDetachUsesDeleterOnce) {
     ASSERT_TRUE(model::waitForDocumentRelease(std::chrono::seconds(30)));
@@ -357,26 +399,25 @@ TEST(DocumentRelease, EnqueueNotifyIsCoveredByInFlightAcrossStop) {
     const auto logPath = dir.path() / "lifecycle-r1.log";
     const char* childMark = std::getenv("STEPLENS_R1_ENQUEUE_CHILD");
     if (childMark != nullptr && *childMark != '\0') {
-        static std::atomic<bool> atGate{false};
+        enqueueGateEntered.store(false, std::memory_order_release);
+        releaseEnqueueGate.store(false, std::memory_order_release);
         steplens::initializeLifecycleTrace();
-        model::setDocumentReleaseEnqueueGate([] {
-            steplens::lifecycleTrace("producer-enqueue-gate");
-            atGate.store(true, std::memory_order_release);
-            std::this_thread::sleep_for(std::chrono::milliseconds(300));
-            steplens::lifecycleTrace("producer-enqueue-gate-release");
-        });
+        model::setDocumentReleaseEnqueueGate(blockProducerBeforeNotify);
+        model::setDocumentReleaseAfterJoinHookForTesting(releaseProducerAfterJoin);
+        if (!model::waitForDocumentRelease(std::chrono::seconds(10))) {
+            std::exit(3);
+        }
         auto* held = new std::shared_ptr<const model::DocumentModel>(makeModel());
         ASSERT_TRUE(*held);
         std::thread([held] {
             held->reset();
             delete held;
-            steplens::lifecycleTrace("producer-reset-done");
         }).detach();
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-        while (!atGate.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline) {
+        while (!enqueueGateEntered.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline) {
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
-        if (!atGate.load(std::memory_order_acquire)) {
+        if (!enqueueGateEntered.load(std::memory_order_acquire)) {
             steplens::lifecycleTrace("r1-child-gate-timeout");
             std::exit(2);
         }
@@ -463,11 +504,26 @@ TEST(DocumentRelease, EnqueueNotifyIsCoveredByInFlightAcrossStop) {
     const auto notifyAt = logged.find("producer-notify-returned");
     const auto inflightAt = logged.find("producer-inflight-release");
     const auto endAt = logged.find("retirer-end");
+    const auto stopAt = logged.find("retirer-stop");
+    const auto joinAt = logged.find("retirer-join-end");
+    const auto gateAt = logged.find("producer-enqueue-gate");
+    const auto gateReleaseAt = logged.find("producer-enqueue-gate-release");
     ASSERT_NE(notifyAt, std::string::npos) << logged;
     ASSERT_NE(inflightAt, std::string::npos) << logged;
     ASSERT_NE(endAt, std::string::npos) << logged;
+    ASSERT_NE(stopAt, std::string::npos) << logged;
+    ASSERT_NE(joinAt, std::string::npos) << logged;
+    ASSERT_NE(gateAt, std::string::npos) << logged;
+    ASSERT_NE(gateReleaseAt, std::string::npos) << logged;
     EXPECT_LT(notifyAt, endAt);
     EXPECT_LT(inflightAt, endAt);
+    EXPECT_LT(stopAt, gateReleaseAt);
+    EXPECT_LT(joinAt, gateReleaseAt);
+    EXPECT_LT(gateAt, gateReleaseAt);
+    EXPECT_LT(gateReleaseAt, notifyAt);
+    // producer-inflight-release is traced just before fetch_sub; retirer-end follows the
+    // destructor's actual zero wait, so this marker is not interpreted as the decrement.
+    EXPECT_LT(notifyAt, inflightAt);
 }
 
 TEST(DocumentRelease, ReleaseDelayKeepsPendingTicketUntilCloseCompletes) {
