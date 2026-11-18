@@ -210,6 +210,7 @@ void MainWindow::buildShell() {
         setCentralWidget(placeholder);
         m_nullHost = std::make_unique<NullSceneHost>();
         m_pipeline = std::make_unique<LoadPipeline>(*m_nullHost);
+        lifecycleTrace("offscreen-host-created", "NullSceneHost");
         return;
     }
 
@@ -217,6 +218,7 @@ void MainWindow::buildShell() {
     m_frame->setObjectName(QStringLiteral("viewerFrame"));
     m_viewer = new ViewerWidget(m_frame);
     m_viewer->setObjectName(QStringLiteral("viewerWidget"));
+    lifecycleTrace("viewer-created", "viewerWidget");
     m_hint = new QLabel(tr("拖拽 STEP/IGES 文件到这里，或点击打开"), m_frame);
     m_hint->setAttribute(Qt::WA_TransparentForMouseEvents);
     m_hint->setAutoFillBackground(true);
@@ -232,6 +234,7 @@ void MainWindow::buildShell() {
 
     m_treePanel = new ui::AssemblyTreePanel(this);
     m_treePanel->setObjectName(QStringLiteral("assemblyTreePanel"));
+    lifecycleTrace("tree-created", "assemblyTreePanel");
     addDockWidget(Qt::LeftDockWidgetArea, m_treePanel);
     resizeDocks({m_treePanel}, {260}, Qt::Horizontal);
     connect(m_treePanel, &ui::AssemblyTreePanel::nodeActivated, m_viewer, &ViewerWidget::highlightNode);
@@ -371,6 +374,13 @@ void MainWindow::openPath(const QString& file) {
     const auto pause =
         m_dumpDir.isEmpty() ? std::chrono::milliseconds(0) : std::chrono::milliseconds(kDumpPauseMs);
     m_pipeline->open(pathFromUtf8(file), pause);
+    if (!m_closeWhileBusyArmed && qEnvironmentVariableIsSet("STEPLENS_CLOSE_WHILE_BUSY") &&
+        !m_pipeline->isSettled()) {
+        m_closeWhileBusyArmed = true;
+        lifecycleTrace("close-while-busy-request", "after-open");
+        close();
+        return;
+    }
     refreshUi();
 }
 

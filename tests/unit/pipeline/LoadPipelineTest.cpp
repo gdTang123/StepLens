@@ -12,7 +12,9 @@
 #include "steplens_app_exe.h"
 #endif
 
+#include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -22,7 +24,24 @@
 #include <gtest/gtest.h>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <thread>
+
+bool lifecycleLogMatchesSha(const std::string& log, std::string_view sha) {
+    if (sha.empty() || sha == "unknown")
+        return false;
+    const std::string expected = std::string("event=lifecycle-open identity=") + std::string(sha) + " ";
+    return log.find(expected) != std::string::npos;
+}
+
+TEST(AppExitLogBinding, RejectsPreexistingOldGreenLog) {
+    ASSERT_FALSE(std::string_view{STEPLENS_GIT_SHA}.empty());
+    ASSERT_STRNE(STEPLENS_GIT_SHA, "unknown");
+    const std::string oldGreen = "1 tid=1 event=lifecycle-open identity=old-sha exit=0\n"
+                                 "2 tid=1 event=main-normal-return identity=pending=0 exit=0\n"
+                                 "3 tid=2 event=retirer-end identity=pending=0 live=0 inflight=0 exit=0\n";
+    ASSERT_FALSE(lifecycleLogMatchesSha(oldGreen, STEPLENS_GIT_SHA));
+}
 
 #if defined(STEPLENS_HAS_APP) && defined(_WIN32)
 #ifndef NOMINMAX
@@ -650,11 +669,12 @@ std::string envOrEmpty(const char* name) {
 
 // 产品退出取证（必须是 StepLens.exe 的真实 main/MainWindow，硬超时子进程）。
 // 不得用 QObject 仿真树、NullSceneHost 单元路径或 ReleaseQuickExitMain 冒充下列三路。
-// QT_QPA_PLATFORM=offscreen 时主窗走 NullSceneHost、不创建 ViewerWidget/树，只证明该分支的
-// closeEvent 与 main 快退/正常 return。Viewer/tree 拆除需取消 offscreen，用隐藏窗口跑
-// STEPLENS_APP_EXIT_VIEWER=1 的用例；那不是像素拾取或帧对比夹具。
+// offscreen 只证明 NullSceneHost 分支。Viewer/tree 三路必须 STEPLENS_APP_EXIT_VIEWER=1
+// 且取消 offscreen，隐藏窗口即可；不是像素拾取或帧对比夹具。
+// AppExit 测试带 label app_exit，被 unit 预设排除。默认 ctest --preset unit 里的 SKIP
+// 不能算 R3 成功。冒烟必须用 --test-dir 显式发现这些测试，且不得出现 SKIPPED。
 //
-// 产品 Windows CI（在已有 RelWithDebInfo StepLens.exe、QTDIR、vcpkg bin 入 PATH 之后）：
+// 产品 Windows CI（RelWithDebInfo StepLens.exe、QTDIR、vcpkg bin 入 PATH 之后）：
 //   $env:QT_PLUGIN_PATH = Join-Path $env:QTDIR "plugins"
 //   $vcpkgBin = Join-Path (Get-Location) "build\msvc\vcpkg_installed\x64-windows\bin"
 //   $env:PATH = "$vcpkgBin;$(Join-Path $env:QTDIR 'bin');$env:PATH"
@@ -662,25 +682,24 @@ std::string envOrEmpty(const char* name) {
 //   New-Item -ItemType Directory -Force -Path $lifeDir | Out-Null
 //   $env:STEPLENS_APP_EXIT = "1"
 //   $env:QT_QPA_PLATFORM = "offscreen"
-//   $env:STEPLENS_LIFECYCLE_LOG = Join-Path $lifeDir "lifecycle-offscreen.log"
-//   ctest --preset unit -C RelWithDebInfo --no-tests=error --output-on-failure `
+//   ctest --test-dir build/msvc -C RelWithDebInfo --no-tests=error --output-on-failure `
 //     -R
 //     "^AppExit\.(CloseEventWhileBusyQuickExits|CloseAfterDisplayedModelExitsCleanly|NormalReturnAfterCloseCompletes)$"
-//   Get-Content $env:STEPLENS_LIFECYCLE_LOG
 //   Remove-Item Env:QT_QPA_PLATFORM
 //   $env:STEPLENS_APP_EXIT_VIEWER = "1"
-//   $env:STEPLENS_LIFECYCLE_LOG = Join-Path $lifeDir "lifecycle-viewer.log"
-//   ctest --preset unit -C RelWithDebInfo --no-tests=error --output-on-failure `
-//     -R "^AppExit\.(ViewerTreeQuitWhenReadyHeldClose|ViewerTreeNormalReturn)$"
-//   Get-Content $env:STEPLENS_LIFECYCLE_LOG
-// 本机无 MSVC 产品主程序，不能把合同测试或独立 Viewer 探针当作这三路已经跑通。
+//   ctest --test-dir build/msvc -C RelWithDebInfo --no-tests=error --output-on-failure `
+//     -R "^AppExit\.(ViewerTreeCloseEventWhileBusy|ViewerTreeQuitWhenReadyHeldClose|ViewerTreeNormalReturn)$"
+// 每次子进程使用 lifecycle-<SHA>-<用例>-<nonce>.log；测试先建空文件并校验 lifecycle-open SHA。
+// 每个产品进程硬超时 60s，合成 box.step；HeldClose 用 Close gate 因果控制。
+// 本机无 MSVC 产品主程序，不能把合同测试当作这三路已经跑通。
+// locApp 本体析构无法插桩；companion 只是上界。产品 main 不抢先 prime Application。
 
 struct AppSpawnOptions {
     bool quitWhenReady = false;
     bool closeWhileBusy = false;
     bool waitReleaseBeforeExit = false;
+    bool holdCloseUntilAfterWindow = false;
     bool offscreen = true;
-    unsigned delayMs = 0;
     std::filesystem::path lifecycleLog;
 };
 
@@ -708,12 +727,17 @@ int runProductApp(const std::filesystem::path& file, std::chrono::milliseconds t
     const auto restoreWait = envOrEmpty("STEPLENS_WAIT_RELEASE_BEFORE_EXIT");
     const auto restoreDelay = envOrEmpty("STEPLENS_RELEASE_DELAY_MS");
     const auto restoreLife = envOrEmpty("STEPLENS_LIFECYCLE_LOG");
+    const auto restoreSha = envOrEmpty("STEPLENS_LIFECYCLE_SHA");
+    const auto restoreHeld = envOrEmpty("STEPLENS_HOLD_CLOSE_UNTIL_AFTER_WINDOW");
+    timeout = std::min(timeout, std::chrono::milliseconds{60000});
     setEnvValue("QT_QPA_PLATFORM", options.offscreen ? "offscreen" : std::string{});
     setEnvValue("STEPLENS_QUIT_WHEN_READY", options.quitWhenReady ? "1" : std::string{});
     setEnvValue("STEPLENS_CLOSE_WHILE_BUSY", options.closeWhileBusy ? "1" : std::string{});
     setEnvValue("STEPLENS_WAIT_RELEASE_BEFORE_EXIT", options.waitReleaseBeforeExit ? "1" : std::string{});
-    setEnvValue("STEPLENS_RELEASE_DELAY_MS",
-                options.delayMs == 0 ? std::string{} : std::to_string(options.delayMs));
+    setEnvValue("STEPLENS_RELEASE_DELAY_MS", {});
+    setEnvValue("STEPLENS_HOLD_CLOSE_UNTIL_AFTER_WINDOW",
+                options.holdCloseUntilAfterWindow ? "1" : std::string{});
+    setEnvValue("STEPLENS_LIFECYCLE_SHA", STEPLENS_GIT_SHA);
     setEnvValue("STEPLENS_LIFECYCLE_LOG", options.lifecycleLog.string());
 #if defined(_WIN32)
     const std::wstring exe = std::filesystem::path(kStepLensExe).wstring();
@@ -733,6 +757,8 @@ int runProductApp(const std::filesystem::path& file, std::chrono::milliseconds t
     setEnvValue("STEPLENS_CLOSE_WHILE_BUSY", restoreBusy);
     setEnvValue("STEPLENS_WAIT_RELEASE_BEFORE_EXIT", restoreWait);
     setEnvValue("STEPLENS_RELEASE_DELAY_MS", restoreDelay);
+    setEnvValue("STEPLENS_HOLD_CLOSE_UNTIL_AFTER_WINDOW", restoreHeld);
+    setEnvValue("STEPLENS_LIFECYCLE_SHA", restoreSha);
     setEnvValue("STEPLENS_LIFECYCLE_LOG", restoreLife);
     if (created == 0) {
         return -1;
@@ -743,6 +769,7 @@ int runProductApp(const std::filesystem::path& file, std::chrono::milliseconds t
         GetExitCodeProcess(process.hProcess, &code);
     } else {
         TerminateProcess(process.hProcess, 1);
+        WaitForSingleObject(process.hProcess, INFINITE);
         code = 124;
     }
     CloseHandle(process.hThread);
@@ -757,6 +784,8 @@ int runProductApp(const std::filesystem::path& file, std::chrono::milliseconds t
         setEnvValue("STEPLENS_CLOSE_WHILE_BUSY", restoreBusy);
         setEnvValue("STEPLENS_WAIT_RELEASE_BEFORE_EXIT", restoreWait);
         setEnvValue("STEPLENS_RELEASE_DELAY_MS", restoreDelay);
+        setEnvValue("STEPLENS_HOLD_CLOSE_UNTIL_AFTER_WINDOW", restoreHeld);
+        setEnvValue("STEPLENS_LIFECYCLE_SHA", restoreSha);
         setEnvValue("STEPLENS_LIFECYCLE_LOG", restoreLife);
         return -1;
     }
@@ -770,6 +799,8 @@ int runProductApp(const std::filesystem::path& file, std::chrono::milliseconds t
     setEnvValue("STEPLENS_CLOSE_WHILE_BUSY", restoreBusy);
     setEnvValue("STEPLENS_WAIT_RELEASE_BEFORE_EXIT", restoreWait);
     setEnvValue("STEPLENS_RELEASE_DELAY_MS", restoreDelay);
+    setEnvValue("STEPLENS_HOLD_CLOSE_UNTIL_AFTER_WINDOW", restoreHeld);
+    setEnvValue("STEPLENS_LIFECYCLE_SHA", restoreSha);
     setEnvValue("STEPLENS_LIFECYCLE_LOG", restoreLife);
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     int status = 0;
@@ -783,7 +814,13 @@ int runProductApp(const std::filesystem::path& file, std::chrono::milliseconds t
         }
         if (std::chrono::steady_clock::now() >= deadline) {
             kill(pid, SIGKILL);
-            waitpid(pid, &status, 0);
+            pid_t reaped = -1;
+            do {
+                reaped = waitpid(pid, &status, 0);
+            } while (reaped < 0 && errno == EINTR);
+            if (reaped != pid && !(reaped < 0 && errno == ECHILD)) {
+                return 125;
+            }
             return 124;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
@@ -791,12 +828,17 @@ int runProductApp(const std::filesystem::path& file, std::chrono::milliseconds t
 #endif
 }
 
-int runAppUntilReady(const std::filesystem::path& file, std::chrono::milliseconds timeout) {
-    AppSpawnOptions options;
-    options.quitWhenReady = true;
-    options.delayMs = 2000;
-    options.offscreen = true;
-    return runProductApp(file, timeout, options);
+int eventIdentityPos(const std::string& log, std::string_view event, std::string_view identity) {
+    const std::string key =
+        std::string("event=") + std::string(event) + " identity=" + std::string(identity) + " ";
+    const auto at = log.find(key);
+    return at == std::string::npos ? -1 : static_cast<int>(at);
+}
+
+void expectLifecycleIdentity(const std::string& log) {
+    EXPECT_TRUE(lifecycleLogMatchesSha(log, STEPLENS_GIT_SHA))
+        << "生命周期日志缺少本次构建 SHA 或 SHA 不符：" << STEPLENS_GIT_SHA << "\n"
+        << log;
 }
 
 std::string readFileIfExists(const std::filesystem::path& path) {
@@ -811,32 +853,111 @@ bool writeOrReuseModel(steplens::test::TempDir& dir, std::filesystem::path& file
                        std::chrono::milliseconds& timeout) {
     file = dir.path() / "box.step";
     timeout = std::chrono::milliseconds{60000};
-    const std::string samples = envOrEmpty("STEPLENS_SAMPLES");
-    if (!samples.empty()) {
-        const std::filesystem::path x02 = std::filesystem::path(samples) / "Scania-Engine-V8-XT-Turbo.step";
-        if (std::filesystem::is_regular_file(x02)) {
-            file = x02;
-            timeout = std::chrono::minutes(10);
-            return true;
-        }
-    }
     return writeBoxStep(file);
+}
+
+std::filesystem::path exeLogsDir() {
+    const auto dir = std::filesystem::path(kStepLensExe).parent_path() / "logs";
+    std::error_code error;
+    std::filesystem::create_directories(dir, error);
+    return dir;
+}
+
+std::filesystem::path lifecycleLogFor(const char* name) {
+    static std::atomic<unsigned long long> nonce{0};
+    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+    const std::string filename = std::string("lifecycle-") + STEPLENS_GIT_SHA + "-" + name + "-" +
+                                 std::to_string(stamp) + "-" + std::to_string(nonce.fetch_add(1)) + ".log";
+    const auto path = exeLogsDir() / filename;
+    std::ofstream fresh(path, std::ios::binary | std::ios::trunc);
+    return path;
+}
+
+int eventPos(const std::string& log, std::string_view event) {
+    const std::string key = std::string("event=") + std::string(event);
+    const auto at = log.find(key);
+    return at == std::string::npos ? -1 : static_cast<int>(at);
+}
+
+int pendingLoggedAt(const std::string& log, std::string_view event) {
+    const int at = eventPos(log, event);
+    if (at < 0) {
+        return -1;
+    }
+    const auto from = static_cast<std::size_t>(at);
+    const auto lineEnd = log.find('\n', from);
+    const auto ident = log.find("identity=pending=", from);
+    if (ident == std::string::npos || (lineEnd != std::string::npos && ident > lineEnd)) {
+        return -1;
+    }
+    const auto start = ident + 17;
+    const auto end = log.find_first_not_of("0123456789", start);
+    if (start == end || start >= log.size() || (end != std::string::npos && end == start)) {
+        return -1;
+    }
+    return std::stoi(log.substr(start, (end == std::string::npos ? log.size() : end) - start));
+}
+
+void expectPendingAfterWindow(const std::string& log) {
+    EXPECT_GT(pendingLoggedAt(log, "main-after-window"), 0)
+        << "main-after-window 时 pending 应 >0，不能用延时猜拆完\n"
+        << log;
+}
+
+void expectEvent(const std::string& log, std::string_view event) {
+    EXPECT_GE(eventPos(log, event), 0) << "缺少 event=" << event << "\n" << log;
+}
+
+void expectNoEvent(const std::string& log, std::string_view event) {
+    EXPECT_EQ(eventPos(log, event), -1) << "不应出现 event=" << event << "\n" << log;
+}
+
+void expectEventBefore(const std::string& log, std::string_view earlier, std::string_view later) {
+    const int a = eventPos(log, earlier);
+    const int b = eventPos(log, later);
+    ASSERT_GE(a, 0) << "缺少 event=" << earlier << "\n" << log;
+    ASSERT_GE(b, 0) << "缺少 event=" << later << "\n" << log;
+    EXPECT_LT(a, b) << earlier << " 应早于 " << later << "\n" << log;
+}
+
+void expectExeExists() {
+    ASSERT_TRUE(std::filesystem::is_regular_file(kStepLensExe)) << kStepLensExe;
+}
+
+// 能证明：producer 已静止，以及 retirer-end 早于本进程内 Log/mutex 析构。
+// companion 只是 locApp 析构的上界，不是 locApp 析构体本身。
+void expectNormalReturnStaticOrder(const std::string& life) {
+    expectEventBefore(life, "main-normal-return", "retirer-stop");
+    expectEventBefore(life, "retirer-stop", "retirer-end");
+    EXPECT_NE(life.find("pending=0 live=0 inflight=0"), std::string::npos) << life;
+    const int stop = eventPos(life, "retirer-stop");
+    ASSERT_GE(stop, 0) << life;
+    EXPECT_EQ(life.find("event=producer-notify", static_cast<std::size_t>(stop)), std::string::npos)
+        << "retirer-stop 之后仍有 producer 通知\n"
+        << life;
+    expectEventBefore(life, "retirer-end", "log-state-dtor");
+    expectEventBefore(life, "retirer-end", "xcaf-mutex-dtor");
+    ASSERT_GE(eventPos(life, "xcaf-app-companion-dtor"), 0)
+        << "没有 companion 记录，不能给出 locApp 析构上界\n"
+        << life;
+    expectEventBefore(life, "retirer-end", "xcaf-app-companion-dtor");
 }
 
 TEST(AppExit, CloseAfterDisplayedModelExitsCleanly) {
     if (envOrEmpty("STEPLENS_APP_EXIT").empty()) {
         GTEST_SKIP() << "设置 STEPLENS_APP_EXIT=1 后再跑。托管 CI 的 ctest 不带显示库路径，由冒烟步骤拉起。";
     }
+    expectExeExists();
     steplens::test::TempDir dir;
     std::filesystem::path file;
     std::chrono::milliseconds timeout{60000};
     ASSERT_TRUE(writeOrReuseModel(dir, file, timeout));
     const auto logPath = std::filesystem::path(kStepLensExe).parent_path() / "logs" / "steplens.log";
-    const auto lifecyclePath = dir.path() / "lifecycle-quit-when-ready.log";
+    const auto lifecyclePath = lifecycleLogFor("lifecycle-offscreen-quit-when-ready.log");
     const auto logBytes = std::filesystem::is_regular_file(logPath) ? std::filesystem::file_size(logPath) : 0;
     AppSpawnOptions options;
     options.quitWhenReady = true;
-    options.delayMs = 2000;
+    options.holdCloseUntilAfterWindow = true;
     options.offscreen = true;
     options.lifecycleLog = lifecyclePath;
     const int code = runProductApp(file, timeout, options);
@@ -848,23 +969,32 @@ TEST(AppExit, CloseAfterDisplayedModelExitsCleanly) {
     const std::string appended((std::istreambuf_iterator<char>(log)), std::istreambuf_iterator<char>());
     EXPECT_NE(appended.find("退出时文档仍在后台关闭，结束进程"), std::string::npos) << appended;
     const std::string life = readFileIfExists(lifecyclePath);
-    EXPECT_NE(life.find("mainwindow-destructor-begin"), std::string::npos) << life;
-    EXPECT_NE(life.find("mainwindow-destructor-end"), std::string::npos) << life;
-    EXPECT_NE(life.find("main-after-window"), std::string::npos) << life;
-    EXPECT_NE(life.find("main-quick-exit-pending"), std::string::npos) << life;
-    EXPECT_EQ(life.find("mainwindow-closeEvent-busy"), std::string::npos) << life;
-    EXPECT_EQ(life.find("main-normal-return"), std::string::npos) << life;
+    expectLifecycleIdentity(life);
+    expectEvent(life, "mainwindow-destructor-begin");
+    expectEventBefore(life, "mainwindow-destructor-begin", "mainwindow-destructor-end");
+    expectEventBefore(life, "mainwindow-destructor-end", "mainwindow-members-begin");
+    expectEventBefore(life, "mainwindow-members-begin", "mainwindow-members-end");
+    expectEventBefore(life, "mainwindow-members-end", "main-after-window");
+    expectEventBefore(life, "main-after-window", "main-quick-exit-pending");
+    expectPendingAfterWindow(life);
+    expectEvent(life, "main-quick-exit-pending");
+    expectNoEvent(life, "mainwindow-closeEvent-busy");
+    expectNoEvent(life, "main-normal-return");
+    expectEvent(life, "offscreen-host-created");
+    expectNoEvent(life, "viewer-created");
+    expectNoEvent(life, "tree-created");
 }
 
 TEST(AppExit, CloseEventWhileBusyQuickExits) {
     if (envOrEmpty("STEPLENS_APP_EXIT").empty()) {
         GTEST_SKIP() << "设置 STEPLENS_APP_EXIT=1 后再跑。由产品 CI 冒烟步骤拉起真实 StepLens.exe。";
     }
+    expectExeExists();
     steplens::test::TempDir dir;
     std::filesystem::path file;
     std::chrono::milliseconds timeout{60000};
     ASSERT_TRUE(writeOrReuseModel(dir, file, timeout));
-    const auto lifecyclePath = dir.path() / "lifecycle-close-while-busy.log";
+    const auto lifecyclePath = lifecycleLogFor("lifecycle-offscreen-close-while-busy.log");
     AppSpawnOptions options;
     options.closeWhileBusy = true;
     options.offscreen = true;
@@ -872,21 +1002,27 @@ TEST(AppExit, CloseEventWhileBusyQuickExits) {
     const int code = runProductApp(file, timeout, options);
     EXPECT_EQ(code, 0);
     const std::string life = readFileIfExists(lifecyclePath);
-    EXPECT_NE(life.find("mainwindow-closeEvent-busy"), std::string::npos) << life;
-    EXPECT_NE(life.find("end-process-now"), std::string::npos) << life;
-    EXPECT_EQ(life.find("main-quick-exit-pending"), std::string::npos) << life;
-    EXPECT_EQ(life.find("main-normal-return"), std::string::npos) << life;
+    expectLifecycleIdentity(life);
+    expectEvent(life, "offscreen-host-created");
+    expectEvent(life, "close-while-busy-request");
+    expectEvent(life, "mainwindow-closeEvent-busy");
+    expectEvent(life, "end-process-now");
+    expectNoEvent(life, "viewer-created");
+    expectNoEvent(life, "tree-created");
+    expectNoEvent(life, "main-quick-exit-pending");
+    expectNoEvent(life, "main-normal-return");
 }
 
 TEST(AppExit, NormalReturnAfterCloseCompletes) {
     if (envOrEmpty("STEPLENS_APP_EXIT").empty()) {
         GTEST_SKIP() << "设置 STEPLENS_APP_EXIT=1 后再跑。由产品 CI 冒烟步骤拉起真实 StepLens.exe。";
     }
+    expectExeExists();
     steplens::test::TempDir dir;
     std::filesystem::path file;
     std::chrono::milliseconds timeout{60000};
     ASSERT_TRUE(writeOrReuseModel(dir, file, timeout));
-    const auto lifecyclePath = dir.path() / "lifecycle-normal-return.log";
+    const auto lifecyclePath = lifecycleLogFor("lifecycle-offscreen-normal-return.log");
     AppSpawnOptions options;
     options.quitWhenReady = true;
     options.waitReleaseBeforeExit = true;
@@ -895,15 +1031,43 @@ TEST(AppExit, NormalReturnAfterCloseCompletes) {
     const int code = runProductApp(file, timeout, options);
     EXPECT_EQ(code, 0);
     const std::string life = readFileIfExists(lifecyclePath);
-    EXPECT_NE(life.find("mainwindow-destructor-begin"), std::string::npos) << life;
-    EXPECT_NE(life.find("main-after-window"), std::string::npos) << life;
-    EXPECT_NE(life.find("main-wait-release-done"), std::string::npos) << life;
-    EXPECT_NE(life.find("main-normal-return"), std::string::npos) << life;
-    EXPECT_EQ(life.find("main-quick-exit-pending"), std::string::npos) << life;
-    EXPECT_EQ(life.find("end-process-now"), std::string::npos) << life;
-    // 正常 return 才会走到静态析构；生命周期通道不依赖 Log 单例。
-    EXPECT_NE(life.find("retirer-stop"), std::string::npos) << life;
-    EXPECT_NE(life.find("retirer-end"), std::string::npos) << life;
+    expectLifecycleIdentity(life);
+    expectEvent(life, "offscreen-host-created");
+    expectNoEvent(life, "viewer-created");
+    expectNoEvent(life, "tree-created");
+    expectEvent(life, "mainwindow-destructor-begin");
+    expectEvent(life, "main-after-window");
+    expectEvent(life, "main-wait-release-done");
+    expectNoEvent(life, "main-quick-exit-pending");
+    expectNoEvent(life, "end-process-now");
+    expectNormalReturnStaticOrder(life);
+}
+
+TEST(AppExit, ViewerTreeCloseEventWhileBusy) {
+    if (envOrEmpty("STEPLENS_APP_EXIT_VIEWER").empty()) {
+        GTEST_SKIP() << "设置 STEPLENS_APP_EXIT_VIEWER=1 后在非 offscreen 隐藏窗口上跑真实 closeEvent。";
+    }
+    expectExeExists();
+    steplens::test::TempDir dir;
+    std::filesystem::path file;
+    std::chrono::milliseconds timeout{60000};
+    ASSERT_TRUE(writeOrReuseModel(dir, file, timeout));
+    const auto lifecyclePath = lifecycleLogFor("lifecycle-viewer-close-while-busy.log");
+    AppSpawnOptions options;
+    options.closeWhileBusy = true;
+    options.offscreen = false;
+    options.lifecycleLog = lifecyclePath;
+    const int code = runProductApp(file, timeout, options);
+    EXPECT_EQ(code, 0);
+    const std::string life = readFileIfExists(lifecyclePath);
+    expectLifecycleIdentity(life);
+    expectEventBefore(life, "viewer-created", "mainwindow-closeEvent-busy");
+    expectEventBefore(life, "tree-created", "mainwindow-closeEvent-busy");
+    expectEvent(life, "close-while-busy-request");
+    expectEvent(life, "end-process-now");
+    expectNoEvent(life, "offscreen-host-created");
+    expectNoEvent(life, "main-quick-exit-pending");
+    expectNoEvent(life, "main-normal-return");
 }
 
 TEST(AppExit, ViewerTreeQuitWhenReadyHeldClose) {
@@ -911,26 +1075,38 @@ TEST(AppExit, ViewerTreeQuitWhenReadyHeldClose) {
         GTEST_SKIP()
             << "设置 STEPLENS_APP_EXIT_VIEWER=1 后在非 offscreen 隐藏窗口上跑，取证 Viewer/tree 拆除。";
     }
+    expectExeExists();
     steplens::test::TempDir dir;
     std::filesystem::path file;
     std::chrono::milliseconds timeout{60000};
     ASSERT_TRUE(writeOrReuseModel(dir, file, timeout));
-    const auto lifecyclePath = dir.path() / "lifecycle-viewer-held-close.log";
+    const auto lifecyclePath = lifecycleLogFor("lifecycle-viewer-held-close.log");
     AppSpawnOptions options;
     options.quitWhenReady = true;
-    options.delayMs = 2000;
+    options.holdCloseUntilAfterWindow = true;
     options.offscreen = false;
     options.lifecycleLog = lifecyclePath;
     const int code = runProductApp(file, timeout, options);
     EXPECT_EQ(code, 0);
     const std::string life = readFileIfExists(lifecyclePath);
-    EXPECT_NE(life.find("mainwindow-destructor-begin"), std::string::npos) << life;
-    EXPECT_NE(life.find("mainwindow-members-begin"), std::string::npos) << life;
-    EXPECT_NE(life.find("mainwindow-members-end"), std::string::npos) << life;
-    EXPECT_NE(life.find("viewerWidget"), std::string::npos) << life;
-    EXPECT_NE(life.find("assemblyTreePanel"), std::string::npos) << life;
-    EXPECT_NE(life.find("main-quick-exit-pending"), std::string::npos) << life;
-    EXPECT_EQ(life.find("mainwindow-closeEvent-busy"), std::string::npos) << life;
+    expectLifecycleIdentity(life);
+    expectEvent(life, "viewer-created");
+    expectEvent(life, "tree-created");
+    expectEventBefore(life, "mainwindow-destructor-begin", "mainwindow-destructor-end");
+    expectEventBefore(life, "mainwindow-destructor-end", "mainwindow-members-begin");
+    expectEventBefore(life, "mainwindow-members-begin", "mainwindow-members-end");
+    const int viewerDestroyed = eventIdentityPos(life, "qobject-child-destroyed", "viewerWidget");
+    const int treeDestroyed = eventIdentityPos(life, "qobject-child-destroyed", "assemblyTreePanel");
+    EXPECT_GT(viewerDestroyed, eventPos(life, "mainwindow-members-end")) << life;
+    EXPECT_GT(treeDestroyed, eventPos(life, "mainwindow-members-end")) << life;
+    EXPECT_LT(viewerDestroyed, eventPos(life, "main-after-window")) << life;
+    EXPECT_LT(treeDestroyed, eventPos(life, "main-after-window")) << life;
+    expectEventBefore(life, "mainwindow-members-end", "main-after-window");
+    expectEventBefore(life, "main-after-window", "main-quick-exit-pending");
+    expectPendingAfterWindow(life);
+    expectEvent(life, "main-quick-exit-pending");
+    expectNoEvent(life, "mainwindow-closeEvent-busy");
+    expectNoEvent(life, "offscreen-host-created");
 }
 
 TEST(AppExit, ViewerTreeNormalReturn) {
@@ -938,11 +1114,12 @@ TEST(AppExit, ViewerTreeNormalReturn) {
         GTEST_SKIP()
             << "设置 STEPLENS_APP_EXIT_VIEWER=1 后在非 offscreen 隐藏窗口上跑，取证正常 return 与静态顺序。";
     }
+    expectExeExists();
     steplens::test::TempDir dir;
     std::filesystem::path file;
     std::chrono::milliseconds timeout{60000};
     ASSERT_TRUE(writeOrReuseModel(dir, file, timeout));
-    const auto lifecyclePath = dir.path() / "lifecycle-viewer-normal.log";
+    const auto lifecyclePath = lifecycleLogFor("lifecycle-viewer-normal.log");
     AppSpawnOptions options;
     options.quitWhenReady = true;
     options.waitReleaseBeforeExit = true;
@@ -951,13 +1128,16 @@ TEST(AppExit, ViewerTreeNormalReturn) {
     const int code = runProductApp(file, timeout, options);
     EXPECT_EQ(code, 0);
     const std::string life = readFileIfExists(lifecyclePath);
-    EXPECT_NE(life.find("viewerWidget"), std::string::npos) << life;
-    EXPECT_NE(life.find("assemblyTreePanel"), std::string::npos) << life;
-    EXPECT_NE(life.find("main-normal-return"), std::string::npos) << life;
-    EXPECT_NE(life.find("retirer-end"), std::string::npos) << life;
-    EXPECT_NE(life.find("retirer-log"), std::string::npos) << life;
-    EXPECT_NE(life.find("retirer-xcaf"), std::string::npos) << life;
-    EXPECT_EQ(life.find("main-quick-exit-pending"), std::string::npos) << life;
+    expectLifecycleIdentity(life);
+    expectEvent(life, "viewer-created");
+    expectEvent(life, "tree-created");
+    expectEvent(life, "qobject-child-destroyed");
+    EXPECT_GE(eventIdentityPos(life, "qobject-child-destroyed", "viewerWidget"), 0) << life;
+    EXPECT_GE(eventIdentityPos(life, "qobject-child-destroyed", "assemblyTreePanel"), 0) << life;
+    expectNoEvent(life, "offscreen-host-created");
+    expectNoEvent(life, "main-quick-exit-pending");
+    expectNoEvent(life, "end-process-now");
+    expectNormalReturnStaticOrder(life);
 }
 
 #endif

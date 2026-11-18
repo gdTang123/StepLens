@@ -1,5 +1,7 @@
 #include "core/Log.h"
 
+#include "core/LifecycleTrace.h"
+
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -30,6 +32,11 @@ struct LogState {
 
 LogState& state() {
     static LogState value;
+    static struct LogDtorTrace {
+        ~LogDtorTrace() {
+            lifecycleTrace("log-state-dtor");
+        }
+    } trace;
     return value;
 }
 

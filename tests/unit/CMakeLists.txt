@@ -140,7 +140,8 @@ if(STEPLENS_OCCT_CONTRACT)
     target_include_directories(steplens_pipeline_tests PRIVATE "${CMAKE_SOURCE_DIR}/src")
     target_link_libraries(steplens_pipeline_tests PRIVATE steplens::pipeline GTest::gtest_main)
     target_compile_definitions(steplens_pipeline_tests PRIVATE
-        "STEPLENS_EXPECTED_OCCT=\"${STEPLENS_EXPECTED_OCCT}\"")
+        "STEPLENS_EXPECTED_OCCT=\"${STEPLENS_EXPECTED_OCCT}\""
+        "STEPLENS_GIT_SHA=\"${STEPLENS_GIT_SHA}\"")
     steplens_apply_warnings(steplens_pipeline_tests)
     steplens_apply_exceptions(steplens_pipeline_tests OFF)
     set_target_properties(steplens_pipeline_tests PROPERTIES FOLDER "tests")
@@ -233,7 +234,8 @@ if(NOT STEPLENS_CORE_ONLY)
     target_include_directories(steplens_pipeline_tests PRIVATE "${CMAKE_SOURCE_DIR}/src")
     target_link_libraries(steplens_pipeline_tests PRIVATE steplens::pipeline GTest::gtest_main)
     target_compile_definitions(steplens_pipeline_tests PRIVATE
-        "STEPLENS_EXPECTED_OCCT=\"${STEPLENS_EXPECTED_OCCT}\"")
+        "STEPLENS_EXPECTED_OCCT=\"${STEPLENS_EXPECTED_OCCT}\""
+        "STEPLENS_GIT_SHA=\"${STEPLENS_GIT_SHA}\"")
     if(TARGET StepLens)
         file(GENERATE
             OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/app_exit/$<CONFIG>/steplens_app_exe.h"
@@ -277,7 +279,15 @@ if(NOT STEPLENS_CORE_ONLY)
             ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1")
     gtest_discover_tests(steplens_pipeline_tests
         DISCOVERY_MODE PRE_TEST
+        TEST_FILTER "-AppExit.*"
         PROPERTIES
             TIMEOUT 120
             LABELS unit)
+    # AppExit 不进默认 unit 预设，避免无环境时 SKIP 被当成成功。由产品冒烟步骤显式拉起。
+    gtest_discover_tests(steplens_pipeline_tests
+        DISCOVERY_MODE PRE_TEST
+        TEST_FILTER "AppExit.*"
+        PROPERTIES
+            TIMEOUT 90
+            LABELS app_exit)
 endif()

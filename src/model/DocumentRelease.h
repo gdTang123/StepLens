@@ -39,8 +39,9 @@ void failNextDocumentCloseForTesting(bool fail) noexcept;
 void setDocumentReleaseProbe(std::function<void(std::thread::id)> probe);
 
 // 测试缝。后台线程取出一份文档之后、减少 documentsPendingRelease() 之前调用。
-// 空指针时只做一次加载，不进回调。生产路径保持空指针。
-// 回调可以堵住，这样计数在回调返回前不会下降。回调里不能再等这次释放，否则和后台线程互相等。
+// 只写入独立原子配置，不构造 Retirer、不触碰 XCAF。空指针时只做一次加载，不进回调。
+// 生产路径保持空指针。回调可以堵住，这样计数在回调返回前不会下降。
+// 回调里不能再等这次释放，否则和后台线程互相等。
 using DocumentReleaseGate = void (*)();
 void setDocumentReleaseGate(DocumentReleaseGate gate) noexcept;
 

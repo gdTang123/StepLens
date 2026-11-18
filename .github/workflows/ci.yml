@@ -318,33 +318,46 @@ jobs:
           }
           Stop-Process -Id $proc.Id -Force
           Write-Host "空窗口在 offscreen 平台下保持运行"
-          # 模型已经显示后再关窗口。合成 STEP，不依赖 STEPLENS_SAMPLES。
-          # 进程应正常退出：后台 Close 还没完时直接结束，不和 OCCT 静态析构抢。
+          # 模型已经显示后再关窗口。每个进程使用合成 box.step，最多运行 60 秒。
+          # 生命周期日志由测试创建唯一 SHA/nonce 文件；HeldClose 由 Close gate 因果控制。
           $env:STEPLENS_APP_EXIT = "1"
           $lifeDir = Join-Path (Split-Path -Parent $exe) "logs"
           New-Item -ItemType Directory -Force -Path $lifeDir | Out-Null
-          $env:STEPLENS_LIFECYCLE_LOG = Join-Path $lifeDir "lifecycle-offscreen.log"
-          # 三条硬超时产品子进程：忙时 closeEvent、Ready+qApp.quit 且 Close 未完、Close 完成后正常 return。
-          # offscreen 走 NullSceneHost，不创建 Viewer/tree；真实 closeEvent 与 main 仍在产品路径上。
-          ctest --preset unit -C RelWithDebInfo --no-tests=error --output-on-failure `
-            -R "^AppExit\.(CloseEventWhileBusyQuickExits|CloseAfterDisplayedModelExitsCleanly|NormalReturnAfterCloseCompletes)$"
+          # AppExit 带 label app_exit，已被 unit 预设排除。这里必须用 --test-dir 发现测试。
+          # SKIPPED 不能算成功。offscreen 只覆盖 NullSceneHost 分支。
+          $ctestLog = Join-Path $env:RUNNER_TEMP "app-exit-offscreen.log"
+          $regex = "^AppExit\.(CloseEventWhileBusyQuickExits|CloseAfterDisplayedModelExitsCleanly|NormalReturnAfterCloseCompletes)$"
+          ctest --test-dir build/msvc -C RelWithDebInfo --no-tests=error --output-on-failure --output-log $ctestLog -R $regex
           if ($LASTEXITCODE -ne 0) { throw "产品退出三路径（offscreen）失败，退出码 $LASTEXITCODE" }
-          $closeLog = Join-Path $lifeDir "steplens.log"
-          if (-not (Test-Path -LiteralPath $closeLog)) { throw "未找到退出日志 $closeLog" }
-          Write-Host "---- steplens.log ----"
-          Get-Content -LiteralPath $closeLog
-          Write-Host "---- end steplens.log ----"
-          $hit = Select-String -LiteralPath $closeLog -Pattern "退出时文档仍在后台关闭，结束进程" -SimpleMatch
-          if (-not $hit) { throw "日志里没有后台关闭后结束进程这一行" }
-          if (Test-Path -LiteralPath $env:STEPLENS_LIFECYCLE_LOG) {
-            Write-Host "---- lifecycle-offscreen.log ----"
-            Get-Content -LiteralPath $env:STEPLENS_LIFECYCLE_LOG
-            Write-Host "---- end lifecycle-offscreen.log ----"
+          $ctestText = Get-Content -LiteralPath $ctestLog -Raw
+          if ($ctestText -match '\[  SKIPPED \]|No tests were found|Not Run') {
+            throw "offscreen AppExit 被跳过或未发现，不能算成功"
           }
+          $sha = (git rev-parse HEAD).Trim()
+          $lifeFiles = @(Get-ChildItem -LiteralPath $lifeDir -Filter "lifecycle-$sha-*.log" -File)
+          if ($lifeFiles.Count -lt 3) { throw "本轮 offscreen 生命周期日志不足 3 份（SHA $sha）" }
+          foreach ($lifeFile in $lifeFiles) {
+            Write-Host "---- $($lifeFile.FullName) ----"
+            $text = Get-Content -LiteralPath $lifeFile.FullName -Raw
+            Write-Host $text
+            Write-Host "---- end ----"
+            if ($text -notmatch "event=lifecycle-open identity=$sha ") { throw "$($lifeFile.Name) 缺少本次 SHA" }
+          }
+          $busy = ($lifeFiles | Where-Object Name -Match "offscreen-close-while-busy").Count
+          $held = ($lifeFiles | Where-Object Name -Match "offscreen-quit-when-ready").Count
+          $normal = ($lifeFiles | Where-Object Name -Match "offscreen-normal-return").Count
+          if ($busy -lt 1 -or $held -lt 1 -or $normal -lt 1) { throw "本轮 offscreen 三条路径日志未齐" }
+          $heldText = Get-Content -LiteralPath ($lifeFiles | Where-Object Name -Match "offscreen-quit-when-ready" | Select-Object -First 1).FullName -Raw
+          if ($heldText -notmatch "event=main-after-window identity=pending=([1-9]\d*) " -or $heldText -notmatch "event=main-quick-exit-pending") { throw "HeldClose 缺少 pending>0 因果回执" }
+          $normalText = Get-Content -LiteralPath ($lifeFiles | Where-Object Name -Match "offscreen-normal-return" | Select-Object -First 1).FullName -Raw
+          if ($normalText -notmatch "event=main-normal-return" -or $normalText -notmatch "event=retirer-end") { throw "正常 return 缺少 retirer-end" }
+
 
       - name: Smoke product shutdown with viewer and tree
         run: |
-          # 非 offscreen 隐藏窗口：取证 ViewerWidget/装配树拆除，不是像素拾取或帧对比。
+          # 非 offscreen 隐藏窗口：三条真实 Viewer/tree 路径，不是像素拾取或帧对比。
+          # 每个进程用合成 box.step、硬超时 60 秒和本轮唯一 SHA/nonce 生命周期日志。
+          # 不用 --preset unit，否则 app_exit 标签会被排除。
           $env:QT_PLUGIN_PATH = Join-Path $env:QTDIR "plugins"
           $vcpkgBin = Join-Path (Get-Location) "build\msvc\vcpkg_installed\x64-windows\bin"
           $env:PATH = "$vcpkgBin;$(Join-Path $env:QTDIR 'bin');$env:PATH"
@@ -354,15 +367,38 @@ jobs:
           $lifeDir = Join-Path (Split-Path -Parent $exe) "logs"
           New-Item -ItemType Directory -Force -Path $lifeDir | Out-Null
           $env:STEPLENS_APP_EXIT_VIEWER = "1"
-          $env:STEPLENS_LIFECYCLE_LOG = Join-Path $lifeDir "lifecycle-viewer.log"
-          ctest --preset unit -C RelWithDebInfo --no-tests=error --output-on-failure `
-            -R "^AppExit\.(ViewerTreeQuitWhenReadyHeldClose|ViewerTreeNormalReturn)$"
-          if ($LASTEXITCODE -ne 0) { throw "产品 Viewer/tree 退出路径失败，退出码 $LASTEXITCODE" }
-          if (Test-Path -LiteralPath $env:STEPLENS_LIFECYCLE_LOG) {
-            Write-Host "---- lifecycle-viewer.log ----"
-            Get-Content -LiteralPath $env:STEPLENS_LIFECYCLE_LOG
-            Write-Host "---- end lifecycle-viewer.log ----"
+          $ctestLog = Join-Path $env:RUNNER_TEMP "app-exit-viewer.log"
+          $regex = "^AppExit\.(ViewerTreeCloseEventWhileBusy|ViewerTreeQuitWhenReadyHeldClose|ViewerTreeNormalReturn)$"
+          ctest --test-dir build/msvc -C RelWithDebInfo --no-tests=error --output-on-failure --output-log $ctestLog -R $regex
+          if ($LASTEXITCODE -ne 0) { throw "产品 Viewer/tree 退出三路径失败，退出码 $LASTEXITCODE" }
+          $ctestText = Get-Content -LiteralPath $ctestLog -Raw
+          if ($ctestText -match '\[  SKIPPED \]|No tests were found|Not Run') {
+            throw "Viewer AppExit 被跳过或未发现，不能算成功"
           }
+          $sha = (git rev-parse HEAD).Trim()
+          $lifeFiles = @(Get-ChildItem -LiteralPath $lifeDir -Filter "lifecycle-$sha-*.log" -File)
+          if ($lifeFiles.Count -lt 3) { throw "本轮 Viewer/tree 生命周期日志不足 3 份（SHA $sha）" }
+          foreach ($lifeFile in $lifeFiles) {
+            Write-Host "---- $($lifeFile.FullName) ----"
+            $text = Get-Content -LiteralPath $lifeFile.FullName -Raw
+            Write-Host $text
+            Write-Host "---- end ----"
+            if ($text -notmatch "event=lifecycle-open identity=$sha ") { throw "$($lifeFile.Name) 缺少本次 SHA" }
+          }
+          $busyFile = $lifeFiles | Where-Object Name -Match "viewer-close-while-busy" | Select-Object -First 1
+          $heldFile = $lifeFiles | Where-Object Name -Match "viewer-held-close" | Select-Object -First 1
+          $normalFile = $lifeFiles | Where-Object Name -Match "viewer-normal" | Select-Object -First 1
+          if (-not $busyFile -or -not $heldFile -or -not $normalFile) { throw "本轮 Viewer/tree 三条路径日志未齐" }
+          $heldText = Get-Content -LiteralPath $heldFile.FullName -Raw
+          if ($heldText -notmatch "event=main-after-window identity=pending=([1-9]\d*) ") { throw "$($heldFile.Name) 缺少 pending>0" }
+          foreach ($required in @("event=mainwindow-destructor-begin", "event=mainwindow-destructor-end", "event=mainwindow-members-begin", "event=mainwindow-members-end", "event=qobject-child-destroyed identity=viewerWidget", "event=qobject-child-destroyed identity=assemblyTreePanel", "event=main-quick-exit-pending")) {
+            if ($heldText -notmatch [regex]::Escape($required)) { throw "$($heldFile.Name) 缺少 $required" }
+          }
+          $busyText = Get-Content -LiteralPath $busyFile.FullName -Raw
+          if ($busyText -notmatch "event=viewer-created" -or $busyText -notmatch "event=mainwindow-closeEvent-busy") { throw "Viewer busy-close 缺少事件" }
+          $normalText = Get-Content -LiteralPath $normalFile.FullName -Raw
+          if ($normalText -notmatch "event=main-normal-return" -or $normalText -notmatch "event=retirer-end") { throw "Viewer 正常 return 缺少 retirer-end" }
+
 
       - name: clang-tidy changed C++ files
         run: |

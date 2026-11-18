@@ -4,6 +4,7 @@
 #include "core/Log.h"
 #include "core/OcctLoadContract.h"
 #include "io/HeapRelease.h"
+#include "io/XcafLifetime.h"
 #include "model/DocumentModel.h"
 #include "occtsupport/OcctBoundary.h"
 
@@ -27,12 +28,14 @@ namespace steplens::model {
 namespace {
 
 std::atomic<void (*)()> g_afterJoinHook{nullptr};
+std::atomic<DocumentReleaseGate> g_documentReleaseGate{nullptr};
 
 void ensureReleaseDependencies() {
-    // Touch only: taking this reference constructs the existing mutex without locking it.
+    // 只触碰既有静态对象以完成构造，不加锁，更不把锁拿到 Retirer 启动之后。
     static_cast<void>(steplens::xcafDocumentMutex());
     static_cast<void>(XCAFApp_Application::GetApplication());
-    static_cast<void>(steplens::Log::ready()); // constructs LogState; file readiness is optional.
+    steplens::io::noteXcafApplicationAccessed();
+    static_cast<void>(steplens::Log::ready()); // 只构造 LogState，不要求日志文件打开。
 }
 
 thread_local bool initializingRetirer = false;
@@ -77,7 +80,10 @@ public:
     Retirer() : m_thread([this] { run(); }) {}
 
     ~Retirer() {
-        lifecycleTrace("retirer-stop", "pending=" + std::to_string(count()));
+        lifecycleTrace("retirer-stop",
+                       "pending=" + std::to_string(count()) +
+                           " live=" + std::to_string(m_live.load(std::memory_order_acquire)) +
+                           " inflight=" + std::to_string(m_inFlight.load(std::memory_order_acquire)));
         {
             Lock lock(m_mutex);
             m_stopping = true;
@@ -101,7 +107,10 @@ public:
         }
         // 不在析构中访问 XCAF/Log；静态寿命顺序由 instance() 的首次构造依赖保证。
         io::setHeapReleasePendingProbe(nullptr);
-        lifecycleTrace("retirer-end");
+        lifecycleTrace("retirer-end",
+                       "pending=" + std::to_string(count()) +
+                           " live=" + std::to_string(m_live.load(std::memory_order_acquire)) +
+                           " inflight=" + std::to_string(m_inFlight.load(std::memory_order_acquire)));
     }
 
     void retire(std::shared_ptr<const DocumentModel> model) {
@@ -179,10 +188,6 @@ public:
         }
     }
 
-    void setGate(DocumentReleaseGate gate) noexcept {
-        m_gate.store(gate, std::memory_order_release);
-    }
-
     void setEnqueueGate(DocumentReleaseEnqueueGate gate) noexcept {
         m_enqueueGate.store(gate, std::memory_order_release);
     }
@@ -244,7 +249,7 @@ private:
         if (delay != 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(delay));
         }
-        if (auto gate = m_gate.load(std::memory_order_acquire)) {
+        if (auto gate = g_documentReleaseGate.load(std::memory_order_acquire)) {
             try {
                 gate();
             } catch (...) {
@@ -290,7 +295,6 @@ private:
     DocumentModel* m_tail = nullptr;
     std::atomic<int> m_inFlight{0};
     std::function<void(std::thread::id)> m_probe;
-    std::atomic<DocumentReleaseGate> m_gate{nullptr};
     std::atomic<DocumentReleaseEnqueueGate> m_enqueueGate{nullptr};
     std::atomic<int> m_pending{0};
     std::atomic<int> m_live{0};
@@ -360,7 +364,7 @@ void setDocumentReleaseProbe(std::function<void(std::thread::id)> probe) {
     instance().setProbe(std::move(probe));
 }
 void setDocumentReleaseGate(DocumentReleaseGate gate) noexcept {
-    instance().setGate(gate);
+    g_documentReleaseGate.store(gate, std::memory_order_release);
 }
 void setDocumentReleaseEnqueueGate(DocumentReleaseEnqueueGate gate) noexcept {
     instance().setEnqueueGate(gate);

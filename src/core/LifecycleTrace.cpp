@@ -40,13 +40,19 @@ void initializeLifecycleTrace() {
         return;
     }
     auto& trace = state();
-    std::lock_guard lock(trace.mutex);
+    {
+        std::lock_guard lock(trace.mutex);
 #if defined(_WIN32)
-    trace.file = CreateFileA(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS,
-                             FILE_ATTRIBUTE_NORMAL, nullptr);
+        trace.file = CreateFileA(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                                 OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
 #else
-    trace.file = ::open(path, O_WRONLY | O_CREAT | O_APPEND, 0600);
+        trace.file = ::open(path, O_WRONLY | O_CREAT | O_APPEND, 0600);
 #endif
+    }
+    const char* sha = std::getenv("STEPLENS_LIFECYCLE_SHA");
+    if (sha != nullptr && *sha != '\0') {
+        lifecycleTrace("lifecycle-open", sha);
+    }
 }
 
 void lifecycleTrace(std::string_view event, std::string_view identity, int exitCode) noexcept {

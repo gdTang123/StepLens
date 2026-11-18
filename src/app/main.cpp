@@ -23,9 +23,11 @@
 #endif
 
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
 #include <exception>
+#include <mutex>
 #include <string>
 
 int main(int argc, char* argv[]) {
@@ -43,6 +45,17 @@ int main(int argc, char* argv[]) {
     } catch (const std::exception& ex) {
         // 启动阶段还没有可用日志。窗口仍然打开。
         static_cast<void>(ex.what());
+    }
+
+    // AppExit 因果门只写入独立原子配置，不构造 Retirer/XCAF；Close 留在后台挂起，
+    // 窗口拆完后由 pending 路径结束进程。
+    if (qEnvironmentVariableIsSet("STEPLENS_HOLD_CLOSE_UNTIL_AFTER_WINDOW")) {
+        steplens::model::setDocumentReleaseGate(+[] {
+            static std::mutex mutex;
+            static std::condition_variable condition;
+            std::unique_lock lock(mutex);
+            condition.wait(lock, [] { return false; });
+        });
     }
 
 #if defined(_WIN32)
