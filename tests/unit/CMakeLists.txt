@@ -174,6 +174,19 @@ if(NOT STEPLENS_CORE_ONLY)
     target_link_libraries(steplens_tests PRIVATE Qt6::Core)
     target_compile_definitions(steplens_tests PRIVATE "STEPLENS_EXPECTED_OCCT=\"${STEPLENS_EXPECTED_OCCT}\"")
 
+    # StatusNotice uses Qt Widgets, so keep it outside steplens_tests, which links only Qt Core.
+    add_executable(steplens_status_notice_tests
+        ../harness/t14-evidence/StatusNoticeTest.cpp
+        ${CMAKE_SOURCE_DIR}/src/app/StatusNotice.cpp)
+    target_include_directories(steplens_status_notice_tests PRIVATE "${CMAKE_SOURCE_DIR}/src")
+    target_link_libraries(steplens_status_notice_tests PRIVATE
+        Qt6::Widgets
+        Qt6::Test
+        GTest::gtest_main)
+    steplens_apply_warnings(steplens_status_notice_tests)
+    steplens_apply_exceptions(steplens_status_notice_tests OFF)
+    set_target_properties(steplens_status_notice_tests PROPERTIES FOLDER "tests")
+
     # 场景测试单独成可执行文件：它要链 TKOpenGl，不能并进上面这份。
     add_executable(steplens_scene_tests scene/SceneBuilderTest.cpp)
     target_include_directories(steplens_scene_tests PRIVATE "${CMAKE_SOURCE_DIR}/src")
@@ -218,6 +231,11 @@ gtest_discover_tests(steplens_tests
     PROPERTIES LABELS unit)
 if(NOT STEPLENS_CORE_ONLY)
     # include(GoogleTest) 在上面。提前调用 gtest_discover_tests 时 MSVC 配置会报未知命令。
+    gtest_discover_tests(steplens_status_notice_tests
+        DISCOVERY_MODE PRE_TEST
+        PROPERTIES
+            LABELS unit
+            ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
     gtest_discover_tests(steplens_scene_tests
         DISCOVERY_MODE PRE_TEST
         PROPERTIES LABELS unit)

@@ -3,7 +3,7 @@
 #include <QApplication>
 #include <QMainWindow>
 #include <QStatusBar>
-#include <QTimer>
+#include <QTest>
 
 #include <gtest/gtest.h>
 
@@ -14,29 +14,20 @@ TEST(StatusNotice, CombinedNoticeRemainsVisibleAcrossUiTicks) {
     char* argv[] = {name, nullptr};
     QApplication app(argc, argv);
     QMainWindow window;
+    window.show();
     steplens::StatusNotice notice;
     notice.setMemoryConditions(true, true);
-    QTimer tick;
-    tick.setInterval(16);
-    int ticks = 0;
-    QObject::connect(&tick, &QTimer::timeout, [&] {
-        ++ticks;
-        if (ticks == 1) {
-            window.statusBar()->showMessage(notice.combine(QStringLiteral("正在读取文件")));
-            notice.finish();
-        } else {
-            window.statusBar()->showMessage(notice.combine(QStringLiteral("已完成")));
-        }
-        if (ticks == 5) {
-            EXPECT_TRUE(window.statusBar()->currentMessage().contains(QStringLiteral("配置无效")));
-            EXPECT_TRUE(window.statusBar()->currentMessage().contains(QStringLiteral("预检不可用")));
-            EXPECT_TRUE(window.statusBar()->currentMessage().contains(QStringLiteral("已完成")));
-            tick.stop();
-            app.quit();
-        }
-    });
-    tick.start();
-    QTimer::singleShot(200, &app, &QApplication::quit);
-    app.exec();
-    EXPECT_EQ(ticks, 5);
+    window.statusBar()->showMessage(notice.combine(QStringLiteral("正在读取文件")));
+    notice.finish();
+
+    // Refresh across multiple UI timer periods without depending on timer delivery.
+    for (int tick = 0; tick < 5; ++tick) {
+        QTest::qWait(16);
+        window.statusBar()->showMessage(notice.combine(QStringLiteral("已完成")));
+    }
+
+    const QString message = window.statusBar()->currentMessage();
+    EXPECT_TRUE(message.contains(QStringLiteral("配置无效")));
+    EXPECT_TRUE(message.contains(QStringLiteral("预检不可用")));
+    EXPECT_TRUE(message.contains(QStringLiteral("已完成")));
 }
