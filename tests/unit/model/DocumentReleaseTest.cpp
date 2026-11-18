@@ -414,7 +414,8 @@ TEST(DocumentRelease, EnqueueNotifyIsCoveredByInFlightAcrossStop) {
             delete held;
         }).detach();
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-        while (!enqueueGateEntered.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline) {
+        while (!enqueueGateEntered.load(std::memory_order_acquire) &&
+               std::chrono::steady_clock::now() < deadline) {
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
         if (!enqueueGateEntered.load(std::memory_order_acquire)) {

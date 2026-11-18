@@ -7,6 +7,8 @@
 #include "model/DocumentModel.h"
 #include "occtsupport/OcctBoundary.h"
 
+#include <XCAFApp_Application.hxx>
+
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -16,7 +18,6 @@
 #include <mutex>
 #include <string>
 #include <thread>
-#include <XCAFApp_Application.hxx>
 
 #if defined(_WIN32)
 #include <Windows.h>
@@ -309,8 +310,12 @@ Retirer& instance() {
         std::terminate();
     }
     struct InitGuard {
-        InitGuard() { initializingRetirer = true; }
-        ~InitGuard() { initializingRetirer = false; }
+        InitGuard() {
+            initializingRetirer = true;
+        }
+        ~InitGuard() {
+            initializingRetirer = false;
+        }
     } guard;
     static const bool dependenciesReady = [] {
         ensureReleaseDependencies();

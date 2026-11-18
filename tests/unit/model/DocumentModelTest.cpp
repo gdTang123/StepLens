@@ -392,8 +392,8 @@ TEST(DocumentModel, HeldReferenceDoesNotSettleUntilLastDrop) {
     shapes->AddShape(BRepPrimAPI_MakeBox(1.0, 1.0, 1.0).Shape(), false);
     steplens::ProgressSink sink;
     sink.reset(1);
-    auto model = requireModel(steplens::model::DocumentModel::build(
-        loadedFrom(std::move(doc), 1.0, "AP214"), sink, steplens::CancelToken{}));
+    auto model = requireModel(steplens::model::DocumentModel::build(loadedFrom(std::move(doc), 1.0, "AP214"),
+                                                                    sink, steplens::CancelToken{}));
     ASSERT_TRUE(model);
     auto held = model;
 
