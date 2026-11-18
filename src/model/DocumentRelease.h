@@ -17,6 +17,13 @@ void handoffDocument(std::shared_ptr<const DocumentModel> model) noexcept;
 void destroyDocumentModel(const DocumentModel* model) noexcept;
 void noteDocumentConstructed() noexcept;
 
+// 测试缝：仅影响下一次模型交接，在 owner.detach() 后模拟控制块分配失败。
+void failNextDocumentControlBlockForTesting(bool fail) noexcept;
+// 测试缝：在真实 XCAF Close 调用前注入异常；析构仍会完成清理。
+void failNextDocumentCloseForTesting(bool fail) noexcept;
+// 只报告最近一次 XCAF Close 是否失败；pending 归零仅说明释放任务结束，不代表 Close 成功。
+[[nodiscard]] bool lastDocumentCloseFailed() noexcept;
+
 [[nodiscard]] int documentsPendingRelease() noexcept;
 
 // 等到后台 Close 结束。超时返回 false。

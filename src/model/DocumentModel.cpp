@@ -24,6 +24,7 @@
 #include <gp_Pnt.hxx>
 
 #include <algorithm>
+#include <atomic>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -34,6 +35,11 @@
 
 namespace steplens::model {
 namespace {
+
+std::atomic<bool> g_failNextControlBlock{false};
+
+std::atomic<bool> g_failNextClose{false};
+std::atomic<bool> g_lastCloseFailed{false};
 
 // 8.0 弃用了 TDF_LabelSequence 这个名字。7.9.3 里它就是这个序列。
 using LabelSequence = NCollection_Sequence<TDF_Label>;
@@ -106,9 +112,15 @@ void closeDocument(opencascade::handle<TDocStd_Document>& doc) noexcept {
     try {
         std::lock_guard lock(xcafDocumentMutex());
         if (!doc.IsNull()) {
+            if (g_failNextClose.exchange(false, std::memory_order_acq_rel)) {
+                throw std::runtime_error("测试注入：XCAF Close 失败");
+            }
             XCAFApp_Application::GetApplication()->Close(doc);
+            g_lastCloseFailed.store(false, std::memory_order_release);
         }
     } catch (...) {
+        // pending 归零只表示释放任务结束。Close 抛错时 Application 仍可能登记该文档。
+        g_lastCloseFailed.store(true, std::memory_order_release);
     }
     doc.Nullify();
 }
@@ -756,6 +768,18 @@ void collectEntities(const TopoDS_Shape& shape, const TDF_Label& label,
 
 } // namespace
 
+void failNextDocumentCloseForTesting(bool fail) noexcept {
+    g_failNextClose.store(fail, std::memory_order_release);
+}
+
+bool lastDocumentCloseFailed() noexcept {
+    return g_lastCloseFailed.load(std::memory_order_acquire);
+}
+
+void failNextDocumentControlBlockForTesting(bool fail) noexcept {
+    g_failNextControlBlock.store(fail, std::memory_order_release);
+}
+
 DocumentModel::DocumentModel(BuildKey, opencascade::handle<TDocStd_Document> doc, double lengthUnitToMm)
     : m_doc(std::move(doc)), m_lengthUnitToMm(sanitizeUnit(lengthUnitToMm)) {
     noteDocumentConstructed();
@@ -787,6 +811,10 @@ DocumentModel::build(io::LoadedDocument document, ProgressSink& progress, const 
             }
             auto* raw = new DocumentModel(BuildKey{}, owner.get(), unit);
             owner.detach();
+            if (g_failNextControlBlock.exchange(false, std::memory_order_acq_rel)) {
+                destroyDocumentModel(raw);
+                throw std::bad_alloc{};
+            }
             std::shared_ptr<const DocumentModel> model{
                 raw, [](const DocumentModel* p) noexcept { destroyDocumentModel(p); }};
             auto* mutableModel = const_cast<DocumentModel*>(model.get());

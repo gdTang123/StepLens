@@ -27,6 +27,7 @@ class AssemblyTreePanel;
 }
 
 // 主窗口。打开、取消、进度都走 LoadPipeline，界面线程只 tick，不读文件、不三角化。
+// 当前 QObject 仿真树只验证模型级析构顺序；真实成员/子树析构仍待产品 CI 验证。
 class MainWindow final : public QMainWindow {
     Q_OBJECT
 

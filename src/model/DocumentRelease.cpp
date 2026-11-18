@@ -18,30 +18,14 @@
 namespace steplens::model {
 namespace {
 
-void lockWithoutThrow(std::mutex& mutex) noexcept {
-    for (;;) {
-        try {
-            mutex.lock();
-            return;
-        } catch (...) {
-            std::this_thread::yield();
-        }
-    }
-}
-
 class Lock {
 public:
-    explicit Lock(std::mutex& mutex) noexcept : m_mutex(mutex) {
-        lockWithoutThrow(m_mutex);
-    }
-    ~Lock() {
-        m_mutex.unlock();
-    }
+    explicit Lock(std::mutex& mutex) : m_lock(mutex) {}
     Lock(const Lock&) = delete;
     Lock& operator=(const Lock&) = delete;
 
 private:
-    std::mutex& m_mutex;
+    std::unique_lock<std::mutex> m_lock;
 };
 
 unsigned releaseDelayMs() noexcept {
@@ -88,10 +72,7 @@ public:
         if (!model) {
             return;
         }
-        bool expected = false;
-        if (model->m_retired.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
-            m_pending.fetch_add(1, std::memory_order_release);
-        }
+        markRetired(const_cast<DocumentModel*>(model.get()));
         model.reset();
     }
 
@@ -104,23 +85,22 @@ public:
             return;
         }
         auto* mutableModel = const_cast<DocumentModel*>(model);
-        bool expected = false;
-        if (mutableModel->m_retired.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
-            m_pending.fetch_add(1, std::memory_order_release);
-        }
+        markRetired(mutableModel);
         if (std::this_thread::get_id() == m_thread.get_id()) {
             finish(model);
             return;
         }
-        {
-            Lock lock(m_mutex);
-            mutableModel->m_releaseNext = nullptr;
-            if (m_tail) {
-                m_tail->m_releaseNext = mutableModel;
-            } else {
-                m_head = mutableModel;
-            }
-            m_tail = mutableModel;
+        // 无分配 CAS 入队把原 deque 的分配失败改成指针 CAS；GUI deleter 不拿 mutex，
+        // 因而不会在永久 mutex 错误上无限重试。通知若丢失，后台 wait_for 短超时兜底。
+        // 入队者计数保护已摘下的旧头，避免节点释放并复用地址造成 CAS 栈 ABA。
+        m_activePushers.fetch_add(1, std::memory_order_seq_cst);
+        DocumentModel* head = m_incoming.load(std::memory_order_seq_cst);
+        do {
+            mutableModel->m_releaseNext = head;
+        } while (!m_incoming.compare_exchange_weak(head, mutableModel, std::memory_order_release,
+                                                   std::memory_order_relaxed));
+        if (m_activePushers.fetch_sub(1, std::memory_order_seq_cst) == 1) {
+            m_condition.notify_all();
         }
         m_condition.notify_one();
     }
@@ -162,6 +142,16 @@ public:
     }
 
 private:
+    void markRetired(DocumentModel* model) noexcept {
+        // 先 tentative 记票再发布 retired，避免 wait/isSettled 在 retired 已可见而 pending=0 时提前成功。
+        // CAS 失败时撤销临时票；service 生命周期也因此只会在真实释放完成后观察到归零。
+        m_pending.fetch_add(1, std::memory_order_acq_rel);
+        bool expected = false;
+        if (!model->m_retired.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+            m_pending.fetch_sub(1, std::memory_order_acq_rel);
+        }
+    }
+
     void finish(const DocumentModel* model) noexcept {
         const unsigned delay = releaseDelayMs();
         if (delay != 0) {
@@ -183,32 +173,54 @@ private:
         m_condition.notify_all();
     }
 
+    void waitForPushers() {
+        // 旧批次可能被正在 CAS 的入队者暂存；等待只发生在 retirer，超时覆盖无锁 notify 的竞态。
+        std::unique_lock lock(m_mutex);
+        while (m_activePushers.load(std::memory_order_seq_cst) != 0) {
+            m_condition.wait_for(lock, std::chrono::milliseconds(20));
+        }
+    }
+
     void run() noexcept {
         occt::OcctBoundary::armWorkerThread();
         for (;;) {
-            const DocumentModel* model = nullptr;
+            DocumentModel* model = nullptr;
             {
                 std::unique_lock lock(m_mutex);
-                m_condition.wait(lock, [this] {
-                    return m_head || (m_stopping && m_live.load(std::memory_order_acquire) == 0);
+                m_condition.wait_for(lock, std::chrono::milliseconds(20), [this] {
+                    return m_incoming.load(std::memory_order_acquire) ||
+                           (m_stopping && m_live.load(std::memory_order_acquire) == 0);
                 });
-                if (!m_head && m_stopping && m_live.load(std::memory_order_acquire) == 0) {
+                if (!m_incoming.load(std::memory_order_acquire) && m_stopping &&
+                    m_live.load(std::memory_order_acquire) == 0) {
                     return;
                 }
-                model = m_head;
-                m_head = model->m_releaseNext;
-                if (!m_head) {
-                    m_tail = nullptr;
-                }
             }
-            finish(model);
+            model = m_incoming.exchange(nullptr, std::memory_order_seq_cst);
+            if (!model)
+                continue;
+            waitForPushers();
+            // 反转 CAS 栈，维持一批入队的 FIFO 回收次序。
+            DocumentModel* reversed = nullptr;
+            while (model) {
+                DocumentModel* next = model->m_releaseNext;
+                model->m_releaseNext = reversed;
+                reversed = model;
+                model = next;
+            }
+            model = reversed;
+            while (model) {
+                DocumentModel* next = model->m_releaseNext;
+                finish(model);
+                model = next;
+            }
         }
     }
 
     std::mutex m_mutex;
     std::condition_variable m_condition;
-    DocumentModel* m_head = nullptr;
-    DocumentModel* m_tail = nullptr;
+    std::atomic<DocumentModel*> m_incoming{nullptr};
+    std::atomic<unsigned> m_activePushers{0};
     std::function<void(std::thread::id)> m_probe;
     std::atomic<DocumentReleaseGate> m_gate{nullptr};
     std::atomic<int> m_pending{0};

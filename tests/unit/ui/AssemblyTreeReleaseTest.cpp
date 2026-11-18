@@ -104,6 +104,7 @@ TEST(AssemblyTreeRelease, RetiredDocumentClosesAfterTreeDropsItsReference) {
     EXPECT_EQ(documentCount(), baseline);
 }
 
+// 这里只验证模型级 QObject 子树顺序；真实 MainWindow 成员/子树析构仍待产品 CI。
 TEST(AssemblyTreeRelease, QObjectChildTreeDropsLastReferenceOffGuiThreadDuringParentTeardown) {
     ensureApplication();
     ASSERT_TRUE(model::waitForDocumentRelease(std::chrono::seconds(30)));

@@ -25,6 +25,16 @@ inline constexpr char kSteplensSourceDir[] = R\"bench(${CMAKE_SOURCE_DIR})bench\
 ")
 endfunction()
 
+# 最小快退子进程与合同/产品测试共用模型库。CORE_ONLY 没有 steplens::model，不能无条件加入。
+if(NOT STEPLENS_CORE_ONLY)
+    add_executable(steplens_release_quick_exit model/ReleaseQuickExitMain.cpp)
+    target_include_directories(steplens_release_quick_exit PRIVATE "${CMAKE_SOURCE_DIR}/src")
+    target_link_libraries(steplens_release_quick_exit PRIVATE steplens::model)
+    steplens_apply_warnings(steplens_release_quick_exit)
+    steplens_apply_exceptions(steplens_release_quick_exit OFF)
+    set_target_properties(steplens_release_quick_exit PROPERTIES FOLDER "tests")
+endif()
+
 if(STEPLENS_OCCT_CONTRACT)
     add_executable(steplens_occt_contract occt/OcctKernelContractTest.cpp)
     target_include_directories(steplens_occt_contract PRIVATE "${CMAKE_SOURCE_DIR}/src")
@@ -67,10 +77,13 @@ if(STEPLENS_OCCT_CONTRACT)
 
     # T06 DocumentModel。和加载器同一个无头作业。OCCT 静态分配仍关掉泄漏检查。
     add_executable(steplens_model_tests model/DocumentModelTest.cpp model/DocumentReleaseTest.cpp)
+    add_dependencies(steplens_model_tests steplens_release_quick_exit)
     target_include_directories(steplens_model_tests PRIVATE "${CMAKE_SOURCE_DIR}/src")
     target_link_libraries(steplens_model_tests PRIVATE steplens::model GTest::gtest_main)
     target_compile_definitions(steplens_model_tests PRIVATE
         "STEPLENS_EXPECTED_OCCT=\"${STEPLENS_EXPECTED_OCCT}\"")
+    target_compile_definitions(steplens_model_tests PRIVATE
+        "STEPLENS_RELEASE_QUICK_EXIT_EXE=\"$<TARGET_FILE:steplens_release_quick_exit>\"")
     steplens_apply_warnings(steplens_model_tests)
     steplens_apply_exceptions(steplens_model_tests OFF)
     set_target_properties(steplens_model_tests PROPERTIES FOLDER "tests")
@@ -183,7 +196,10 @@ if(NOT STEPLENS_CORE_ONLY)
     # mesh 公开链 TKV3d（FillTriangles），不链 vis，所以 TKOpenGl 仍然进不来。
     target_link_libraries(steplens_tests PRIVATE steplens::occtsupport steplens::mesh)
     target_link_libraries(steplens_tests PRIVATE Qt6::Core)
-    target_compile_definitions(steplens_tests PRIVATE "STEPLENS_EXPECTED_OCCT=\"${STEPLENS_EXPECTED_OCCT}\"")
+    add_dependencies(steplens_tests steplens_release_quick_exit)
+    target_compile_definitions(steplens_tests PRIVATE
+        "STEPLENS_EXPECTED_OCCT=\"${STEPLENS_EXPECTED_OCCT}\""
+        "STEPLENS_RELEASE_QUICK_EXIT_EXE=\"$<TARGET_FILE:steplens_release_quick_exit>\"")
 
     # StatusNotice uses Qt Widgets, so keep it outside steplens_tests, which links only Qt Core.
     add_executable(steplens_status_notice_tests
