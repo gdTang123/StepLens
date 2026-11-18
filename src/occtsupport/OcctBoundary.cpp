@@ -20,6 +20,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <type_traits>
 
 #if defined(_WIN32)
 #include <eh.h>
@@ -204,6 +205,16 @@ void OcctBoundary::armWorkerThread() {
 int OcctBoundary::armCountOnThisThread() noexcept {
     return t_armCount;
 }
+
+#if defined(_WIN32)
+static_assert(std::is_same_v<_se_translator_function, OcctBoundary::SehTranslatorForTesting>,
+              "exchangeSehTranslatorForTesting must use the CRT _se_translator_function ABI");
+
+OcctBoundary::SehTranslatorForTesting
+OcctBoundary::exchangeSehTranslatorForTesting(SehTranslatorForTesting next) {
+    return _set_se_translator(next);
+}
+#endif
 
 std::unique_ptr<TaskScheduler> makeOcctTaskScheduler(unsigned threads) {
     return std::make_unique<TaskScheduler>(threads, [] { OcctBoundary::armWorkerThread(); });

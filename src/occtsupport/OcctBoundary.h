@@ -9,6 +9,13 @@
 #include <memory>
 #include <string_view>
 
+#if defined(_WIN32)
+// 必须在 namespace/class 之外前向声明，与 Windows <eh.h>/winnt.h 的 struct 标签为同一实体。
+// 写在 OcctBoundary 类体内会形成 OcctBoundary::_EXCEPTION_POINTERS，
+// 与::_EXCEPTION_POINTERS、_se_translator_function、测试 sehSentinel 和无捕获 lambda 均不兼容。
+struct _EXCEPTION_POINTERS;
+#endif
+
 namespace steplens::occt {
 
 // 接住访问违例之后进程内存不再可信。标记一旦置上就不再清掉。
@@ -59,6 +66,15 @@ public:
     // 测试缝：本线程已经执行过几次 armWorkerThread。生产代码不读它。
     // 计数发生在钩子内部，所以只调用 SetThreadLocalSignal 之外的空函数不会增加。
     [[nodiscard]] static int armCountOnThisThread() noexcept;
+
+#if defined(_WIN32)
+    using SehTranslatorForTesting = void (*)(unsigned, struct ::_EXCEPTION_POINTERS*);
+    // 测试缝：在本 /EHa 翻译单元内交换当前线程 SEH translator。生产不调用。
+    // /EHsc 测试用它安装 sentinel 并核验 ScopedThreadSignal 已恢复调用者译码器，
+    // 不得在测试 TU 里直接调用 _set_se_translator（C4535 需要 /EHa）。
+    // 不删除 sentinel，不削弱 FP/SEH 恢复合同。
+    static SehTranslatorForTesting exchangeSehTranslatorForTesting(SehTranslatorForTesting next);
+#endif
 
     // 在当前线程触发一次空指针写入，并收成 Result。进程不退出。
     // 成功接住时 code 为 Internal，userMessage 为 kProcessContaminatedUserMessage，并置
