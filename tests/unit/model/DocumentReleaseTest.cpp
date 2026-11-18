@@ -151,8 +151,8 @@ TEST(DocumentRelease, FirstWaitBeforeDocumentStillDrainsToBaseline) {
 }
 
 TEST(DocumentRelease, FirstWaitSerializesXcafApplicationInitializationInFreshProcess) {
-    const char* childMark = std::getenv("STEPLENS_R2_FIRST_WAIT_CHILD");
-    if (childMark != nullptr && *childMark != '\0') {
+    const TestEnvValue childMark = readTestEnvironment("STEPLENS_R2_FIRST_WAIT_CHILD");
+    if (childMark.present && !childMark.value.empty()) {
         std::atomic<bool> loadDone{false};
         std::atomic<bool> waiterResult{false};
         Handle(XCAFApp_Application) loadApplication;
@@ -546,8 +546,8 @@ TEST(DocumentRelease, ConcurrentDuplicateRetireNeverPublishesTwoTickets) {
 TEST(DocumentRelease, EnqueueNotifyIsCoveredByInFlightAcrossStop) {
     steplens::test::TempDir dir;
     const auto logPath = dir.path() / "lifecycle-r1.log";
-    const char* childMark = std::getenv("STEPLENS_R1_ENQUEUE_CHILD");
-    if (childMark != nullptr && *childMark != '\0') {
+    const TestEnvValue childMark = readTestEnvironment("STEPLENS_R1_ENQUEUE_CHILD");
+    if (childMark.present && !childMark.value.empty()) {
         enqueueGateEntered.store(false, std::memory_order_release);
         releaseEnqueueGate.store(false, std::memory_order_release);
         steplens::initializeLifecycleTrace();
@@ -906,13 +906,13 @@ void expectHangChildFailsClosed(const char* tag, const char* markEnv, const char
 // 验证非 worker 的进程主线程首次入口会恢复调用者 FP 政策。
 // 这不是 QApplication 线程，不能当作 GUI 首入已验证；GUI 首入在 DocumentReleaseGuiFirstEntryTest。
 TEST(DocumentRelease, FirstMainThreadEntryRestoresCallerFpPolicy) {
-    const char* childMark = std::getenv("STEPLENS_B2_FP_ENTRY");
-    if (childMark != nullptr && std::string(childMark) == "main") {
-        if (std::getenv("STEPLENS_B2_HANG_BEFORE_ENTRY") != nullptr) {
+    const TestEnvValue childMark = readTestEnvironment("STEPLENS_B2_FP_ENTRY");
+    if (childMark.present && childMark.value == "main") {
+        if (readTestEnvironment("STEPLENS_B2_HANG_BEFORE_ENTRY").present) {
             testChildHangForever();
         }
         const int code = runFirstEntryFpChild("main");
-        if (std::getenv("STEPLENS_B2_HANG_AFTER_ENTRY") != nullptr) {
+        if (readTestEnvironment("STEPLENS_B2_HANG_AFTER_ENTRY").present) {
             testChildHangForever();
         }
         std::exit(code);
@@ -973,15 +973,15 @@ TEST(DocumentRelease, FirstMainThreadEntryRestoresCallerFpPolicy) {
 
 // 普通 wait 线程首次入口。同样不是 QApplication/GUI 验证。
 TEST(DocumentRelease, FirstOrdinaryWaitThreadEntryRestoresCallerFpPolicy) {
-    const char* childMark = std::getenv("STEPLENS_B2_FP_ENTRY");
-    if (childMark != nullptr && std::string(childMark) == "waiter") {
-        if (std::getenv("STEPLENS_B2_HANG_BEFORE_ENTRY") != nullptr) {
+    const TestEnvValue childMark = readTestEnvironment("STEPLENS_B2_FP_ENTRY");
+    if (childMark.present && childMark.value == "waiter") {
+        if (readTestEnvironment("STEPLENS_B2_HANG_BEFORE_ENTRY").present) {
             testChildHangForever();
         }
         int result = 4;
         std::thread waiter([&] { result = runFirstEntryFpChild("waiter"); });
         waiter.join();
-        if (std::getenv("STEPLENS_B2_HANG_AFTER_ENTRY") != nullptr) {
+        if (readTestEnvironment("STEPLENS_B2_HANG_AFTER_ENTRY").present) {
             testChildHangForever();
         }
         std::exit(result);
@@ -1124,9 +1124,9 @@ TEST(OcctBoundary, ScopedThreadSignalStateIsPerThread) {
 }
 
 TEST(OcctBoundary, SaveFailureDoesNotArmOrStartRetirer) {
-    const char* childMark = std::getenv("STEPLENS_B2_SAVE_FAIL");
-    if (childMark != nullptr && *childMark != '\0') {
-        if (std::getenv("STEPLENS_B2_HANG_BEFORE_ENTRY") != nullptr) {
+    const TestEnvValue childMark = readTestEnvironment("STEPLENS_B2_SAVE_FAIL");
+    if (childMark.present && !childMark.value.empty()) {
+        if (readTestEnvironment("STEPLENS_B2_HANG_BEFORE_ENTRY").present) {
             testChildHangForever();
         }
         steplens::occt::OcctBoundary::setScopedThreadSignalSaveHookForTesting([] { return false; });
@@ -1140,7 +1140,7 @@ TEST(OcctBoundary, SaveFailureDoesNotArmOrStartRetirer) {
             if (steplens::occt::OcctBoundary::scopedThreadSignalRestoreFailed()) {
                 std::exit(14);
             }
-            if (std::getenv("STEPLENS_B2_HANG_AFTER_ENTRY") != nullptr) {
+            if (readTestEnvironment("STEPLENS_B2_HANG_AFTER_ENTRY").present) {
                 testChildHangForever();
             }
             std::exit(0);
@@ -1488,6 +1488,39 @@ TEST(TestChildReap, InjectedWindowsReapFailureIsUnconfirmedNotSuccess) {
     // close 仍应走到 CloseHandle；此处句柄为假值，目标实跑再核真实句柄路径
 }
 #endif
+
+TEST(TestEnvRead, DistinguishesUnsetEmptyAndValue) {
+    const char* name = "STEPLENS_TEST_ENV_READ_TRI";
+    TestEnvRestore restore(name, "initial-value");
+
+#if defined(_WIN32)
+    ASSERT_TRUE(SetEnvironmentVariableA(name, nullptr));
+#else
+    ASSERT_EQ(unsetenv(name), 0);
+#endif
+    const TestEnvValue unset = readTestEnvironment(name);
+    EXPECT_FALSE(unset.present);
+    EXPECT_TRUE(unset.value.empty());
+
+#if defined(_WIN32)
+    ASSERT_TRUE(SetEnvironmentVariableA(name, ""));
+#else
+    ASSERT_EQ(setenv(name, "", 1), 0);
+#endif
+    const TestEnvValue empty = readTestEnvironment(name);
+    EXPECT_TRUE(empty.present);
+    EXPECT_TRUE(empty.value.empty());
+    EXPECT_EQ(empty.value.c_str()[0], '\0');
+
+#if defined(_WIN32)
+    ASSERT_TRUE(SetEnvironmentVariableA(name, "read-value"));
+#else
+    ASSERT_EQ(setenv(name, "read-value", 1), 0);
+#endif
+    const TestEnvValue value = readTestEnvironment(name);
+    EXPECT_TRUE(value.present);
+    EXPECT_EQ(value.value, "read-value");
+}
 
 #if defined(_WIN32)
 void expectWin32EnvUnset(const char* name) {
