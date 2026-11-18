@@ -29,12 +29,26 @@ namespace {
 
 std::atomic<void (*)()> g_afterJoinHook{nullptr};
 std::atomic<DocumentReleaseGate> g_documentReleaseGate{nullptr};
+std::atomic<DocumentReleaseDependencyHook> g_beforeDependencyLockHook{nullptr};
+std::atomic<DocumentReleaseDependencyHook> g_afterDependencyLockHook{nullptr};
 
 void ensureReleaseDependencies() {
-    // 只触碰既有静态对象以完成构造，不加锁，更不把锁拿到 Retirer 启动之后。
-    static_cast<void>(steplens::xcafDocumentMutex());
-    static_cast<void>(XCAFApp_Application::GetApplication());
-    steplens::io::noteXcafApplicationAccessed();
+    // 先设置当前实际调用线程的 OCCT 边界，再用生产路径共用的锁保护单例检查与赋值。
+    // 首次 instance() 不得已持这把非递归锁：ctor/dtor 簿记与 Close 返回后才进 instance。
+    occt::OcctBoundary::armWorkerThread();
+    auto& xcafMutex = steplens::xcafDocumentMutex();
+    if (auto hook = g_beforeDependencyLockHook.load(std::memory_order_acquire)) {
+        hook();
+    }
+    {
+        std::lock_guard lock(xcafMutex);
+        if (auto hook = g_afterDependencyLockHook.load(std::memory_order_acquire)) {
+            hook();
+        }
+        static_cast<void>(XCAFApp_Application::GetApplication());
+        steplens::io::noteXcafApplicationAccessed();
+    }
+    // Log 自有同步；不得在 xcaf 锁内构造。
     static_cast<void>(steplens::Log::ready()); // 只构造 LogState，不要求日志文件打开。
 }
 
@@ -368,6 +382,12 @@ void setDocumentReleaseGate(DocumentReleaseGate gate) noexcept {
 }
 void setDocumentReleaseEnqueueGate(DocumentReleaseEnqueueGate gate) noexcept {
     instance().setEnqueueGate(gate);
+}
+
+void setDocumentReleaseDependencyHooksForTesting(DocumentReleaseDependencyHook beforeLock,
+                                                 DocumentReleaseDependencyHook afterLock) noexcept {
+    g_beforeDependencyLockHook.store(beforeLock, std::memory_order_release);
+    g_afterDependencyLockHook.store(afterLock, std::memory_order_release);
 }
 void setDocumentReleaseAfterJoinHookForTesting(void (*hook)()) noexcept {
     g_afterJoinHook.store(hook, std::memory_order_release);

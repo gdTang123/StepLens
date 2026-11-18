@@ -5,8 +5,10 @@
 #include "core/OcctLoadContract.h"
 #include "core/ProgressSink.h"
 #include "io/ILoader.h"
+#include "io/XcafLifetime.h"
 #include "model/DocumentModel.h"
 #include "model/DocumentRelease.h"
+#include "occtsupport/OcctBoundary.h"
 
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <XCAFApp_Application.hxx>
@@ -40,6 +42,23 @@ namespace {
 namespace model = steplens::model;
 std::atomic<bool> enqueueGateEntered{false};
 std::atomic<bool> releaseEnqueueGate{false};
+std::atomic<bool> dependencyBeforeLockEntered{false};
+std::atomic<bool> dependencyAfterLockEntered{false};
+std::atomic<bool> dependencyLockWaitWasSerialized{false};
+std::atomic<bool> loadApplicationLocked{false};
+std::atomic<bool> loadApplicationUnlocked{false};
+std::atomic<int> waiterArmCount{-1};
+std::thread::id dependencyWaiterId;
+void dependencyBeforeLockHook() {
+    dependencyBeforeLockEntered.store(true, std::memory_order_release);
+}
+void dependencyAfterLockHook() {
+    dependencyLockWaitWasSerialized.store(loadApplicationUnlocked.load(std::memory_order_acquire),
+                                          std::memory_order_release);
+    waiterArmCount.store(steplens::occt::OcctBoundary::armCountOnThisThread(), std::memory_order_release);
+    dependencyWaiterId = std::this_thread::get_id();
+    dependencyAfterLockEntered.store(true, std::memory_order_release);
+}
 void blockProducerBeforeNotify() {
     steplens::lifecycleTrace("producer-enqueue-gate");
     enqueueGateEntered.store(true, std::memory_order_release);
@@ -115,6 +134,118 @@ TEST(DocumentRelease, FirstWaitBeforeDocumentStillDrainsToBaseline) {
     docModel.reset();
     ASSERT_TRUE(model::waitForDocumentRelease(std::chrono::seconds(10)));
     EXPECT_EQ(documentCount(), baseline);
+}
+
+TEST(DocumentRelease, FirstWaitSerializesXcafApplicationInitializationInFreshProcess) {
+    const char* childMark = std::getenv("STEPLENS_R2_FIRST_WAIT_CHILD");
+    if (childMark != nullptr && *childMark != '\0') {
+        std::atomic<bool> loadDone{false};
+        std::atomic<bool> waiterResult{false};
+        Handle(XCAFApp_Application) loadApplication;
+        dependencyBeforeLockEntered.store(false, std::memory_order_release);
+        dependencyAfterLockEntered.store(false, std::memory_order_release);
+        dependencyLockWaitWasSerialized.store(false, std::memory_order_release);
+        loadApplicationLocked.store(false, std::memory_order_release);
+        loadApplicationUnlocked.store(false, std::memory_order_release);
+        waiterArmCount.store(-1, std::memory_order_release);
+        model::setDocumentReleaseDependencyHooksForTesting(dependencyBeforeLockHook, dependencyAfterLockHook);
+        std::thread load([&] {
+            steplens::occt::OcctBoundary::armWorkerThread();
+            std::unique_lock lock(steplens::xcafDocumentMutex());
+            loadApplicationLocked.store(true, std::memory_order_release);
+            while (!dependencyBeforeLockEntered.load(std::memory_order_acquire))
+                std::this_thread::yield();
+            loadApplication = XCAFApp_Application::GetApplication();
+            steplens::io::noteXcafApplicationAccessed();
+            // 该标记紧邻显式解锁；等待者的持锁后钩只能在 mutex 实际释放后运行。
+            loadApplicationUnlocked.store(true, std::memory_order_release);
+            lock.unlock();
+            loadDone.store(true, std::memory_order_release);
+        });
+        std::thread waiter([&] {
+            while (!loadApplicationLocked.load(std::memory_order_acquire))
+                std::this_thread::yield();
+            waiterResult.store(model::waitForDocumentRelease(std::chrono::seconds(10)),
+                               std::memory_order_release);
+        });
+        load.join();
+        waiter.join();
+        model::setDocumentReleaseDependencyHooksForTesting(nullptr, nullptr);
+        if (!loadDone.load(std::memory_order_acquire) || !waiterResult.load(std::memory_order_acquire) ||
+            !dependencyBeforeLockEntered.load(std::memory_order_acquire) ||
+            !dependencyAfterLockEntered.load(std::memory_order_acquire) ||
+            !loadApplicationUnlocked.load(std::memory_order_acquire) ||
+            !dependencyLockWaitWasSerialized.load(std::memory_order_acquire) || waiterArmCount.load() < 1 ||
+            dependencyWaiterId == model::documentReleaseWorkerThread()) {
+            std::exit(4);
+        }
+        Handle(XCAFApp_Application) secondApplication = XCAFApp_Application::GetApplication();
+        if (loadApplication.IsNull() || secondApplication != loadApplication)
+            std::exit(5);
+        return;
+    }
+
+#if defined(_WIN32)
+    char module[MAX_PATH]{};
+    ASSERT_GT(GetModuleFileNameA(nullptr, module, MAX_PATH), 0u);
+    SetEnvironmentVariableA("STEPLENS_R2_FIRST_WAIT_CHILD", "1");
+    STARTUPINFOA startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    std::string command =
+        std::string("\"") + module +
+        "\" --gtest_filter=DocumentRelease.FirstWaitSerializesXcafApplicationInitializationInFreshProcess";
+    ASSERT_TRUE(CreateProcessA(nullptr, command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr,
+                               &startup, &process));
+    SetEnvironmentVariableA("STEPLENS_R2_FIRST_WAIT_CHILD", nullptr);
+    const DWORD waitResult = WaitForSingleObject(process.hProcess, 15000);
+    DWORD exitCode = 9;
+    if (waitResult == WAIT_TIMEOUT) {
+        TerminateProcess(process.hProcess, 9);
+        const DWORD reapResult = WaitForSingleObject(process.hProcess, 5000);
+        GetExitCodeProcess(process.hProcess, &exitCode);
+        EXPECT_EQ(reapResult, WAIT_OBJECT_0) << "TerminateProcess 后未能在有限时间内回收";
+    } else if (waitResult == WAIT_OBJECT_0) {
+        GetExitCodeProcess(process.hProcess, &exitCode);
+    }
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    EXPECT_EQ(waitResult, WAIT_OBJECT_0);
+    EXPECT_EQ(exitCode, 0u);
+#else
+    const auto exePath = std::filesystem::read_symlink("/proc/self/exe");
+    const std::string exe = exePath.string();
+    setenv("STEPLENS_R2_FIRST_WAIT_CHILD", "1", 1);
+    const pid_t child = fork();
+    if (child < 0) {
+        unsetenv("STEPLENS_R2_FIRST_WAIT_CHILD");
+        FAIL() << "fork failed";
+    }
+    if (child == 0) {
+        execl(exe.c_str(), exe.c_str(),
+              "--gtest_filter=DocumentRelease.FirstWaitSerializesXcafApplicationInitializationInFreshProcess",
+              static_cast<char*>(nullptr));
+        _exit(127);
+    }
+    unsetenv("STEPLENS_R2_FIRST_WAIT_CHILD");
+    int status = 0;
+    bool exited = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (waitpid(child, &status, WNOHANG) == child) {
+            exited = true;
+            break;
+        }
+        std::this_thread::yield();
+    }
+    if (!exited) {
+        kill(child, SIGKILL);
+        waitpid(child, &status, 0);
+    }
+    ASSERT_TRUE(exited);
+    ASSERT_TRUE(WIFEXITED(status));
+    EXPECT_EQ(WEXITSTATUS(status), 0);
+#endif
 }
 
 TEST(DocumentRelease, ControlBlockFailureAfterDetachUsesDeleterOnce) {
@@ -194,11 +325,15 @@ TEST(DocumentRelease, BusyReleaseQuickExitRunsInChildProcess) {
     ASSERT_TRUE(CreateProcessA(nullptr, command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr,
                                &startup, &process));
     const DWORD waitResult = WaitForSingleObject(process.hProcess, 500);
+    DWORD exitCode = 9;
     if (waitResult == WAIT_TIMEOUT) {
         TerminateProcess(process.hProcess, 9);
+        const DWORD reapResult = WaitForSingleObject(process.hProcess, 5000);
+        GetExitCodeProcess(process.hProcess, &exitCode);
+        EXPECT_EQ(reapResult, WAIT_OBJECT_0) << "TerminateProcess 后未能在有限时间内回收";
     }
-    DWORD exitCode = 9;
-    GetExitCodeProcess(process.hProcess, &exitCode);
+    if (waitResult == WAIT_OBJECT_0)
+        GetExitCodeProcess(process.hProcess, &exitCode);
     CloseHandle(process.hThread);
     CloseHandle(process.hProcess);
     EXPECT_EQ(waitResult, WAIT_OBJECT_0);
@@ -451,6 +586,9 @@ TEST(DocumentRelease, EnqueueNotifyIsCoveredByInFlightAcrossStop) {
     DWORD exitCode = 9;
     if (waitResult == WAIT_TIMEOUT) {
         TerminateProcess(process.hProcess, 9);
+        const DWORD reapResult = WaitForSingleObject(process.hProcess, 5000);
+        GetExitCodeProcess(process.hProcess, &exitCode);
+        EXPECT_EQ(reapResult, WAIT_OBJECT_0) << "TerminateProcess 后未能在有限时间内回收";
     } else {
         GetExitCodeProcess(process.hProcess, &exitCode);
     }
