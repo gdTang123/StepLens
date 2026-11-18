@@ -119,16 +119,16 @@ TEST(AppExitLogBinding, EmptyLogIsRejectedByTheSameAcceptanceFunction) {
 namespace {
 struct HangChildBoot {
     HangChildBoot() {
-        if (const char* exitMark = std::getenv("STEPLENS_E3_EXIT_CHILD");
-            exitMark != nullptr && *exitMark != '\0') {
+        const TestEnvValue exitMark = readTestEnvironment("STEPLENS_E3_EXIT_CHILD");
+        if (exitMark.present && !exitMark.value.empty()) {
 #if defined(_WIN32)
-            ExitProcess(static_cast<UINT>(std::atoi(exitMark)));
+            ExitProcess(static_cast<UINT>(std::atoi(exitMark.value.c_str())));
 #else
-            _exit(std::atoi(exitMark));
+            _exit(std::atoi(exitMark.value.c_str()));
 #endif
         }
-        const char* mark = std::getenv("STEPLENS_E3_HANG_CHILD");
-        if (mark == nullptr || *mark == '\0') {
+        const TestEnvValue mark = readTestEnvironment("STEPLENS_E3_HANG_CHILD");
+        if (!mark.present || mark.value.empty()) {
             return;
         }
 #if defined(_WIN32)

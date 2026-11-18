@@ -127,6 +127,27 @@ inline bool readWin32Environment(const char* name, bool* present, std::string* v
 }
 #endif
 
+struct TestEnvValue {
+    bool present = false;
+    std::string value;
+};
+
+inline TestEnvValue readTestEnvironment(const char* name) {
+    TestEnvValue result;
+#if defined(_WIN32)
+    if (!readWin32Environment(name, &result.present, &result.value)) {
+        result.present = false;
+        result.value.clear();
+    }
+#else
+    if (const char* value = std::getenv(name)) {
+        result.present = true;
+        result.value = value;
+    }
+#endif
+    return result;
+}
+
 class TestEnvRestore {
 public:
     TestEnvRestore() = default;

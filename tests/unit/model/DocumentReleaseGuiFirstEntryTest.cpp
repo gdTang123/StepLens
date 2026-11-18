@@ -176,13 +176,13 @@ void expectGuiHangChildFailsClosed(const char* tag, const char* hangEnv,
 }
 
 TEST(DocumentRelease, GuiQApplicationFirstEntryRestoresCallerFpPolicy) {
-    const char* childMark = std::getenv("STEPLENS_B2_GUI_CHILD");
-    if (childMark != nullptr && *childMark != '\0') {
-        if (std::getenv("STEPLENS_B2_HANG_BEFORE_ENTRY") != nullptr) {
+    const TestEnvValue childMark = readTestEnvironment("STEPLENS_B2_GUI_CHILD");
+    if (childMark.present && !childMark.value.empty()) {
+        if (readTestEnvironment("STEPLENS_B2_HANG_BEFORE_ENTRY").present) {
             testChildHangForever();
         }
         const int code = runGuiFirstEntry();
-        if (std::getenv("STEPLENS_B2_HANG_AFTER_ENTRY") != nullptr) {
+        if (readTestEnvironment("STEPLENS_B2_HANG_AFTER_ENTRY").present) {
             testChildHangForever();
         }
         std::exit(code);
