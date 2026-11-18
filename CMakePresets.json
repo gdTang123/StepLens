@@ -97,7 +97,7 @@
       },
       "filter": {
         "exclude": {
-          "label": "bench|large"
+          "label": "bench|large|app_exit"
         }
       },
       "output": {

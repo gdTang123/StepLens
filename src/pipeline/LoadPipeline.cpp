@@ -326,8 +326,8 @@ void LoadPipeline::cancel() {
         m_state->hasModel = false;
         m_state->batches.clear();
         m_state->success = false;
-        // 加载还没结束、新模型已经显示：回到空闲方块，不留上一个文件。
-        clearShown = m_state->adopted || m_state->haveDisplay;
+        // adopted 表示本次模型已交给 Host；haveDisplay 可能只是旧模型仍在屏幕上。
+        clearShown = m_state->adopted;
         m_state->adopted = false;
         if (clearShown) {
             m_state->haveDisplay = false;
@@ -468,6 +468,11 @@ LoadPipeline::Snapshot LoadPipeline::snapshot() const {
         shot.progress = ProgressPhase::ReadingBytes;
     }
     return shot;
+}
+
+std::shared_ptr<const model::DocumentModel> LoadPipeline::currentModel() const {
+    std::lock_guard lock(m_state->mutex);
+    return m_state->model;
 }
 
 std::optional<Error> LoadPipeline::takeFailure() {

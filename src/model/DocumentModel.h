@@ -25,6 +25,7 @@
 #include <TopoDS_Compound.hxx>
 #include <TopoDS_Shape.hxx>
 
+#include <atomic>
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -112,6 +113,11 @@ private:
     std::vector<std::vector<NodeId>> m_leaves;
     Bnd_Box m_worldBox;
     double m_lengthUnitToMm = 1.0;
+    mutable std::atomic<bool> m_retired{false};
+    mutable DocumentModel* m_releaseNext = nullptr;
+    friend void destroyDocumentModel(const DocumentModel*) noexcept;
+    friend void retireDocument(std::shared_ptr<const DocumentModel>);
+    friend class Retirer;
 };
 
 } // namespace steplens::model

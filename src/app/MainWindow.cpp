@@ -1,6 +1,7 @@
 #include "app/MainWindow.h"
 
 #include "app/settings/Settings.h"
+#include "core/LifecycleTrace.h"
 #include "core/Log.h"
 #include "core/MemoryMonitor.h"
 #include "core/ProgressSink.h"
@@ -8,6 +9,7 @@
 #include "model/DocumentRelease.h"
 #include "pipeline/LoadPipeline.h"
 #include "pipeline/SceneHost.h"
+#include "ui/AssemblyTreePanel.h"
 #include "ui/LoadingOverlay.h"
 #include "viewer/ViewerWidget.h"
 
@@ -30,6 +32,8 @@
 #include <QTimer>
 #include <QToolBar>
 #include <QUrl>
+
+#include <functional>
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -135,8 +139,12 @@ public:
 
     void reset(std::shared_ptr<const model::DocumentModel> model) override {
         auto previous = std::move(m_model);
+        const bool same = previous && model && previous.get() == model.get();
         m_model = std::move(model);
-        model::retireDocument(std::move(previous));
+        if (same)
+            model::handoffDocument(std::move(previous));
+        else
+            model::retireDocument(std::move(previous));
     }
     void enqueue(mesh::MeshBatch batch) override {
         static_cast<void>(batch);
@@ -170,7 +178,24 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(escape, &QShortcut::activated, this, [this] { m_pipeline->cancel(); });
 }
 
-MainWindow::~MainWindow() = default;
+MainWindow::~MainWindow() {
+    lifecycleTrace("mainwindow-destructor-begin", "MainWindow");
+    const auto connectDestroyed = [](QObject* object) {
+        const QByteArray identity = object->objectName().isEmpty()
+                                        ? QByteArray(object->metaObject()->className())
+                                        : object->objectName().toUtf8();
+        QObject::connect(object, &QObject::destroyed,
+                         [identity] { lifecycleTrace("qobject-child-destroyed", identity.constData()); });
+    };
+    std::function<void(QObject*)> walk = [&](QObject* object) {
+        for (QObject* child : object->children()) {
+            connectDestroyed(child);
+            walk(child);
+        }
+    };
+    walk(this);
+    lifecycleTrace("mainwindow-destructor-end", "members-and-qobject-children-follow");
+}
 
 void MainWindow::buildShell() {
     m_fileLabel = new QLabel(tr("尚未打开文件"), this);
@@ -180,15 +205,20 @@ void MainWindow::buildShell() {
     const bool offscreen = qgetenv("QT_QPA_PLATFORM") == "offscreen";
     if (offscreen) {
         auto* placeholder = new QLabel(tr("离屏模式，未创建三维视图"), this);
+        placeholder->setObjectName(QStringLiteral("offscreenPlaceholder"));
         placeholder->setAlignment(Qt::AlignCenter);
         setCentralWidget(placeholder);
         m_nullHost = std::make_unique<NullSceneHost>();
         m_pipeline = std::make_unique<LoadPipeline>(*m_nullHost);
+        lifecycleTrace("offscreen-host-created", "NullSceneHost");
         return;
     }
 
     m_frame = new QWidget(this);
+    m_frame->setObjectName(QStringLiteral("viewerFrame"));
     m_viewer = new ViewerWidget(m_frame);
+    m_viewer->setObjectName(QStringLiteral("viewerWidget"));
+    lifecycleTrace("viewer-created", "viewerWidget");
     m_hint = new QLabel(tr("拖拽 STEP/IGES 文件到这里，或点击打开"), m_frame);
     m_hint->setAttribute(Qt::WA_TransparentForMouseEvents);
     m_hint->setAutoFillBackground(true);
@@ -201,6 +231,15 @@ void MainWindow::buildShell() {
     m_overlay->hide();
     setCentralWidget(m_frame);
     m_pipeline = std::make_unique<LoadPipeline>(m_viewer->sceneHost());
+
+    m_treePanel = new ui::AssemblyTreePanel(this);
+    m_treePanel->setObjectName(QStringLiteral("assemblyTreePanel"));
+    lifecycleTrace("tree-created", "assemblyTreePanel");
+    addDockWidget(Qt::LeftDockWidgetArea, m_treePanel);
+    resizeDocks({m_treePanel}, {260}, Qt::Horizontal);
+    connect(m_treePanel, &ui::AssemblyTreePanel::nodeActivated, m_viewer, &ViewerWidget::highlightNode);
+    connect(m_treePanel, &ui::AssemblyTreePanel::visibilityChanged, m_viewer, &ViewerWidget::setNodeVisible);
+    connect(m_viewer, &ViewerWidget::nodeSelected, m_treePanel, &ui::AssemblyTreePanel::selectNode);
 
     connect(m_viewer, &ViewerWidget::filesDropped, this, &MainWindow::openFiles);
     connect(m_overlay, &LoadingOverlay::filesDropped, this, &MainWindow::openFiles);
@@ -335,6 +374,13 @@ void MainWindow::openPath(const QString& file) {
     const auto pause =
         m_dumpDir.isEmpty() ? std::chrono::milliseconds(0) : std::chrono::milliseconds(kDumpPauseMs);
     m_pipeline->open(pathFromUtf8(file), pause);
+    if (!m_closeWhileBusyArmed && qEnvironmentVariableIsSet("STEPLENS_CLOSE_WHILE_BUSY") &&
+        !m_pipeline->isSettled()) {
+        m_closeWhileBusyArmed = true;
+        lifecycleTrace("close-while-busy-request", "after-open");
+        close();
+        return;
+    }
     refreshUi();
 }
 
@@ -353,6 +399,15 @@ void MainWindow::refreshUi() {
         return;
     }
     m_pipeline->tick();
+    if (m_treePanel != nullptr) {
+        // currentModel 是待交付邮箱，adopt 前读它会把 B 的树接到仍是 A 的视口。
+        const auto current = m_viewer->document();
+        if (current != m_treeDocument) {
+            model::handoffDocument(std::move(m_treeDocument));
+            m_treeDocument = current;
+            m_treePanel->setDocument(current);
+        }
+    }
     if (const auto failure = m_pipeline->takeFailure()) {
         const QString message = QString::fromUtf8(failure->userMessage.c_str());
         showFailure(message.isEmpty() ? tr("打开文件时出错") : message);
@@ -399,6 +454,10 @@ void MainWindow::refreshUi() {
     }
 
     if (shot.activity == LoadActivity::Loading || shot.activity == LoadActivity::Releasing) {
+        if (!m_closeWhileBusyArmed && qEnvironmentVariableIsSet("STEPLENS_CLOSE_WHILE_BUSY")) {
+            m_closeWhileBusyArmed = true;
+            QTimer::singleShot(0, this, &QWidget::close);
+        }
         if (shot.waitingForRelease) {
             statusBar()->showMessage(m_memoryNotice.combine(tr("正在后台释放上一个文件…")));
         } else {
@@ -492,6 +551,7 @@ void MainWindow::saveModelShots() {
 }
 
 void MainWindow::endProcessNow() {
+    lifecycleTrace("end-process-now", "busy-close", 0);
 #if defined(_WIN32)
     TerminateProcess(GetCurrentProcess(), 0);
 #else
@@ -501,6 +561,7 @@ void MainWindow::endProcessNow() {
 
 void MainWindow::closeEvent(QCloseEvent* event) {
     if (m_pipeline && !m_pipeline->isSettled()) {
+        lifecycleTrace("mainwindow-closeEvent-busy", "loading-or-releasing");
         event->ignore();
         endProcessNow();
     }

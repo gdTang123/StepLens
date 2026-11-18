@@ -203,6 +203,24 @@ public:
         return m_builder->pending();
     }
 
+    [[nodiscard]] std::shared_ptr<const model::DocumentModel> document() const {
+        return m_builder ? m_builder->document() : nullptr;
+    }
+
+    void highlightNode(model::NodeId id) {
+        if (m_builder)
+            m_builder->highlightNode(id);
+    }
+    void setNodeVisible(model::NodeId id, bool visible) {
+        if (m_builder)
+            m_builder->setNodeVisible(id, visible);
+    }
+    std::optional<model::NodeId> selectedNode() {
+        if (!m_builder || m_context.IsNull())
+            return std::nullopt;
+        return m_builder->selectedNode();
+    }
+
 private:
     scene::SceneBuilder& builder();
 
@@ -475,12 +493,34 @@ QImage ViewerWidget::grabView() {
 #endif
 }
 
+void ViewerWidget::highlightNode(model::NodeId id) {
+    if (auto* host = dynamic_cast<ViewerSceneHost*>(m_state->scene.get())) {
+        host->highlightNode(id);
+        redraw();
+    }
+}
+
+void ViewerWidget::setNodeVisible(model::NodeId id, bool visible) {
+    if (auto* host = dynamic_cast<ViewerSceneHost*>(m_state->scene.get())) {
+        host->setNodeVisible(id, visible);
+        redraw();
+    }
+}
+
+std::shared_ptr<const model::DocumentModel> ViewerWidget::document() const {
+    if (const auto* host = dynamic_cast<const ViewerSceneHost*>(m_state->scene.get()))
+        return host->document();
+    return nullptr;
+}
+
 void ViewerWidget::mousePressEvent(QMouseEvent* event) {
 #if STEPLENS_USE_WNT_WINDOW
     QWidget::mousePressEvent(event);
 #else
     QOpenGLWidget::mousePressEvent(event);
 #endif
+    if (event->button() == Qt::LeftButton)
+        m_clickGesture.press(event->position().x(), event->position().y());
     if (!m_state->paintReady) {
         return;
     }
@@ -505,6 +545,16 @@ void ViewerWidget::mouseReleaseEvent(QMouseEvent* event) {
                                           mouseModifiers(event->modifiers()), false)) {
         update();
     }
+    if (event->button() == Qt::LeftButton &&
+        m_clickGesture.isClick(event->position().x(), event->position().y()) && !m_state->context.IsNull() &&
+        !m_state->view.IsNull()) {
+        m_state->context->MoveTo(point.x(), point.y(), m_state->view, false);
+        m_state->context->SelectDetected();
+        if (auto* host = dynamic_cast<ViewerSceneHost*>(m_state->scene.get())) {
+            if (const auto id = host->selectedNode())
+                emit nodeSelected(*id);
+        }
+    }
 }
 
 void ViewerWidget::mouseMoveEvent(QMouseEvent* event) {
@@ -513,6 +563,8 @@ void ViewerWidget::mouseMoveEvent(QMouseEvent* event) {
 #else
     QOpenGLWidget::mouseMoveEvent(event);
 #endif
+    if (event->buttons().testFlag(Qt::LeftButton))
+        m_clickGesture.move(event->position().x(), event->position().y());
     if (!m_state->paintReady) {
         return;
     }

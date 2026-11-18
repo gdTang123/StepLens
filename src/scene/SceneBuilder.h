@@ -56,10 +56,16 @@ public:
 
     void setNodeVisible(model::NodeId id, bool visible);
     void highlightNode(model::NodeId id);
+    [[nodiscard]] std::optional<model::NodeId> selectedNode();
+
+    [[nodiscard]] std::shared_ptr<const model::DocumentModel> document() const {
+        return m_model;
+    }
 
     [[nodiscard]] std::optional<model::NodeId>
     nodeOf(const opencascade::handle<AIS_InteractiveObject>& object) const;
     [[nodiscard]] opencascade::handle<AIS_InteractiveObject> objectOf(model::NodeId id) const;
+    [[nodiscard]] std::vector<opencascade::handle<AIS_InteractiveObject>> objectsOf(model::NodeId id) const;
     [[nodiscard]] const SelectionMap& selectionMap() const {
         return m_map;
     }

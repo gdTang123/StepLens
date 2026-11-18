@@ -1,6 +1,8 @@
 #include "io/LoadInternal.h"
 
+#include "core/LifecycleTrace.h"
 #include "core/OcctLoadContract.h"
+#include "io/XcafLifetime.h"
 
 #include <UnitsMethods_LengthUnit.hxx>
 #include <XCAFApp_Application.hxx>
@@ -37,6 +39,23 @@ void releaseFreedHeap() noexcept {
 #elif defined(__GLIBC__)
     malloc_trim(0);
 #endif
+}
+
+void noteXcafApplicationAccessed() noexcept {
+    static struct ApplicationCompanion {
+        ApplicationCompanion() {
+            lifecycleTrace("xcaf-app-note-constructed");
+        }
+        ~ApplicationCompanion() {
+            lifecycleTrace("xcaf-app-companion-dtor");
+        }
+    } companion;
+}
+
+void primeXcafApplicationOnMainThread() {
+    std::lock_guard lock(xcafDocumentMutex());
+    (void)XCAFApp_Application::GetApplication();
+    noteXcafApplicationAccessed();
 }
 
 } // namespace steplens::io
@@ -78,6 +97,7 @@ opencascade::handle<TDocStd_Document> newXcafDocument() {
     std::lock_guard lock(xcafDocumentMutex());
     opencascade::handle<TDocStd_Document> doc;
     XCAFApp_Application::GetApplication()->NewDocument("BinXCAF", doc);
+    steplens::io::noteXcafApplicationAccessed();
     return doc;
 }
 
@@ -89,6 +109,7 @@ void closeXcafDocument(opencascade::handle<TDocStd_Document>& doc) {
         std::lock_guard lock(xcafDocumentMutex());
         if (!doc.IsNull()) {
             XCAFApp_Application::GetApplication()->Close(doc);
+            steplens::io::noteXcafApplicationAccessed();
         }
     } catch (...) {
         // 析构路径上不能再抛。句柄先放下，避免下次再 Close 一次。

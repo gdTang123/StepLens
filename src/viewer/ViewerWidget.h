@@ -1,5 +1,8 @@
 #pragma once
 
+#include "model/DocumentModel.h"
+#include "viewer/ClickGesture.h"
+
 #include <QImage>
 #include <QOpenGLWidget>
 #include <QString>
@@ -55,11 +58,15 @@ public:
     void setStandardView(StandardView view);
     void redraw();
     [[nodiscard]] bool showingModel() const;
+    [[nodiscard]] std::shared_ptr<const model::DocumentModel> document() const;
     [[nodiscard]] SceneHost& sceneHost();
     [[nodiscard]] QImage grabView();
+    void highlightNode(model::NodeId id);
+    void setNodeVisible(model::NodeId id, bool visible);
 
 signals:
     void filesDropped(const QStringList& paths);
+    void nodeSelected(steplens::model::NodeId id);
 
 protected:
     void mousePressEvent(QMouseEvent* event) override;
@@ -99,6 +106,7 @@ private:
 
     struct State;
     std::unique_ptr<State> m_state;
+    viewer::ClickGesture m_clickGesture;
 };
 
 } // namespace steplens
