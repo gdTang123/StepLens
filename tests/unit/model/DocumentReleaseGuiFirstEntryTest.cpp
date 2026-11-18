@@ -118,8 +118,8 @@ void expectGuiHangChildFailsClosed(const char* tag, const char* hangEnv,
 #if defined(_WIN32)
     char module[MAX_PATH]{};
     ASSERT_GT(GetModuleFileNameA(nullptr, module, MAX_PATH), 0u);
-    SetEnvironmentVariableA("STEPLENS_B2_GUI_CHILD", "1");
-    SetEnvironmentVariableA(hangEnv, "1");
+    TestEnvRestore mark("STEPLENS_B2_GUI_CHILD", "1");
+    TestEnvRestore hang(hangEnv, "1");
     STARTUPINFOA startup{};
     startup.cb = sizeof(startup);
     PROCESS_INFORMATION process{};
@@ -128,8 +128,8 @@ void expectGuiHangChildFailsClosed(const char* tag, const char* hangEnv,
     WindowsProcessGuard guard;
     const BOOL created = CreateProcessA(nullptr, command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr,
                                         &startup, &process);
-    SetEnvironmentVariableA("STEPLENS_B2_GUI_CHILD", nullptr);
-    SetEnvironmentVariableA(hangEnv, nullptr);
+    mark.restore();
+    hang.restore();
     ASSERT_TRUE(created) << "启动失败不得记为退出码 0";
     guard.attach(process);
     const auto result =
@@ -137,32 +137,41 @@ void expectGuiHangChildFailsClosed(const char* tag, const char* hangEnv,
     logTestChildReap(tag, static_cast<long>(GetProcessId(guard.info.hProcess)), result);
     EXPECT_TRUE(result.timedOut);
     EXPECT_TRUE(result.killed);
+    EXPECT_EQ(result.killStatus, 1);
     EXPECT_TRUE(result.reaped) << "kill 后应在有限时间内回收";
     EXPECT_NE(result.exitCode, 0);
-    guard.close();
+    const auto cleanup = guard.close();
+    logTestChildReap((std::string(tag) + "-close").c_str(), static_cast<long>(process.dwProcessId), cleanup);
 #else
     const auto exePath = std::filesystem::read_symlink("/proc/self/exe");
     const std::string exe = exePath.string();
-    setenv("STEPLENS_B2_GUI_CHILD", "1", 1);
-    setenv("QT_QPA_PLATFORM", "offscreen", 1);
-    setenv(hangEnv, "1", 1);
-    const pid_t child = fork();
-    ASSERT_GE(child, 0) << "启动失败不得记为退出码 0";
+    TestEnvRestore mark("STEPLENS_B2_GUI_CHILD", "1");
+    TestEnvRestore platform("QT_QPA_PLATFORM", "offscreen");
+    TestEnvRestore hang(hangEnv, "1");
+    const pid_t child = testFork();
+    if (child != 0) {
+        mark.restore();
+        platform.restore();
+        hang.restore();
+    }
     if (child == 0) {
         execl(exe.c_str(), exe.c_str(),
               "--gtest_filter=DocumentRelease.GuiQApplicationFirstEntryRestoresCallerFpPolicy", nullptr);
         _exit(127);
     }
-    unsetenv("STEPLENS_B2_GUI_CHILD");
-    unsetenv(hangEnv);
+    ASSERT_GE(child, 0) << "启动失败不得记为退出码 0";
     PosixProcessGuard guard(child);
-    const auto result = waitOrKillPid(child, runBudget, std::chrono::milliseconds{2000});
+    const auto result = waitOrKillPidOwned(guard, runBudget, std::chrono::milliseconds{2000});
     logTestChildReap(tag, static_cast<long>(child), result);
     EXPECT_TRUE(result.timedOut);
     EXPECT_TRUE(result.killed);
+    EXPECT_EQ(result.killStatus, 1);
     EXPECT_TRUE(result.reaped) << "kill 后应在有限时间内回收";
     EXPECT_NE(result.exitCode, 0);
-    guard.close();
+    const auto cleanup = guard.close();
+    logTestChildReap((std::string(tag) + "-close").c_str(), static_cast<long>(child), cleanup);
+    EXPECT_FALSE(cleanup.ownedAtEntry) << "已消费后不得再持有 kill 权";
+    EXPECT_FALSE(cleanup.killed) << "close 不得再杀已注销身份";
 #endif
 }
 
@@ -182,7 +191,7 @@ TEST(DocumentRelease, GuiQApplicationFirstEntryRestoresCallerFpPolicy) {
 #if defined(_WIN32)
     char module[MAX_PATH]{};
     ASSERT_GT(GetModuleFileNameA(nullptr, module, MAX_PATH), 0u);
-    SetEnvironmentVariableA("STEPLENS_B2_GUI_CHILD", "1");
+    TestEnvRestore mark("STEPLENS_B2_GUI_CHILD", "1");
     STARTUPINFOA startup{};
     startup.cb = sizeof(startup);
     PROCESS_INFORMATION process{};
@@ -191,7 +200,7 @@ TEST(DocumentRelease, GuiQApplicationFirstEntryRestoresCallerFpPolicy) {
     WindowsProcessGuard guard;
     const BOOL created = CreateProcessA(nullptr, command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr,
                                         &startup, &process);
-    SetEnvironmentVariableA("STEPLENS_B2_GUI_CHILD", nullptr);
+    mark.restore();
     ASSERT_TRUE(created) << "启动失败不得记为退出码 0";
     guard.attach(process);
     const auto result = waitOrKillWindowsProcess(guard.info.hProcess, std::chrono::milliseconds{20000},
@@ -201,29 +210,36 @@ TEST(DocumentRelease, GuiQApplicationFirstEntryRestoresCallerFpPolicy) {
     EXPECT_FALSE(result.waitFailed);
     EXPECT_TRUE(result.reaped);
     EXPECT_EQ(result.exitCode, 0) << "QApplication first-entry failed, code=" << result.exitCode;
-    guard.close();
+    const auto cleanup = guard.close();
+    logTestChildReap("gui-first-close", static_cast<long>(process.dwProcessId), cleanup);
 #else
     const auto exePath = std::filesystem::read_symlink("/proc/self/exe");
     const std::string exe = exePath.string();
-    setenv("STEPLENS_B2_GUI_CHILD", "1", 1);
-    setenv("QT_QPA_PLATFORM", "offscreen", 1);
-    const pid_t child = fork();
-    ASSERT_GE(child, 0) << "启动失败不得记为退出码 0";
+    TestEnvRestore mark("STEPLENS_B2_GUI_CHILD", "1");
+    TestEnvRestore platform("QT_QPA_PLATFORM", "offscreen");
+    const pid_t child = testFork();
+    if (child != 0) {
+        mark.restore();
+        platform.restore();
+    }
     if (child == 0) {
         execl(exe.c_str(), exe.c_str(),
               "--gtest_filter=DocumentRelease.GuiQApplicationFirstEntryRestoresCallerFpPolicy", nullptr);
         _exit(127);
     }
-    unsetenv("STEPLENS_B2_GUI_CHILD");
+    ASSERT_GE(child, 0) << "启动失败不得记为退出码 0";
     PosixProcessGuard guard(child);
     const auto result =
-        waitOrKillPid(child, std::chrono::milliseconds{20000}, std::chrono::milliseconds{2000});
+        waitOrKillPidOwned(guard, std::chrono::milliseconds{20000}, std::chrono::milliseconds{2000});
     logTestChildReap("gui-first", static_cast<long>(child), result);
     EXPECT_FALSE(result.timedOut);
     EXPECT_FALSE(result.waitFailed);
     EXPECT_TRUE(result.reaped);
     EXPECT_EQ(result.exitCode, 0);
-    guard.close();
+    const auto cleanup = guard.close();
+    logTestChildReap("gui-first-close", static_cast<long>(child), cleanup);
+    EXPECT_FALSE(cleanup.ownedAtEntry) << "已消费后不得再持有 kill 权";
+    EXPECT_FALSE(cleanup.killed) << "close 不得再杀已注销身份";
 #endif
 }
 
