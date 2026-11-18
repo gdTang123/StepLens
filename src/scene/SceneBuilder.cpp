@@ -68,8 +68,12 @@ void SceneBuilder::reset(std::shared_ptr<const model::DocumentModel> model) {
     m_overrides.clear();
     m_protos.clear();
     auto previous = std::move(m_model);
+    const bool same = previous && model && previous.get() == model.get();
     m_model = std::move(model);
-    model::retireDocument(std::move(previous));
+    if (same)
+        model::handoffDocument(std::move(previous));
+    else
+        model::retireDocument(std::move(previous));
     if (m_model) {
         m_protos.assign(m_model->prototypes().size(), {});
         m_seen.assign(m_model->prototypes().size(), 0);

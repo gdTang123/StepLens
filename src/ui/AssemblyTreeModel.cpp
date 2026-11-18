@@ -1,5 +1,7 @@
 #include "ui/AssemblyTreeModel.h"
 
+#include "model/DocumentRelease.h"
+
 #include <QString>
 
 #include <algorithm>
@@ -11,6 +13,7 @@ AssemblyTreeModel::AssemblyTreeModel(QObject* parent) : QAbstractItemModel(paren
 
 void AssemblyTreeModel::setDocument(std::shared_ptr<const model::DocumentModel> document) {
     beginResetModel();
+    model::handoffDocument(std::move(m_model));
     m_model = std::move(document);
     m_visible.assign(m_model ? m_model->nodeCount() : 0, 1);
     m_rows.assign(m_model ? m_model->nodeCount() : 0, 0);

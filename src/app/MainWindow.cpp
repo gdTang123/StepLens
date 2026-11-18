@@ -136,8 +136,12 @@ public:
 
     void reset(std::shared_ptr<const model::DocumentModel> model) override {
         auto previous = std::move(m_model);
+        const bool same = previous && model && previous.get() == model.get();
         m_model = std::move(model);
-        model::retireDocument(std::move(previous));
+        if (same)
+            model::handoffDocument(std::move(previous));
+        else
+            model::retireDocument(std::move(previous));
     }
     void enqueue(mesh::MeshBatch batch) override {
         static_cast<void>(batch);
@@ -365,6 +369,7 @@ void MainWindow::refreshUi() {
         // currentModel 是待交付邮箱，adopt 前读它会把 B 的树接到仍是 A 的视口。
         const auto current = m_viewer->document();
         if (current != m_treeDocument) {
+            model::handoffDocument(std::move(m_treeDocument));
             m_treeDocument = current;
             m_treePanel->setDocument(current);
         }

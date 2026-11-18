@@ -66,7 +66,7 @@ if(STEPLENS_OCCT_CONTRACT)
             ENVIRONMENT "ASAN_OPTIONS=halt_on_error=1:detect_leaks=0")
 
     # T06 DocumentModel。和加载器同一个无头作业。OCCT 静态分配仍关掉泄漏检查。
-    add_executable(steplens_model_tests model/DocumentModelTest.cpp)
+    add_executable(steplens_model_tests model/DocumentModelTest.cpp model/DocumentReleaseTest.cpp)
     target_include_directories(steplens_model_tests PRIVATE "${CMAKE_SOURCE_DIR}/src")
     target_link_libraries(steplens_model_tests PRIVATE steplens::model GTest::gtest_main)
     target_compile_definitions(steplens_model_tests PRIVATE
@@ -158,7 +158,9 @@ target_sources(steplens_tests PRIVATE core/MemoryMonitorTest.cpp)
 target_link_libraries(steplens_tests PRIVATE steplens::core GTest::gtest_main)
 target_include_directories(steplens_tests PRIVATE "${CMAKE_SOURCE_DIR}/src")
 if(NOT STEPLENS_CORE_ONLY)
-    add_executable(steplens_ui_tests ui/AssemblyTreeModelTest.cpp)
+    add_executable(steplens_ui_tests
+        ui/AssemblyTreeModelTest.cpp
+        ui/AssemblyTreeReleaseTest.cpp)
     target_include_directories(steplens_ui_tests PRIVATE "${CMAKE_SOURCE_DIR}/src")
     target_link_libraries(steplens_ui_tests PRIVATE steplens::ui Qt6::Test GTest::gtest_main)
     steplens_apply_warnings(steplens_ui_tests)
@@ -173,6 +175,7 @@ if(NOT STEPLENS_CORE_ONLY)
         occt/OcctBoundaryTest.cpp
         io/CadLoaderTest.cpp
         model/DocumentModelTest.cpp
+        model/DocumentReleaseTest.cpp
         mesh/TessellatorTest.cpp
         mesh/StepHeapReproTest.cpp
         mesh/MemoryReleaseTest.cpp)

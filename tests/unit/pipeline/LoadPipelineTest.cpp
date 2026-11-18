@@ -67,8 +67,12 @@ public:
         expectGui();
         ++m_resets;
         auto previous = std::move(m_model);
+        const bool same = previous && model && previous.get() == model.get();
         m_model = std::move(model);
-        steplens::model::retireDocument(std::move(previous));
+        if (same)
+            steplens::model::handoffDocument(std::move(previous));
+        else
+            steplens::model::retireDocument(std::move(previous));
     }
 
     void enqueue(steplens::mesh::MeshBatch batch) override {
@@ -302,6 +306,32 @@ TEST(LoadPipeline, CancelMidLoadReturnsToIdleCube) {
     static_cast<void>(probeGuard);
 }
 
+TEST(LoadPipeline, RetiredDocumentWaitsForExternalStrongReference) {
+    steplens::test::TempDir dir;
+    const std::filesystem::path file = dir.path() / "box.step";
+    ASSERT_TRUE(writeBoxStep(file));
+
+    RecordingHost host(std::this_thread::get_id());
+    steplens::LoadPipeline pipeline(host);
+    pipeline.open(file);
+    ASSERT_TRUE(driveUntil(
+        pipeline,
+        [](const steplens::LoadPipeline::Snapshot& shot) {
+            return shot.activity == steplens::LoadActivity::Ready;
+        },
+        std::chrono::seconds(60)));
+    auto retained = host.document();
+    ASSERT_TRUE(retained);
+
+    steplens::model::retireDocument(retained);
+    host.clear();
+    EXPECT_GT(steplens::model::documentsPendingRelease(), 0);
+    EXPECT_FALSE(pipeline.waitUntilSettled(std::chrono::milliseconds(30)));
+
+    retained.reset();
+    EXPECT_TRUE(pipeline.waitUntilSettled(std::chrono::seconds(30)));
+}
+
 TEST(LoadPipeline, CancelNewLoadBeforeAdoptKeepsPreviousModel) {
     steplens::test::TempDir dir;
     const std::filesystem::path fileA = dir.path() / "a.step";
@@ -384,6 +414,7 @@ TEST(LoadPipeline, CurrentModelMailboxIsNotAdoptedDisplay) {
     EXPECT_EQ(host.document(), displayedA);
     EXPECT_NE(publishedB, host.document());
 
+    publishedB.reset();
     pipeline.cancel();
     ASSERT_TRUE(pipeline.waitUntilSettled(std::chrono::seconds(30)));
     pipeline.tick();
@@ -415,7 +446,7 @@ TEST(LoadPipeline, CancelAfterNewModelAdoptedClearsDisplay) {
             return shot.activity == steplens::LoadActivity::Loading && host.resets() >= 2;
         },
         std::chrono::seconds(60)));
-    const auto displayedB = host.document();
+    auto displayedB = host.document();
     ASSERT_NE(displayedB, nullptr);
     const int clears = host.clears();
 
@@ -423,6 +454,7 @@ TEST(LoadPipeline, CancelAfterNewModelAdoptedClearsDisplay) {
     EXPECT_EQ(host.clears(), clears + 1);
     EXPECT_FALSE(host.holdsModel());
     EXPECT_NE(host.document(), displayedB);
+    displayedB.reset();
     ASSERT_TRUE(pipeline.waitUntilSettled(std::chrono::seconds(30)));
     ASSERT_TRUE(steplens::model::waitForDocumentRelease(std::chrono::seconds(30)));
 }

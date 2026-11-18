@@ -757,7 +757,9 @@ void collectEntities(const TopoDS_Shape& shape, const TDF_Label& label,
 } // namespace
 
 DocumentModel::DocumentModel(BuildKey, opencascade::handle<TDocStd_Document> doc, double lengthUnitToMm)
-    : m_doc(std::move(doc)), m_lengthUnitToMm(sanitizeUnit(lengthUnitToMm)) {}
+    : m_doc(std::move(doc)), m_lengthUnitToMm(sanitizeUnit(lengthUnitToMm)) {
+    noteDocumentConstructed();
+}
 
 DocumentModel::~DocumentModel() {
     // 探针看到的就是这次 Close 所在的线程。GUI 不直接析构文档，最后一份引用在后台 retirer 上丢掉。
@@ -783,13 +785,16 @@ DocumentModel::build(io::LoadedDocument document, ProgressSink& progress, const 
             if (built.nodes.empty()) {
                 return makeFailure(ErrorCode::Internal, "empty model", "文件里没有可显示的形状");
             }
-            auto model = std::make_shared<DocumentModel>(BuildKey{}, owner.get(), unit);
+            auto* raw = new DocumentModel(BuildKey{}, owner.get(), unit);
             owner.detach();
-            model->m_nodes = std::move(built.nodes);
-            model->m_prototypes = std::move(built.prototypes);
-            model->m_leaves = std::move(built.leaves);
-            model->m_worldBox = std::move(built.worldBox);
-            return std::shared_ptr<const DocumentModel>{std::move(model)};
+            std::shared_ptr<const DocumentModel> model{
+                raw, [](const DocumentModel* p) noexcept { destroyDocumentModel(p); }};
+            auto* mutableModel = const_cast<DocumentModel*>(model.get());
+            mutableModel->m_nodes = std::move(built.nodes);
+            mutableModel->m_prototypes = std::move(built.prototypes);
+            mutableModel->m_leaves = std::move(built.leaves);
+            mutableModel->m_worldBox = std::move(built.worldBox);
+            return model;
         },
         ErrorCode::Internal, "建立模型时出错");
     if (result.ok() || !cancel.isCancelled()) {
