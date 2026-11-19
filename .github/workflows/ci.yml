@@ -34,6 +34,13 @@ jobs:
     name: experiment-then-enqueue-notify
     if: github.event.inputs.confirm == 'RUN'
     runs-on: windows-2022
+    # Budget (minutes): job=240.
+    # 前置60 = checkout5+verify5+MSVC5+early id5+experiment5+early artifact5
+    #         +vcpkg checkout5+restore10+bootstrap10+ninja5
+    # +构建130 +构建后身份5 +定向测试12 +收证上传15 (record5+upload10)
+    # +cache-after-upload10 +余量8 = 240. Step timeout sum = 232.
+    # Cache is after final upload so a late cache failure cannot drop evidence.
+    # Cold vcpkg may exceed 130; that fails the build, it does not consume the upload reserve.
     timeout-minutes: 240
     env:
       PYTHONUTF8: "1"
@@ -49,6 +56,7 @@ jobs:
         shell: pwsh
     steps:
       - name: Checkout locked SHA
+        timeout-minutes: 5
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.inputs.checkout_sha }}
@@ -90,6 +98,7 @@ jobs:
           Add-Content $id "identity_ok=1"
 
       - name: MSVC x64 environment
+        timeout-minutes: 5
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
@@ -128,6 +137,7 @@ jobs:
             diag-identity.txt
 
       - name: Checkout vcpkg 2026.10.16
+        timeout-minutes: 5
         uses: actions/checkout@v4
         with:
           repository: microsoft/vcpkg
@@ -137,6 +147,7 @@ jobs:
 
       - name: Restore vcpkg binaries
         id: vcpkg-cache
+        timeout-minutes: 10
         uses: actions/cache/restore@v4
         with:
           path: |
@@ -149,6 +160,7 @@ jobs:
       - name: Bootstrap vcpkg
         id: bootstrap
         continue-on-error: true
+        timeout-minutes: 10
         run: |
           $bootstrapped = $false
           foreach ($attempt in 1..4) {
@@ -168,6 +180,7 @@ jobs:
 
       - name: Put ninja 1.13.1 on PATH
         continue-on-error: true
+        timeout-minutes: 5
         run: |
           $dir = Join-Path $env:RUNNER_TEMP "ninja-1.13.1"
           New-Item -ItemType Directory -Force -Path $dir | Out-Null
@@ -185,7 +198,7 @@ jobs:
       - name: Configure contract and build directed target
         id: build
         continue-on-error: true
-        timeout-minutes: 210
+        timeout-minutes: 130
         run: |
           if (-not $env:VCPKG_ROOT) { throw "VCPKG_ROOT unset; bootstrap failed" }
           New-Item -ItemType Directory -Force -Path artifacts/build | Out-Null
@@ -206,16 +219,6 @@ jobs:
         timeout-minutes: 5
         run: |
           pwsh -File scripts/t10_048_capture_identity.ps1 -BuildDir build/t10-048-diag -OutDir artifacts/identity
-
-      - name: Save vcpkg binary cache after a successful configure
-        if: always() && steps.build.outcome == 'success' && steps.vcpkg-cache.outputs.cache-hit != 'true'
-        continue-on-error: true
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            .vcpkg-binary-cache
-            vcpkg/downloads
-          key: ${{ steps.vcpkg-cache.outputs.cache-primary-key }}
 
       - name: Run EnqueueNotify and hang negative tests
         id: tests
@@ -262,3 +265,14 @@ jobs:
             diag-identity.txt
             build/t10-048-diag/CMakeCache.txt
             build/t10-048-diag/**/*.rsp
+
+      - name: Save vcpkg binary cache after evidence upload
+        if: always() && steps.build.outcome == 'success' && steps.vcpkg-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        timeout-minutes: 10
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            .vcpkg-binary-cache
+            vcpkg/downloads
+          key: ${{ steps.vcpkg-cache.outputs.cache-primary-key }}
