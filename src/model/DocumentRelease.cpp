@@ -90,11 +90,14 @@ unsigned releaseDelayMs() noexcept {
     return static_cast<unsigned>(parsed > 5000 ? 5000 : parsed);
 }
 
-// Diagnostic ring for Windows static-dtor join diagnosis (1111-048).
-// Records are POD + atomics only: never allocate, never take Retirer::m_mutex,
-// and never call lifecycleTrace (which takes LifecycleTrace::mutex and may WriteFile).
-// Flush is allowed only when Retirer::m_mutex is not held. H1/H2 are not exhaustive;
-// flush before join so wait-enter is on disk even if join never returns.
+// 1111-048 diagnostic store: bounded prepend-only buffer with a dedicated mutex.
+// Not a ring, not a homemade lock-free protocol. Never overwrite stored slots.
+// Lock order: Retirer::m_mutex may precede g_diagMu (record on the wait path).
+// g_diagMu is never held while taking m_mutex, and never held during I/O.
+// Flush copies under g_diagMu, releases, writes via lifecycleTrace, then advances
+// the emitted index. Duplicate traces from concurrent flushers are possible;
+// lost ownership of a live slot is not. Namespace-scope mutex is constructed
+// before main and destroyed after the function-local static Retirer.
 enum class WorkerDiagEvent : unsigned char {
     WaitEnter,
     WaitLeave,
@@ -128,22 +131,28 @@ const char* workerDiagName(WorkerDiagEvent ev) noexcept {
     return "worker-diag-unknown";
 }
 
-struct WorkerDiagSlot {
-    std::atomic<std::uint64_t> published{0};
+constexpr int kWorkerDiagUnknown = -1;
+constexpr std::size_t kWorkerDiagCap = 128;
+
+struct WorkerDiagRec {
+    std::uint64_t seq{};
     std::uint64_t tid{};
     WorkerDiagEvent ev{};
-    int head{};
-    int stopping{};
+    int head = kWorkerDiagUnknown;
+    int stopping = kWorkerDiagUnknown;
     int live{};
     int pending{};
     int inflight{};
     std::uintptr_t ptr{};
 };
 
-constexpr std::size_t kWorkerDiagCap = 128;
-WorkerDiagSlot g_workerDiag[kWorkerDiagCap];
-std::atomic<std::uint64_t> g_workerDiagNext{0};
-std::atomic<std::uint64_t> g_workerDiagFlushed{0};
+std::mutex g_diagMu;
+WorkerDiagRec g_diagStore[kWorkerDiagCap];
+std::size_t g_diagCount = 0;
+std::size_t g_diagEmitted = 0;
+std::uint64_t g_diagNextSeq = 0;
+std::uint64_t g_diagDropped = 0;
+std::uint64_t g_diagDropNotices = 0;
 
 std::uint64_t workerDiagThreadId() noexcept {
 #if defined(_WIN32)
@@ -153,61 +162,76 @@ std::uint64_t workerDiagThreadId() noexcept {
 #endif
 }
 
+void formatDiagField(char* buf, std::size_t cap, int value) noexcept {
+    if (value == kWorkerDiagUnknown) {
+        std::snprintf(buf, cap, "unknown");
+        return;
+    }
+    std::snprintf(buf, cap, "%d", value);
+}
+
 void workerDiagRecord(WorkerDiagEvent ev, int head, int stopping, int live, int pending, int inflight,
                       std::uintptr_t ptr = 0) noexcept {
-    const auto seq = g_workerDiagNext.fetch_add(1, std::memory_order_relaxed);
-    auto& slot = g_workerDiag[seq % kWorkerDiagCap];
-    slot.published.store(0, std::memory_order_relaxed);
-    slot.tid = workerDiagThreadId();
-    slot.ev = ev;
-    slot.head = head;
-    slot.stopping = stopping;
-    slot.live = live;
-    slot.pending = pending;
-    slot.inflight = inflight;
-    slot.ptr = ptr;
-    slot.published.store(seq + 1, std::memory_order_release);
+    std::lock_guard lock(g_diagMu);
+    const auto seq = ++g_diagNextSeq;
+    if (g_diagCount >= kWorkerDiagCap) {
+        ++g_diagDropped;
+        return;
+    }
+    auto& rec = g_diagStore[g_diagCount++];
+    rec.seq = seq;
+    rec.tid = workerDiagThreadId();
+    rec.ev = ev;
+    rec.head = head;
+    rec.stopping = stopping;
+    rec.live = live;
+    rec.pending = pending;
+    rec.inflight = inflight;
+    rec.ptr = ptr;
 }
 
 void workerDiagFlush() noexcept {
-    // Only advance flushed over a contiguous published prefix so a mid-write slot
-    // cannot be skipped and lost. Bounded wait covers a record() still in flight
-    // at flush-before-join; this path never holds Retirer::m_mutex.
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(50);
-    for (;;) {
-        auto start = g_workerDiagFlushed.load(std::memory_order_acquire);
-        const auto n = g_workerDiagNext.load(std::memory_order_acquire);
-        auto ready = start;
-        while (ready < n) {
-            if (g_workerDiag[ready % kWorkerDiagCap].published.load(std::memory_order_acquire) != ready + 1) {
-                break;
-            }
-            ++ready;
+    WorkerDiagRec local[kWorkerDiagCap];
+    std::size_t start = 0;
+    std::size_t n = 0;
+    std::uint64_t dropped = 0;
+    {
+        std::lock_guard lock(g_diagMu);
+        start = g_diagEmitted;
+        for (std::size_t i = start; i < g_diagCount; ++i) {
+            local[n++] = g_diagStore[i];
         }
-        if (ready > start) {
-            if (!g_workerDiagFlushed.compare_exchange_weak(start, ready, std::memory_order_acq_rel,
-                                                           std::memory_order_acquire)) {
-                continue;
-            }
-            for (auto i = start; i < ready; ++i) {
-                auto& slot = g_workerDiag[i % kWorkerDiagCap];
-                char detail[192];
-                std::snprintf(detail, sizeof(detail),
-                              "seq=%llu tid=%llu head=%d stopping=%d live=%d pending=%d inflight=%d ptr=%llx",
-                              static_cast<unsigned long long>(i), static_cast<unsigned long long>(slot.tid),
-                              slot.head, slot.stopping, slot.live, slot.pending, slot.inflight,
-                              static_cast<unsigned long long>(slot.ptr));
-                lifecycleTrace(workerDiagName(slot.ev), detail);
-            }
-            continue;
+        dropped = g_diagDropped;
+    }
+    for (std::size_t i = 0; i < n; ++i) {
+        const auto& rec = local[i];
+        char headBuf[16];
+        char stopBuf[16];
+        formatDiagField(headBuf, sizeof(headBuf), rec.head);
+        formatDiagField(stopBuf, sizeof(stopBuf), rec.stopping);
+        char detail[192];
+        std::snprintf(detail, sizeof(detail),
+                      "seq=%llu tid=%llu head=%s stopping=%s live=%d pending=%d inflight=%d ptr=%llx",
+                      static_cast<unsigned long long>(rec.seq), static_cast<unsigned long long>(rec.tid),
+                      headBuf, stopBuf, rec.live, rec.pending, rec.inflight,
+                      static_cast<unsigned long long>(rec.ptr));
+        lifecycleTrace(workerDiagName(rec.ev), detail);
+    }
+    if (dropped > 0) {
+        char detail[64];
+        std::snprintf(detail, sizeof(detail), "dropped=%llu cap=%zu",
+                      static_cast<unsigned long long>(dropped), kWorkerDiagCap);
+        lifecycleTrace("worker-diag-dropped", detail);
+    }
+    {
+        std::lock_guard lock(g_diagMu);
+        const std::size_t end = start + n;
+        if (g_diagEmitted < end) {
+            g_diagEmitted = end;
         }
-        if (start >= n) {
-            return;
+        if (dropped > g_diagDropNotices) {
+            g_diagDropNotices = dropped;
         }
-        if (std::chrono::steady_clock::now() >= deadline) {
-            return;
-        }
-        std::this_thread::yield();
     }
 }
 
@@ -227,7 +251,8 @@ public:
             m_stopping = true;
         }
         m_condition.notify_all();
-        workerDiagRecord(WorkerDiagEvent::JoinBegin, 0, 1, m_live.load(std::memory_order_acquire), count(),
+        workerDiagRecord(WorkerDiagEvent::JoinBegin, kWorkerDiagUnknown, kWorkerDiagUnknown,
+                         m_live.load(std::memory_order_acquire), count(),
                          m_inFlight.load(std::memory_order_acquire));
         // Flush before join: if join never returns (H1/H2 or other), wait-enter and
         // join-begin must already be on the lifecycle log.
@@ -399,11 +424,13 @@ private:
             } catch (...) {
             }
         }
-        workerDiagRecord(WorkerDiagEvent::CloseEnter, 0, 0, m_live.load(std::memory_order_acquire), count(),
+        workerDiagRecord(WorkerDiagEvent::CloseEnter, kWorkerDiagUnknown, kWorkerDiagUnknown,
+                         m_live.load(std::memory_order_acquire), count(),
                          m_inFlight.load(std::memory_order_acquire), reinterpret_cast<std::uintptr_t>(model));
         workerDiagFlush();
         delete model;
-        workerDiagRecord(WorkerDiagEvent::CloseLeave, 0, 0, m_live.load(std::memory_order_acquire), count(),
+        workerDiagRecord(WorkerDiagEvent::CloseLeave, kWorkerDiagUnknown, kWorkerDiagUnknown,
+                         m_live.load(std::memory_order_acquire), count(),
                          m_inFlight.load(std::memory_order_acquire), reinterpret_cast<std::uintptr_t>(model));
         workerDiagFlush();
         {
@@ -430,16 +457,18 @@ private:
                                  m_live.load(std::memory_order_acquire), count(),
                                  m_inFlight.load(std::memory_order_acquire));
                 if (!m_head && m_stopping && m_live.load(std::memory_order_acquire) == 0) {
-                    workerDiagRecord(WorkerDiagEvent::RunExit, 0, 1, m_live.load(std::memory_order_acquire),
-                                     count(), m_inFlight.load(std::memory_order_acquire));
+                    workerDiagRecord(WorkerDiagEvent::RunExit, m_head != nullptr ? 1 : 0, m_stopping ? 1 : 0,
+                                     m_live.load(std::memory_order_acquire), count(),
+                                     m_inFlight.load(std::memory_order_acquire));
                     return;
                 }
                 batch = m_head;
                 m_head = nullptr;
                 m_tail = nullptr;
             }
-            workerDiagRecord(WorkerDiagEvent::FinishEnter, 0, 0, m_live.load(std::memory_order_acquire),
-                             count(), m_inFlight.load(std::memory_order_acquire),
+            workerDiagRecord(WorkerDiagEvent::FinishEnter, kWorkerDiagUnknown, kWorkerDiagUnknown,
+                             m_live.load(std::memory_order_acquire), count(),
+                             m_inFlight.load(std::memory_order_acquire),
                              reinterpret_cast<std::uintptr_t>(batch));
             workerDiagFlush();
             while (batch) {
@@ -448,8 +477,9 @@ private:
                 finish(batch);
                 batch = next;
             }
-            workerDiagRecord(WorkerDiagEvent::FinishLeave, 0, 0, m_live.load(std::memory_order_acquire),
-                             count(), m_inFlight.load(std::memory_order_acquire));
+            workerDiagRecord(WorkerDiagEvent::FinishLeave, kWorkerDiagUnknown, kWorkerDiagUnknown,
+                             m_live.load(std::memory_order_acquire), count(),
+                             m_inFlight.load(std::memory_order_acquire));
             workerDiagFlush();
         }
     }

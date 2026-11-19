@@ -24,7 +24,6 @@ on:
 
 permissions:
   contents: read
-  actions: write
 
 concurrency:
   group: t10-win-enqueue-diag-oneshot
@@ -43,6 +42,8 @@ jobs:
       T10_048_CORE_TREE: 4c5f4c46bacfb3ff8f05d33f9b1275d2ee3d7d21
       T10_048_BASE: ed82ec63327591c704e29093393112e9d1476368
       T10_048_BASE_TREE: 99391948412f80bead2003b335e3a05b34c8d863
+      T10_048_CHECKOUT_SHA: ${{ github.event.inputs.checkout_sha }}
+      T10_048_EXPECTED_REF: refs/heads/t10-048-enqueue-diag
     defaults:
       run:
         shell: pwsh
@@ -54,28 +55,39 @@ jobs:
           fetch-depth: 0
 
       - name: Verify locked parent and SHA
+        timeout-minutes: 5
         run: |
-          $want = "${{ github.event.inputs.checkout_sha }}"
+          $want = $env:T10_048_CHECKOUT_SHA
+          $id = Join-Path $env:GITHUB_WORKSPACE "diag-identity.txt"
+          "GITHUB_SHA=$env:GITHUB_SHA" | Set-Content -LiteralPath $id -Encoding utf8
+          Add-Content $id "GITHUB_REF=$env:GITHUB_REF"
+          Add-Content $id "input_checkout_sha=$want"
+          if ($want -notmatch '^[0-9a-f]{40}$') { Add-Content $id "fail=checkout_sha_not_40_hex"; throw "checkout_sha is not a 40-char lowercase hex SHA" }
+          if ($env:T10_048_CORE_SHA -notmatch '^[0-9a-f]{40}$') { throw "core sha env invalid" }
+          if ($env:T10_048_BASE -notmatch '^[0-9a-f]{40}$') { throw "base sha env invalid" }
+          if ($env:GITHUB_SHA -ne $want) { Add-Content $id "fail=github_sha_mismatch"; throw "GITHUB_SHA $env:GITHUB_SHA != checkout_sha $want" }
+          if ($env:GITHUB_REF -ne $env:T10_048_EXPECTED_REF) { Add-Content $id "fail=github_ref_mismatch"; throw "GITHUB_REF $env:GITHUB_REF != $env:T10_048_EXPECTED_REF" }
           $head = (git rev-parse HEAD).Trim()
-          $parent = (git rev-parse "HEAD^").Trim()
-          $parentTree = (git rev-parse 'HEAD^^{tree}').Trim()
+          $tree = (git rev-parse 'HEAD^{tree}').Trim()
+          $coreTree = (git rev-parse ($env:T10_048_CORE_SHA + '^{tree}')).Trim()
           $base = (git rev-parse ($env:T10_048_CORE_SHA + '^')).Trim()
-          $baseTree = (git rev-parse ($env:T10_048_CORE_SHA + '^{tree}')).Trim()
+          $baseTree = (git rev-parse ($env:T10_048_BASE + '^{tree}')).Trim()
           $dirty = (git status --porcelain)
-          "HEAD=$head" | Tee-Object -FilePath "$env:GITHUB_WORKSPACE/diag-identity.txt"
-          Add-Content diag-identity.txt "wanted=$want"
-          Add-Content diag-identity.txt "parent=$parent"
-          Add-Content diag-identity.txt "parent_tree=$parentTree"
-          Add-Content diag-identity.txt "tree=$((git rev-parse 'HEAD^{tree}').Trim())"
-          Add-Content diag-identity.txt "core=$env:T10_048_CORE_SHA"
-          Add-Content diag-identity.txt "base=$base"
-          Add-Content diag-identity.txt "base_tree=$baseTree"
-          if ($head -ne $want) { throw "HEAD $head != requested $want" }
-          if ($parent -ne $env:T10_048_CORE_SHA) { throw "parent $parent != locked core $env:T10_048_CORE_SHA" }
-          if ($parentTree -ne $env:T10_048_CORE_TREE) { throw "parent tree mismatch vs 5a8692" }
-          if ($base -ne $env:T10_048_BASE) { throw "5a8692 parent $base != ed82 base" }
-          if ($baseTree -ne $env:T10_048_BASE_TREE) { throw "ed82/af359bd tree mapping mismatch" }
-          if ($dirty) { throw "worktree dirty: $dirty" }
+          Add-Content $id "HEAD=$head"
+          Add-Content $id "tree=$tree"
+          Add-Content $id "core=$env:T10_048_CORE_SHA"
+          Add-Content $id "core_tree=$coreTree"
+          Add-Content $id "base=$base"
+          Add-Content $id "base_tree=$baseTree"
+          if ($head -ne $want) { Add-Content $id "fail=head_mismatch"; throw "HEAD $head != checkout_sha $want" }
+          git merge-base --is-ancestor $env:T10_048_CORE_SHA HEAD
+          if ($LASTEXITCODE -ne 0) { Add-Content $id "fail=core_not_ancestor"; throw "core $env:T10_048_CORE_SHA is not an ancestor of HEAD" }
+          if ($coreTree -ne $env:T10_048_CORE_TREE) { Add-Content $id "fail=core_tree_mismatch"; throw "core tree $coreTree != $env:T10_048_CORE_TREE" }
+          if ($base -ne $env:T10_048_BASE) { Add-Content $id "fail=base_sha_mismatch"; throw "5a8692 parent $base != $env:T10_048_BASE" }
+          if ($baseTree -ne $env:T10_048_BASE_TREE) { Add-Content $id "fail=base_tree_mismatch"; throw "base tree $baseTree != $env:T10_048_BASE_TREE" }
+          if ($env:T10_048_CORE_TREE -eq $env:T10_048_BASE_TREE) { throw "core tree and base tree must stay distinct" }
+          if ($dirty) { Add-Content $id "fail=dirty"; throw "worktree dirty: $dirty" }
+          Add-Content $id "identity_ok=1"
 
       - name: MSVC x64 environment
         uses: ilammy/msvc-dev-cmd@v1
@@ -83,6 +95,7 @@ jobs:
           arch: x64
 
       - name: Early compiler identity
+        timeout-minutes: 5
         run: |
           New-Item -ItemType Directory -Force -Path artifacts/identity-early | Out-Null
           cmd /c "cl /Bv" > artifacts/identity-early/cl-Bv.txt 2>&1
@@ -92,6 +105,7 @@ jobs:
       - name: No-OCCT static-dtor-join-gate experiment
         continue-on-error: true
         id: experiment
+        timeout-minutes: 5
         run: |
           # 30s watchdog only for this standalone experiment (Linux finished in <1s).
           # Not applied to the product tests, which keep their own 10s/15s/2s internals.
@@ -99,6 +113,19 @@ jobs:
           $code = $LASTEXITCODE
           "experiment_exit=$code" | Set-Content artifacts/experiment-step-exit.txt
           exit $code
+
+      - name: Upload early experiment evidence
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: actions/upload-artifact@v4
+        with:
+          name: t10-048-enqueue-diag-early
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            artifacts/
+            diag-identity.txt
 
       - name: Checkout vcpkg 2026.10.16
         uses: actions/checkout@v4
@@ -158,6 +185,7 @@ jobs:
       - name: Configure contract and build directed target
         id: build
         continue-on-error: true
+        timeout-minutes: 210
         run: |
           if (-not $env:VCPKG_ROOT) { throw "VCPKG_ROOT unset; bootstrap failed" }
           New-Item -ItemType Directory -Force -Path artifacts/build | Out-Null
@@ -175,6 +203,7 @@ jobs:
       - name: Capture SDK and compiler identity
         if: always()
         continue-on-error: true
+        timeout-minutes: 5
         run: |
           pwsh -File scripts/t10_048_capture_identity.ps1 -BuildDir build/t10-048-diag -OutDir artifacts/identity
 
@@ -191,6 +220,7 @@ jobs:
       - name: Run EnqueueNotify and hang negative tests
         id: tests
         continue-on-error: true
+        timeout-minutes: 12
         run: |
           if ("${{ steps.build.outcome }}" -ne "success") {
             "tests_skipped=build_failed" | Set-Content artifacts/tests-skipped.txt
@@ -203,6 +233,7 @@ jobs:
 
       - name: Record composite exits
         if: always()
+        timeout-minutes: 5
         run: |
           $exp = "${{ steps.experiment.outcome }}"
           $boot = "${{ steps.bootstrap.outcome }}"
@@ -220,6 +251,7 @@ jobs:
 
       - name: Upload evidence
         if: always()
+        timeout-minutes: 10
         uses: actions/upload-artifact@v4
         with:
           name: t10-048-enqueue-diag
