@@ -6,6 +6,7 @@ param(
     [int]$ScanMs = 15000
 )
 $ErrorActionPreference = "Stop"
+$script:MetaFailed = $false
 
 function ConvertTo-Abs([string]$Path) {
     if ([string]::IsNullOrWhiteSpace($Path)) { throw "empty path" }
@@ -14,8 +15,14 @@ function ConvertTo-Abs([string]$Path) {
     }
     return [IO.Path]::GetFullPath((Join-Path (Get-Location) $Path))
 }
+# Best-effort only: a meta/log failure must never throw into terminate/reap.
 function Write-Meta([string]$File, [string]$Line) {
-    Add-Content -LiteralPath $File -Value $Line -Encoding utf8
+    try {
+        Add-Content -LiteralPath $File -Value $Line -Encoding utf8 -ErrorAction Stop
+    } catch {
+        $script:MetaFailed = $true
+        try { [Console]::Error.WriteLine("meta_write_failed file=$File line=$Line error=$($_.Exception.Message)") } catch { }
+    }
 }
 function Stop-OwnedProcess {
     param($Proc, [int]$ReapMs, [string]$Meta)
@@ -38,19 +45,26 @@ function Stop-OwnedProcess {
     }
     $started = $null
     try { $started = $Proc.StartTime.ToString("o") } catch { }
-    Write-Meta $Meta "kill_tree_id=$id"
-    Write-Meta $Meta "kill_tree_start=$started"
+    # Terminate and bounded confirm first; meta is after and cannot skip them.
     $tk = 1
+    $tkOut = $null
+    $tkErr = $null
+    $stopErr = $null
     try {
-        & taskkill.exe /PID $id /T /F | Out-String | ForEach-Object { Write-Meta $Meta "taskkill=$_".Trim() }
+        $tkOut = & taskkill.exe /PID $id /T /F 2>&1 | Out-String
         $tk = $LASTEXITCODE
     } catch {
-        Write-Meta $Meta "taskkill_exception=$_"
-        try { Stop-Process -Id $id -Force -ErrorAction Stop } catch { Write-Meta $Meta "stop_process_error=$_" }
+        $tkErr = $_
+        try { Stop-Process -Id $id -Force -ErrorAction Stop } catch { $stopErr = $_ }
     }
-    Write-Meta $Meta "taskkill_exit=$tk"
     try { $reaped = $Proc.WaitForExit($ReapMs) } catch { Write-Meta $Meta "reap_wait_error=$_" }
     try { $hasExited = $Proc.HasExited } catch { $hasExited = $false }
+    Write-Meta $Meta "kill_tree_id=$id"
+    Write-Meta $Meta "kill_tree_start=$started"
+    if ($null -ne $tkOut) { Write-Meta $Meta "taskkill=$($tkOut.Trim())" }
+    if ($null -ne $tkErr) { Write-Meta $Meta "taskkill_exception=$tkErr" }
+    if ($null -ne $stopErr) { Write-Meta $Meta "stop_process_error=$stopErr" }
+    Write-Meta $Meta "taskkill_exit=$tk"
     Write-Meta $Meta "reaped=$( if ($reaped) { '1' } else { '0' } )"
     Write-Meta $Meta "has_exited=$( if ($hasExited) { '1' } else { '0' } )"
     if (-not $hasExited) {
@@ -114,46 +128,61 @@ try {
     if (-not $p) { throw "Start-Process returned no process" }
     $exited = $p.WaitForExit($TimeoutMs)
     if (-not $exited) {
-        Write-Meta $meta "watchdog_timeout=1"
-        $null = Stop-OwnedProcess -Proc $p -ReapMs $ReapMs -Meta $meta
-        if ($p.HasExited) { Write-Meta $meta "gtest_exit=$($p.ExitCode)" } else { Write-Meta $meta "gtest_exit=watchdog_unreaped" }
         $code = 124
+        $null = Stop-OwnedProcess -Proc $p -ReapMs $ReapMs -Meta $meta
+        Write-Meta $meta "watchdog_timeout=1"
+        try {
+            if ($p.HasExited) { Write-Meta $meta "gtest_exit=$($p.ExitCode)" } else { Write-Meta $meta "gtest_exit=watchdog_unreaped" }
+        } catch { Write-Meta $meta "gtest_exit=watchdog_unreaped" }
     } else {
         $code = $p.ExitCode
         Write-Meta $meta "gtest_exit=$code"
         Write-Meta $meta "has_exited=1"
     }
 } catch {
+    $code = 2
     Write-Meta $meta "run_exception=$_"
     Write-Meta $meta "gtest_exit=2"
-    $code = 2
 } finally {
+    # 1) terminate + bounded confirm  2) record  3) preserve nonzero / surface meta failure
     if ($p) {
-        $cleaned = Stop-OwnedProcess -Proc $p -ReapMs $ReapMs -Meta $meta
-        if (-not $cleaned -and $code -eq 0) { $code = 124 }
+        try {
+            $cleaned = Stop-OwnedProcess -Proc $p -ReapMs $ReapMs -Meta $meta
+            if (-not $cleaned -and $code -eq 0) { $code = 124 }
+        } catch {
+            Write-Meta $meta "reap_exception=$_"
+            if ($code -eq 0) { $code = 124 }
+        }
     }
-    $mirrorOk = (Test-Path -LiteralPath $mirror) -and ((Get-Item -LiteralPath $mirror).Length -gt 0)
-    Write-Meta $meta "mirror_exists=$( if (Test-Path -LiteralPath $mirror) { '1' } else { '0' } )"
-    Write-Meta $meta "mirror_bytes=$( if (Test-Path -LiteralPath $mirror) { (Get-Item -LiteralPath $mirror).Length } else { 0 } )"
-    if (-not $mirrorOk) {
-        Write-Meta $meta "incomplete=1"
+    try {
+        $mirrorOk = (Test-Path -LiteralPath $mirror) -and ((Get-Item -LiteralPath $mirror).Length -gt 0)
+        Write-Meta $meta "mirror_exists=$( if (Test-Path -LiteralPath $mirror) { '1' } else { '0' } )"
+        Write-Meta $meta "mirror_bytes=$( if (Test-Path -LiteralPath $mirror) { (Get-Item -LiteralPath $mirror).Length } else { 0 } )"
+        if (-not $mirrorOk) {
+            Write-Meta $meta "incomplete=1"
+            if ($code -eq 0) { $code = 2 }
+        }
+        # Bounded leftover scan of this run's dedicated scratch only; do not walk the machine TEMP.
+        # ScanMs is checked before each copy, not a hard preemptive bound on enumeration or each I/O.
+        $deadline = [DateTime]::UtcNow.AddMilliseconds($ScanMs)
+        $scanned = 0
+        $skipped = 0
+        if (Test-Path -LiteralPath $scratch) {
+            Get-ChildItem -LiteralPath $scratch -Recurse -File -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -like "lifecycle*.log" } |
+                ForEach-Object {
+                    if ([DateTime]::UtcNow -gt $deadline) { $skipped++; return }
+                    New-UniqueCopy $_.FullName "leftover"
+                    $scanned++
+                }
+        }
+        Write-Meta $meta "scratch_copied=$scanned"
+        if ($skipped -gt 0) { Write-Meta $meta "scratch_scan_incomplete=$skipped" }
+    } catch {
+        Write-Meta $meta "finally_record_error=$_"
         if ($code -eq 0) { $code = 2 }
     }
-    # Bounded leftover scan of this run's dedicated scratch only; do not walk the machine TEMP.
-    $deadline = [DateTime]::UtcNow.AddMilliseconds($ScanMs)
-    $scanned = 0
-    $skipped = 0
-    if (Test-Path -LiteralPath $scratch) {
-        Get-ChildItem -LiteralPath $scratch -Recurse -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -like "lifecycle*.log" } |
-            ForEach-Object {
-                if ([DateTime]::UtcNow -gt $deadline) { $skipped++; return }
-                New-UniqueCopy $_.FullName "leftover"
-                $scanned++
-            }
-    }
-    Write-Meta $meta "scratch_copied=$scanned"
-    if ($skipped -gt 0) { Write-Meta $meta "scratch_scan_incomplete=$skipped" }
     Remove-Item Env:STEPLENS_DIAG_LOG -ErrorAction SilentlyContinue
+    if ($script:MetaFailed -and $code -eq 0) { $code = 2 }
 }
 exit $code

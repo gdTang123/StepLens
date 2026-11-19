@@ -4,6 +4,7 @@ param(
     [int]$ReapMs = 30000
 )
 $ErrorActionPreference = "Stop"
+$script:MetaFailed = $false
 
 function ConvertTo-Abs([string]$Path) {
     if ([string]::IsNullOrWhiteSpace($Path)) { throw "empty path" }
@@ -12,8 +13,14 @@ function ConvertTo-Abs([string]$Path) {
     }
     return [IO.Path]::GetFullPath((Join-Path (Get-Location) $Path))
 }
+# Best-effort only: a meta/log failure must never throw into terminate/reap.
 function Write-Meta([string]$File, [string]$Line) {
-    Add-Content -LiteralPath $File -Value $Line -Encoding utf8
+    try {
+        Add-Content -LiteralPath $File -Value $Line -Encoding utf8 -ErrorAction Stop
+    } catch {
+        $script:MetaFailed = $true
+        try { [Console]::Error.WriteLine("meta_write_failed file=$File line=$Line error=$($_.Exception.Message)") } catch { }
+    }
 }
 function Stop-OwnedProcess {
     param($Proc, [int]$ReapMs, [string]$Meta)
@@ -36,19 +43,26 @@ function Stop-OwnedProcess {
     }
     $started = $null
     try { $started = $Proc.StartTime.ToString("o") } catch { }
-    Write-Meta $Meta "kill_tree_id=$id"
-    Write-Meta $Meta "kill_tree_start=$started"
+    # Terminate and bounded confirm first; meta is after and cannot skip them.
     $tk = 1
+    $tkOut = $null
+    $tkErr = $null
+    $stopErr = $null
     try {
-        & taskkill.exe /PID $id /T /F | Out-String | ForEach-Object { Write-Meta $Meta "taskkill=$_".Trim() }
+        $tkOut = & taskkill.exe /PID $id /T /F 2>&1 | Out-String
         $tk = $LASTEXITCODE
     } catch {
-        Write-Meta $Meta "taskkill_exception=$_"
-        try { Stop-Process -Id $id -Force -ErrorAction Stop } catch { Write-Meta $Meta "stop_process_error=$_" }
+        $tkErr = $_
+        try { Stop-Process -Id $id -Force -ErrorAction Stop } catch { $stopErr = $_ }
     }
-    Write-Meta $Meta "taskkill_exit=$tk"
     try { $reaped = $Proc.WaitForExit($ReapMs) } catch { Write-Meta $Meta "reap_wait_error=$_" }
     try { $hasExited = $Proc.HasExited } catch { $hasExited = $false }
+    Write-Meta $Meta "kill_tree_id=$id"
+    Write-Meta $Meta "kill_tree_start=$started"
+    if ($null -ne $tkOut) { Write-Meta $Meta "taskkill=$($tkOut.Trim())" }
+    if ($null -ne $tkErr) { Write-Meta $Meta "taskkill_exception=$tkErr" }
+    if ($null -ne $stopErr) { Write-Meta $Meta "stop_process_error=$stopErr" }
+    Write-Meta $Meta "taskkill_exit=$tk"
     Write-Meta $Meta "reaped=$( if ($reaped) { '1' } else { '0' } )"
     Write-Meta $Meta "has_exited=$( if ($hasExited) { '1' } else { '0' } )"
     if (-not $hasExited) {
@@ -78,13 +92,14 @@ try {
         > (Join-Path $OutDir "experiment-cl-stdout.txt") 2> (Join-Path $OutDir "experiment-cl-stderr.txt")
     $clExit = $LASTEXITCODE
 } catch {
-    Write-Meta $meta "cl_exception=$_"
     $clExit = 2
+    Write-Meta $meta "cl_exception=$_"
 }
 Write-Meta $meta "cl_exit=$clExit"
 if ($clExit -ne 0 -or -not (Test-Path -LiteralPath $exe)) {
     Write-Meta $meta "run_skipped=1"
     Write-Meta $meta "run_exit=2"
+    if ($script:MetaFailed -and $clExit -eq 0) { exit 2 }
     if ($clExit -eq 0) { exit 2 }
     exit $clExit
 }
@@ -98,10 +113,12 @@ try {
     if (-not $p) { throw "Start-Process returned no process" }
     $exited = $p.WaitForExit($TimeoutMs)
     if (-not $exited) {
-        Write-Meta $meta "watchdog_timeout_ms=$TimeoutMs"
-        $null = Stop-OwnedProcess -Proc $p -ReapMs $ReapMs -Meta $meta
-        if ($p.HasExited) { Write-Meta $meta "run_exit=$($p.ExitCode)" } else { Write-Meta $meta "run_exit=watchdog_unreaped" }
         $code = 124
+        $null = Stop-OwnedProcess -Proc $p -ReapMs $ReapMs -Meta $meta
+        Write-Meta $meta "watchdog_timeout_ms=$TimeoutMs"
+        try {
+            if ($p.HasExited) { Write-Meta $meta "run_exit=$($p.ExitCode)" } else { Write-Meta $meta "run_exit=watchdog_unreaped" }
+        } catch { Write-Meta $meta "run_exit=watchdog_unreaped" }
     } else {
         $code = $p.ExitCode
         Write-Meta $meta "run_exit=$code"
@@ -109,21 +126,33 @@ try {
         Write-Meta $meta "has_exited=1"
     }
 } catch {
+    $code = 2
     Write-Meta $meta "run_exception=$_"
     Write-Meta $meta "run_exit=2"
-    $code = 2
 } finally {
+    # 1) terminate + bounded confirm  2) record  3) preserve nonzero / surface meta failure
     if ($p) {
-        $cleaned = Stop-OwnedProcess -Proc $p -ReapMs $ReapMs -Meta $meta
-        if (-not $cleaned -and $code -eq 0) { $code = 124 }
+        try {
+            $cleaned = Stop-OwnedProcess -Proc $p -ReapMs $ReapMs -Meta $meta
+            if (-not $cleaned -and $code -eq 0) { $code = 124 }
+        } catch {
+            Write-Meta $meta "reap_exception=$_"
+            if ($code -eq 0) { $code = 124 }
+        }
     }
-    Remove-Item Env:STEPLENS_DIAG_EXPERIMENT_LOG -ErrorAction SilentlyContinue
-    $logOk = (Test-Path -LiteralPath $log) -and ((Get-Item -LiteralPath $log).Length -gt 0)
-    Write-Meta $meta "log_exists=$( if (Test-Path -LiteralPath $log) { '1' } else { '0' } )"
-    Write-Meta $meta "log_bytes=$( if (Test-Path -LiteralPath $log) { (Get-Item -LiteralPath $log).Length } else { 0 } )"
-    if (-not $logOk) {
-        Write-Meta $meta "incomplete=1"
+    try {
+        Remove-Item Env:STEPLENS_DIAG_EXPERIMENT_LOG -ErrorAction SilentlyContinue
+        $logOk = (Test-Path -LiteralPath $log) -and ((Get-Item -LiteralPath $log).Length -gt 0)
+        Write-Meta $meta "log_exists=$( if (Test-Path -LiteralPath $log) { '1' } else { '0' } )"
+        Write-Meta $meta "log_bytes=$( if (Test-Path -LiteralPath $log) { (Get-Item -LiteralPath $log).Length } else { 0 } )"
+        if (-not $logOk) {
+            Write-Meta $meta "incomplete=1"
+            if ($code -eq 0) { $code = 2 }
+        }
+    } catch {
+        Write-Meta $meta "finally_record_error=$_"
         if ($code -eq 0) { $code = 2 }
     }
+    if ($script:MetaFailed -and $code -eq 0) { $code = 2 }
 }
 exit $code
