@@ -1,101 +1,104 @@
+# 1111-048: diagnosis body on the EXISTING workflow path/identity ci.yml (name: ci).
+# Default/main bytes are not changed by this branch file. This copy has only
+# workflow_dispatch (no push, no pull_request). Push to main or v* tags still uses
+# the version of ci.yml on that main/tag commit, not this file.
+# Do not open a PR: occt-contract.yml on this tree still has pull_request.
+# Pushing this branch alone does not trigger default push rules (ci.yml push is
+# main/tags only on default; this copy has no push).
+# gh --ref must be the isolated branch or tag name (not a raw SHA). Accidental
+# `gh workflow run ci.yml` without --ref runs the DEFAULT full CI. One shot, no retry.
+# Not a Windows pass by itself. Not authorized to publish/trigger from this file.
 name: ci
 
-# PR，以及推送到 main 或 v* 标签。仓库已公开，标准托管 runner 不限分钟；仍不设矩阵、不设 schedule。
-# 二进制缓存未命中时会从源码编译 OCCT 7.9.3，第一次大约两个半小时，超时留到四小时，避免缓存上传被掐掉。
-# 只改文档时不触发：docs/**（含图片等非 Markdown），以及任意位置的 .md。
-# bench 清单因此跳过。bench 的代码、脚本和 CMake 不匹配这些模式，改了仍会跑。
-# workflow、vcpkg 清单、packaging 脚本和 CMake 逻辑同样不在忽略列表里。
-# 标签推送不做路径过滤（GitHub 不对 tag 计算 paths-ignore），v* 总会跑，并在 Windows 作业里打 zip。
 on:
-  pull_request:
-    paths-ignore:
-      - 'docs/**'
-      - '*.md'
-      - '**.md'
-      - '**/*.md'
-  push:
-    branches: [main]
-    tags: ['v*']
-    paths-ignore:
-      - 'docs/**'
-      - '*.md'
-      - '**.md'
-      - '**/*.md'
   workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Type RUN only after 沈批准. One shot, no retry."
+        required: true
+        type: string
+      checkout_sha:
+        description: "Exact approved candidate SHA (do not use a moving branch tip)."
+        required: true
+        type: string
 
 permissions:
   contents: read
   actions: write
 
-# 同一 PR 的新推送才取消旧运行。push 和 workflow_dispatch 不取消。
-# group 带上事件名，所以 main 上的 push 与手动触发各占一组。
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: t10-win-enqueue-diag-oneshot
+  cancel-in-progress: false
 
 jobs:
-  # Linux 托管 runner 比 Windows 便宜。只编 core，不下载 Qt、不编 OCCT。
-  core:
-    name: core-tests-tsan
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install compiler
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends g++ cmake ninja-build
-
-      - name: Configure, build, test with TSan
-        run: |
-          cmake -S . -B build/core -G Ninja \
-            -DSTEPLENS_CORE_ONLY=ON \
-            -DCMAKE_BUILD_TYPE=Debug \
-            -DCMAKE_C_COMPILER=gcc \
-            -DCMAKE_CXX_COMPILER=g++ \
-            -DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1" \
-            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
-          cmake --build build/core
-          ctest --test-dir build/core --output-on-failure
-          python3 scripts/test_t03_tools.py
-
-      - name: Check vcpkg manifests and OCCT version macro
-        run: |
-          python3 scripts/check_manifests.py
-          hits=$(git grep -n OCC_VERSION_HEX -- '*.h' '*.hpp' '*.cpp' '*.cxx' ':!src/occtsupport/occt_compat.h' || true)
-          if [ -n "$hits" ]; then
-            echo "$hits"
-            echo "OCC_VERSION_HEX 只能出现在 src/occtsupport/occt_compat.h"
-            exit 1
-          fi
-          git grep -n OCC_VERSION_HEX -- src/occtsupport/occt_compat.h >/dev/null
-
-  windows:
-    name: windows-build
+  diagnose:
+    name: experiment-then-enqueue-notify
+    if: github.event.inputs.confirm == 'RUN'
     runs-on: windows-2022
     timeout-minutes: 240
     env:
       PYTHONUTF8: "1"
       PYTHONIOENCODING: utf-8
+      T10_048_CORE_SHA: 5a8692fd4b052836a5ccfb8464b06b9e9bf5646d
+      T10_048_CORE_TREE: 4c5f4c46bacfb3ff8f05d33f9b1275d2ee3d7d21
+      T10_048_BASE: ed82ec63327591c704e29093393112e9d1476368
+      T10_048_BASE_TREE: 99391948412f80bead2003b335e3a05b34c8d863
     defaults:
       run:
         shell: pwsh
     steps:
-      - name: Checkout
+      - name: Checkout locked SHA
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.inputs.checkout_sha }}
           fetch-depth: 0
 
-      - name: clang-format
+      - name: Verify locked parent and SHA
         run: |
-          $clangFormat = "C:\Program Files\LLVM\bin\clang-format.exe"
-          if (-not (Test-Path -LiteralPath $clangFormat)) {
-            throw "windows-2022 镜像上未找到 $clangFormat（镜像说明里有 LLVM）"
-          }
-          $files = @(git ls-files "*.h" "*.cpp")
-          if ($files.Count -eq 0) { throw "没有 C++ 文件" }
-          & $clangFormat --dry-run --Werror @files
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $want = "${{ github.event.inputs.checkout_sha }}"
+          $head = (git rev-parse HEAD).Trim()
+          $parent = (git rev-parse "HEAD^").Trim()
+          $parentTree = (git rev-parse 'HEAD^^{tree}').Trim()
+          $base = (git rev-parse ($env:T10_048_CORE_SHA + '^')).Trim()
+          $baseTree = (git rev-parse ($env:T10_048_CORE_SHA + '^{tree}')).Trim()
+          $dirty = (git status --porcelain)
+          "HEAD=$head" | Tee-Object -FilePath "$env:GITHUB_WORKSPACE/diag-identity.txt"
+          Add-Content diag-identity.txt "wanted=$want"
+          Add-Content diag-identity.txt "parent=$parent"
+          Add-Content diag-identity.txt "parent_tree=$parentTree"
+          Add-Content diag-identity.txt "tree=$((git rev-parse 'HEAD^{tree}').Trim())"
+          Add-Content diag-identity.txt "core=$env:T10_048_CORE_SHA"
+          Add-Content diag-identity.txt "base=$base"
+          Add-Content diag-identity.txt "base_tree=$baseTree"
+          if ($head -ne $want) { throw "HEAD $head != requested $want" }
+          if ($parent -ne $env:T10_048_CORE_SHA) { throw "parent $parent != locked core $env:T10_048_CORE_SHA" }
+          if ($parentTree -ne $env:T10_048_CORE_TREE) { throw "parent tree mismatch vs 5a8692" }
+          if ($base -ne $env:T10_048_BASE) { throw "5a8692 parent $base != ed82 base" }
+          if ($baseTree -ne $env:T10_048_BASE_TREE) { throw "ed82/af359bd tree mapping mismatch" }
+          if ($dirty) { throw "worktree dirty: $dirty" }
+
+      - name: MSVC x64 environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Early compiler identity
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts/identity-early | Out-Null
+          cmd /c "cl /Bv" > artifacts/identity-early/cl-Bv.txt 2>&1
+          cmake --version > artifacts/identity-early/cmake-version.txt
+          where.exe cl,ninja,link,cmake > artifacts/identity-early/where.txt 2>&1
+
+      - name: No-OCCT static-dtor-join-gate experiment
+        continue-on-error: true
+        id: experiment
+        run: |
+          # 30s watchdog only for this standalone experiment (Linux finished in <1s).
+          # Not applied to the product tests, which keep their own 10s/15s/2s internals.
+          pwsh -File scripts/t10_048_run_experiment.ps1 -OutDir artifacts/experiment -TimeoutMs 30000
+          $code = $LASTEXITCODE
+          "experiment_exit=$code" | Set-Content artifacts/experiment-step-exit.txt
+          exit $code
 
       - name: Checkout vcpkg 2026.10.16
         uses: actions/checkout@v4
@@ -105,8 +108,6 @@ jobs:
           path: vcpkg
           fetch-depth: 1
 
-      # restore + 编译成功后立刻 save。actions/cache 的保存挂在整次 job 成功上，
-      # 打包或冒烟失败时 Post Cache 会被跳过，OCCT 就得重编。
       - name: Restore vcpkg binaries
         id: vcpkg-cache
         uses: actions/cache/restore@v4
@@ -119,74 +120,27 @@ jobs:
             vcpkg-occt793-${{ runner.os }}-x64-windows-
 
       - name: Bootstrap vcpkg
+        id: bootstrap
+        continue-on-error: true
         run: |
-          # vcpkg.exe 的发布下载偶发 504。多试几次，最后一次的退出码仍会失败。
           $bootstrapped = $false
           foreach ($attempt in 1..4) {
             & .\vcpkg\bootstrap-vcpkg.bat -disableMetrics
-            if ($LASTEXITCODE -eq 0) {
-              $bootstrapped = $true
-              break
-            }
+            if ($LASTEXITCODE -eq 0) { $bootstrapped = $true; break }
             Write-Host "bootstrap-vcpkg failed with exit $LASTEXITCODE (attempt $attempt)"
-            if ($attempt -lt 4) {
-              Start-Sleep -Seconds (15 * $attempt)
-            }
+            if ($attempt -lt 4) { Start-Sleep -Seconds (15 * $attempt) }
           }
-          if (-not $bootstrapped) { exit 1 }
+          if (-not $bootstrapped) { throw "bootstrap-vcpkg failed" }
           New-Item -ItemType Directory -Force -Path .vcpkg-binary-cache | Out-Null
           $cache = (Join-Path (Get-Location) ".vcpkg-binary-cache") -replace '\\', '/'
           $root = Join-Path (Get-Location) "vcpkg"
           Add-Content -Path $env:GITHUB_ENV -Encoding utf8NoBOM -Value "VCPKG_ROOT=$root"
           Add-Content -Path $env:GITHUB_ENV -Encoding utf8NoBOM -Value "VCPKG_DISABLE_METRICS=1"
           Add-Content -Path $env:GITHUB_ENV -Encoding utf8NoBOM -Value "VCPKG_BINARY_SOURCES=clear;files,$cache,readwrite"
-          # 镜像里已经有 ninja。不要再从 GitHub releases 下载，那边现在会 504。
           Add-Content -Path $env:GITHUB_ENV -Encoding utf8NoBOM -Value "VCPKG_FORCE_SYSTEM_BINARIES=1"
 
-      # Qt 6.11 起 Windows 仓库按编译器拆目录：qt6_6120/qt6_6120_msvc2022_64/Updates.xml。
-      # PyPI 上的 aqtinstall 3.3.0 仍去找 qt6_6120/qt6_6120/Updates.xml（404）。
-      # 8c3695d 是已合并的 “Support Qt 6.11+ for Windows x64”，尚未发版。
-      - name: Restore Qt 6.12.0
-        id: qt-cache
-        uses: actions/cache/restore@v4
-        with:
-          path: C:\Qt\6.12.0\msvc2022_64
-          key: qt-6.12.0-win64_msvc2022_64-base
-
-      - name: Install Qt 6.12.0 from download.qt.io
-        if: steps.qt-cache.outputs.cache-hit != 'true'
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install "git+https://github.com/miurahr/aqtinstall.git@8c3695d4a4e1ceabf6a74dc6c79681656dc6b74b"
-          python -m aqt version
-          $qtRoot = "C:\Qt"
-          # qttools（含 Linguist）已经打进基础包 qt.qt6.6120.win64_msvc2022_64，不是独立模块。
-          python -m aqt install-qt windows desktop 6.12.0 win64_msvc2022_64 `
-            --outputdir $qtRoot --base https://download.qt.io
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Point CMake at Qt
-        run: |
-          $qtDir = "C:\Qt\6.12.0\msvc2022_64"
-          $qmake = Join-Path $qtDir "bin\qmake.exe"
-          if (-not (Test-Path -LiteralPath $qmake)) { throw "Qt 安装后未找到 $qmake" }
-          Add-Content -Path $env:GITHUB_ENV -Encoding utf8NoBOM -Value "QTDIR=$qtDir"
-          Add-Content -Path $env:GITHUB_PATH -Encoding utf8NoBOM -Value (Join-Path $qtDir "bin")
-
-      - name: Save Qt cache
-        if: success() && steps.qt-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: C:\Qt\6.12.0\msvc2022_64
-          key: ${{ steps.qt-cache.outputs.cache-primary-key }}
-
-      - name: MSVC x64 environment
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
-
-      # 镜像自带的 ninja 是 1.12.1。vcpkg 要求 1.13.1，不够就会自己下载，GitHub releases 现在会 504。
       - name: Put ninja 1.13.1 on PATH
+        continue-on-error: true
         run: |
           $dir = Join-Path $env:RUNNER_TEMP "ninja-1.13.1"
           New-Item -ItemType Directory -Force -Path $dir | Out-Null
@@ -194,61 +148,39 @@ jobs:
           $url = "https://github.com/ninja-build/ninja/releases/download/v1.13.1/ninja-win.zip"
           & curl.exe -fL --retry 8 --retry-all-errors --retry-delay 5 -o $zip $url
           if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $zip)) {
-            Write-Host "ninja 1.13.1 没下下来，继续。vcpkg 会再试一次。"
+            Write-Host "ninja 1.13.1 missing; continuing with runner ninja"
             exit 0
           }
           Expand-Archive -LiteralPath $zip -DestinationPath $dir -Force
-          $ninja = Join-Path $dir "ninja.exe"
-          if (-not (Test-Path -LiteralPath $ninja)) { throw "解压后没有 $ninja" }
-          & $ninja --version
+          & (Join-Path $dir "ninja.exe") --version
           Add-Content -Path $env:GITHUB_PATH -Encoding utf8NoBOM -Value $dir
 
-      - name: Configure, build, test
+      - name: Configure contract and build directed target
+        id: build
+        continue-on-error: true
         run: |
-          Write-Host "VCPKG_ROOT=$env:VCPKG_ROOT"
-          Write-Host "QTDIR=$env:QTDIR"
-          cmake --version
-          cmd /c "cmake --workflow --preset ci > build-msvc.log 2>&1"
-          $buildCode = $LASTEXITCODE
-          Get-Content -LiteralPath build-msvc.log
-          if ($buildCode -ne 0) { exit $buildCode }
-          pwsh -File scripts/check_build_log.ps1 -Log build-msvc.log
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          pwsh -File scripts/verify_occt_link.ps1 -BuildDir build/msvc -Report build/msvc/occt-link-report.txt
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not $env:VCPKG_ROOT) { throw "VCPKG_ROOT unset; bootstrap failed" }
+          New-Item -ItemType Directory -Force -Path artifacts/build | Out-Null
+          $toolchain = Join-Path $env:VCPKG_ROOT "scripts/buildsystems/vcpkg.cmake"
+          $manifest = Join-Path (Get-Location) "vcpkg-configs/occt-7.9.3"
+          cmd /c "cmake -S . -B build/t10-048-diag -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DSTEPLENS_OCCT_CONTRACT=ON -DSTEPLENS_EXPECTED_OCCT=7.9.3 -DCMAKE_TOOLCHAIN_FILE=`"$toolchain`" -DVCPKG_TARGET_TRIPLET=x64-windows -DVCPKG_MANIFEST_DIR=`"$manifest`" -DVCPKG_INSTALLED_DIR=`"$PWD/build/t10-048-diag/vcpkg_installed`" > artifacts/build/cmake-configure.log 2>&1"
+          $cfg = $LASTEXITCODE
+          "cmake_configure_exit=$cfg" | Set-Content artifacts/build/exits.txt
+          if ($cfg -ne 0) { exit $cfg }
+          cmd /c "cmake --build build/t10-048-diag --target steplens_model_tests > artifacts/build/cmake-build.log 2>&1"
+          $bld = $LASTEXITCODE
+          Add-Content artifacts/build/exits.txt "cmake_build_exit=$bld"
+          exit $bld
 
-      # 契约腿是 ASan，不能代表产品分配器。这条是 RelWithDebInfo、无 sanitizer。
-      # --verbose 让通过时的 memory_round 也进日志。--no-tests=error 避免测试没编进去还算过。
-      - name: Memory release on the product allocator
+      - name: Capture SDK and compiler identity
+        if: always()
+        continue-on-error: true
         run: |
-          ctest --preset unit -C RelWithDebInfo -R "^MemoryRelease\.SyntheticOpenCloseStaysNearBaseline$" --output-on-failure --verbose --no-tests=error
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pwsh -File scripts/t10_048_capture_identity.ps1 -BuildDir build/t10-048-diag -OutDir artifacts/identity
 
-      # 400/1200 盒 STEP：加载、网格化、后台 Close、releaseFreedHeap。普通 unit 不设变量所以跳过。
-      # --verbose 让通过时的 step_heap_repro 行留在日志里。测试自己跑 10 轮。
-      - name: Step heap repro on the product allocator
-        env:
-          STEPLENS_STEP_HEAP_REPRO: "1"
-        run: |
-          ctest --preset unit -C RelWithDebInfo -R "^StepHeapRepro\." --output-on-failure --verbose --no-tests=error
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      # 取消中途加载时 pending 必须大于 0。连跑 50 次，门闩没关住就会在这里失败。
-      - name: Repeat CancelMidLoad release gate
-        run: |
-          ctest --preset unit -C RelWithDebInfo -R "^LoadPipeline\.CancelMidLoadReturnsToIdleCube$" --repeat until-fail:50 --output-on-failure --no-tests=error
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Check vcpkg binary cache
-        if: success() && steps.vcpkg-cache.outputs.cache-hit != 'true'
-        run: |
-          $files = @(Get-ChildItem -LiteralPath .vcpkg-binary-cache -Recurse -File -ErrorAction SilentlyContinue)
-          if ($files.Count -eq 0) { throw ".vcpkg-binary-cache 是空的，拒绝写入空缓存" }
-          $bytes = ($files | Measure-Object -Property Length -Sum).Sum
-          Write-Host ("vcpkg binary cache: {0} files, {1:N1} MiB" -f $files.Count, ($bytes / 1MB))
-
-      - name: Save vcpkg binary cache
-        if: success() && steps.vcpkg-cache.outputs.cache-hit != 'true'
+      - name: Save vcpkg binary cache after a successful configure
+        if: always() && steps.build.outcome == 'success' && steps.vcpkg-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
         uses: actions/cache/save@v4
         with:
           path: |
@@ -256,216 +188,45 @@ jobs:
             vcpkg/downloads
           key: ${{ steps.vcpkg-cache.outputs.cache-primary-key }}
 
-      - name: Build bench tools against the installed OCCT
+      - name: Run EnqueueNotify and hang negative tests
+        id: tests
+        continue-on-error: true
         run: |
-          $prefix = Join-Path (Get-Location) "build\msvc\vcpkg_installed\x64-windows"
-          cmd /c "cmake -S bench -B build/bench -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_PREFIX_PATH=`"$prefix`" -DSTEPLENS_EXPECTED_OCCT=7.9.3 > build-bench-config.log 2>&1"
-          $configCode = $LASTEXITCODE
-          Get-Content -LiteralPath build-bench-config.log
-          if ($configCode -ne 0) { exit $configCode }
-          cmd /c "cmake --build build/bench > build-bench.log 2>&1"
-          $buildCode = $LASTEXITCODE
-          Get-Content -LiteralPath build-bench.log
-          if ($buildCode -ne 0) { exit $buildCode }
-          pwsh -File scripts/check_build_log.ps1 -Log build-bench-config.log
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          pwsh -File scripts/check_build_log.ps1 -Log build-bench.log
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          pwsh -File scripts/verify_occt_link.ps1 -BuildDir build/bench
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $env:PATH = "$pwd\build\msvc\vcpkg_installed\x64-windows\bin;$env:PATH"
-          & "$pwd\build\bench\test_compat.exe"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ("${{ steps.build.outcome }}" -ne "success") {
+            "tests_skipped=build_failed" | Set-Content artifacts/tests-skipped.txt
+            exit 2
+          }
+          # Keep original test-internal timeouts. Do not wrap with a shorter ctest timeout.
+          pwsh -File scripts/t10_048_run_directed_tests.ps1 -BuildDir build/t10-048-diag -OutDir artifacts/tests
+          "gtest_exit=$LASTEXITCODE" | Set-Content artifacts/tests-step-exit.txt
+          exit $LASTEXITCODE
 
-      # zip 只在推送到 main 和 v* 标签时产生。PR 不上传 artifact。
-      # 缓存保存发生在这一步之前，跳过打包不会丢掉 vcpkg/Qt 缓存。
-      - name: Package zip
-        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+      - name: Record composite exits
+        if: always()
         run: |
-          cmake --install build/msvc --config RelWithDebInfo --prefix "$pwd\dist-stage"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
-          python scripts/package.py `
-            --prefix "$pwd\dist-stage" `
-            --qt-dir "$env:QTDIR" `
-            --output "$pwd\dist\StepLens-0.1.0-windows-x64.zip"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $exp = "${{ steps.experiment.outcome }}"
+          $boot = "${{ steps.bootstrap.outcome }}"
+          $build = "${{ steps.build.outcome }}"
+          $tests = "${{ steps.tests.outcome }}"
+          @"
+          experiment_outcome=$exp
+          bootstrap_outcome=$boot
+          build_outcome=$build
+          tests_outcome=$tests
+          "@ | Set-Content artifacts/job-outcomes.txt
+          if ($exp -ne "success" -or $boot -ne "success" -or $build -ne "success" -or $tests -ne "success") {
+            exit 1
+          }
 
-      - name: Upload zip
-        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+      - name: Upload evidence
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: StepLens-windows-x64
-          path: dist/StepLens-0.1.0-windows-x64.zip
-          retention-days: 7
-
-      # 冒烟读的是 build 目录里的 StepLens.exe，不依赖上面的 zip。PR 上打包被跳过时这里仍然跑。
-      - name: Smoke the empty window offscreen
-        run: |
-          # G1-5：离屏平台没有可判定的 GPU 帧缓冲。这里只确认进程还活着。
-          # 100%/150% DPI、resize、逐帧不是单色，见 docs/bench/t09-gpu-smoke-checklist.md。
-          # 缺帧缓冲内容不得让本作业变红。程序在 offscreen 下不创建 ViewerWidget。
-          $env:QT_QPA_PLATFORM = "offscreen"
-          $env:QT_PLUGIN_PATH = Join-Path $env:QTDIR "plugins"
-          $vcpkgBin = Join-Path (Get-Location) "build\msvc\vcpkg_installed\x64-windows\bin"
-          $env:PATH = "$vcpkgBin;$(Join-Path $env:QTDIR 'bin');$env:PATH"
-          $exe = Join-Path (Get-Location) "build\msvc\RelWithDebInfo\StepLens.exe"
-          if (-not (Test-Path -LiteralPath $exe)) { throw "未找到 $exe" }
-          $proc = Start-Process -FilePath $exe -PassThru -WindowStyle Hidden
-          Start-Sleep -Seconds 5
-          if ($proc.HasExited) {
-            throw "空窗口进程提前退出，退出码 $($proc.ExitCode)。这一步用的是 QT_QPA_PLATFORM=offscreen，不是交互式桌面。"
-          }
-          Stop-Process -Id $proc.Id -Force
-          Write-Host "空窗口在 offscreen 平台下保持运行"
-          # 模型已经显示后再关窗口。每个进程使用合成 box.step，最多运行 60 秒。
-          # 生命周期日志由测试创建唯一 SHA/nonce 文件；HeldClose 由 Close gate 因果控制。
-          $env:STEPLENS_APP_EXIT = "1"
-          $lifeDir = Join-Path (Split-Path -Parent $exe) "logs"
-          New-Item -ItemType Directory -Force -Path $lifeDir | Out-Null
-          # AppExit 带 label app_exit，已被 unit 预设排除。这里必须用 --test-dir 发现测试。
-          # SKIPPED 不能算成功。offscreen 只覆盖 NullSceneHost 分支。
-          $ctestLog = Join-Path $env:RUNNER_TEMP "app-exit-offscreen.log"
-          $regex = "^AppExit\.(CloseEventWhileBusyQuickExits|CloseAfterDisplayedModelExitsCleanly|NormalReturnAfterCloseCompletes)$"
-          ctest --test-dir build/msvc -C RelWithDebInfo --no-tests=error --output-on-failure --output-log $ctestLog -R $regex
-          if ($LASTEXITCODE -ne 0) { throw "产品退出三路径（offscreen）失败，退出码 $LASTEXITCODE" }
-          $ctestText = Get-Content -LiteralPath $ctestLog -Raw
-          if ($ctestText -match '\[  SKIPPED \]|No tests were found|Not Run') {
-            throw "offscreen AppExit 被跳过或未发现，不能算成功"
-          }
-          # 产品身份是编译期 STEPLENS_GIT_SHA（cmake 写入的构建身份），不是环境注入，也不写死 63e/7f4。
-          # 必须实际比较：cmake 身份 == 当前 checkout；合成 merge 的树 == 第二父（受审 HEAD）树。
-          $sha = (git rev-parse HEAD).Trim()
-          $tree = (git rev-parse "HEAD^{tree}").Trim()
-          $parents = @(& git rev-parse "HEAD^@" 2>$null)
-          $idFile = Join-Path (Get-Location) "build\msvc\steplens-build-identity.txt"
-          if (-not (Test-Path -LiteralPath $idFile)) { throw "缺少构建身份文件 $idFile" }
-          $idText = Get-Content -LiteralPath $idFile -Raw
-          if ($idText -notmatch "(?m)^sha=([0-9a-f]{40})$") { throw "构建身份缺 sha: $idText" }
-          $cmakeSha = $Matches[1]
-          if ($idText -notmatch "(?m)^tree=([0-9a-f]{40})$") { throw "构建身份缺 tree: $idText" }
-          $cmakeTree = $Matches[1]
-          Write-Host "ci_identity checkout_head=$sha checkout_tree=$tree cmake_sha=$cmakeSha cmake_tree=$cmakeTree parent_count=$($parents.Count) parents=$($parents -join ' ') github_sha=$env:GITHUB_SHA"
-          if ($cmakeSha -ne $sha) { throw "CMake 编译 SHA $cmakeSha 与当前 checkout $sha 不一致（过期重配/未重配）" }
-          if ($cmakeTree -ne $tree) { throw "CMake 编译 tree $cmakeTree 与当前 checkout tree $tree 不一致" }
-          if ($parents.Count -ge 2) {
-            $second = (git rev-parse "HEAD^2").Trim()
-            $secondTree = (git rev-parse "HEAD^2^{tree}").Trim()
-            Write-Host "ci_identity synthetic_merge=1 second_parent=$second second_parent_tree=$secondTree trees_equal=$($tree -eq $secondTree)"
-            if ($tree -ne $secondTree) { throw "合成 merge 树 $tree 与第二父（受审 HEAD）树 $secondTree 不同，不能把本次身份写成受审提交" }
-          }
-          $lifeFiles = @(Get-ChildItem -LiteralPath $lifeDir -Filter "lifecycle-$sha-*.log" -File)
-          if ($lifeFiles.Count -lt 3) { throw "本轮 offscreen 生命周期日志不足 3 份（SHA $sha）" }
-          foreach ($lifeFile in $lifeFiles) {
-            Write-Host "---- $($lifeFile.FullName) ----"
-            $text = Get-Content -LiteralPath $lifeFile.FullName -Raw
-            Write-Host $text
-            Write-Host "---- end ----"
-            if ($text -notmatch "event=lifecycle-open identity=$sha ") { throw "$($lifeFile.Name) 缺少本次 SHA" }
-          }
-          $busy = ($lifeFiles | Where-Object Name -Match "offscreen-close-while-busy").Count
-          $held = ($lifeFiles | Where-Object Name -Match "offscreen-quit-when-ready").Count
-          $normal = ($lifeFiles | Where-Object Name -Match "offscreen-normal-return").Count
-          if ($busy -lt 1 -or $held -lt 1 -or $normal -lt 1) { throw "本轮 offscreen 三条路径日志未齐" }
-          $heldText = Get-Content -LiteralPath ($lifeFiles | Where-Object Name -Match "offscreen-quit-when-ready" | Select-Object -First 1).FullName -Raw
-          if ($heldText -notmatch "event=main-after-window identity=pending=([1-9]\d*) " -or $heldText -notmatch "event=main-quick-exit-pending") { throw "HeldClose 缺少 pending>0 因果回执" }
-          $normalText = Get-Content -LiteralPath ($lifeFiles | Where-Object Name -Match "offscreen-normal-return" | Select-Object -First 1).FullName -Raw
-          if ($normalText -notmatch "event=main-normal-return" -or $normalText -notmatch "event=retirer-end") { throw "正常 return 缺少 retirer-end" }
-
-
-      - name: Smoke product shutdown with viewer and tree
-        run: |
-          # 非 offscreen 隐藏窗口：三条真实 Viewer/tree 路径，不是像素拾取或帧对比。
-          # 每个进程用合成 box.step、硬超时 60 秒和本轮唯一 SHA/nonce 生命周期日志。
-          # 不用 --preset unit，否则 app_exit 标签会被排除。
-          $env:QT_PLUGIN_PATH = Join-Path $env:QTDIR "plugins"
-          $vcpkgBin = Join-Path (Get-Location) "build\msvc\vcpkg_installed\x64-windows\bin"
-          $env:PATH = "$vcpkgBin;$(Join-Path $env:QTDIR 'bin');$env:PATH"
-          if (Test-Path Env:QT_QPA_PLATFORM) { Remove-Item Env:QT_QPA_PLATFORM }
-          $exe = Join-Path (Get-Location) "build\msvc\RelWithDebInfo\StepLens.exe"
-          if (-not (Test-Path -LiteralPath $exe)) { throw "未找到 $exe" }
-          $lifeDir = Join-Path (Split-Path -Parent $exe) "logs"
-          New-Item -ItemType Directory -Force -Path $lifeDir | Out-Null
-          $env:STEPLENS_APP_EXIT_VIEWER = "1"
-          $ctestLog = Join-Path $env:RUNNER_TEMP "app-exit-viewer.log"
-          $regex = "^AppExit\.(ViewerTreeCloseEventWhileBusy|ViewerTreeQuitWhenReadyHeldClose|ViewerTreeNormalReturn)$"
-          ctest --test-dir build/msvc -C RelWithDebInfo --no-tests=error --output-on-failure --output-log $ctestLog -R $regex
-          if ($LASTEXITCODE -ne 0) { throw "产品 Viewer/tree 退出三路径失败，退出码 $LASTEXITCODE" }
-          $ctestText = Get-Content -LiteralPath $ctestLog -Raw
-          if ($ctestText -match '\[  SKIPPED \]|No tests were found|Not Run') {
-            throw "Viewer AppExit 被跳过或未发现，不能算成功"
-          }
-          # 产品身份是编译期 STEPLENS_GIT_SHA（cmake 写入的构建身份），不是环境注入，也不写死 63e/7f4。
-          # 必须实际比较：cmake 身份 == 当前 checkout；合成 merge 的树 == 第二父（受审 HEAD）树。
-          $sha = (git rev-parse HEAD).Trim()
-          $tree = (git rev-parse "HEAD^{tree}").Trim()
-          $parents = @(& git rev-parse "HEAD^@" 2>$null)
-          $idFile = Join-Path (Get-Location) "build\msvc\steplens-build-identity.txt"
-          if (-not (Test-Path -LiteralPath $idFile)) { throw "缺少构建身份文件 $idFile" }
-          $idText = Get-Content -LiteralPath $idFile -Raw
-          if ($idText -notmatch "(?m)^sha=([0-9a-f]{40})$") { throw "构建身份缺 sha: $idText" }
-          $cmakeSha = $Matches[1]
-          if ($idText -notmatch "(?m)^tree=([0-9a-f]{40})$") { throw "构建身份缺 tree: $idText" }
-          $cmakeTree = $Matches[1]
-          Write-Host "ci_identity checkout_head=$sha checkout_tree=$tree cmake_sha=$cmakeSha cmake_tree=$cmakeTree parent_count=$($parents.Count) parents=$($parents -join ' ') github_sha=$env:GITHUB_SHA"
-          if ($cmakeSha -ne $sha) { throw "CMake 编译 SHA $cmakeSha 与当前 checkout $sha 不一致（过期重配/未重配）" }
-          if ($cmakeTree -ne $tree) { throw "CMake 编译 tree $cmakeTree 与当前 checkout tree $tree 不一致" }
-          if ($parents.Count -ge 2) {
-            $second = (git rev-parse "HEAD^2").Trim()
-            $secondTree = (git rev-parse "HEAD^2^{tree}").Trim()
-            Write-Host "ci_identity synthetic_merge=1 second_parent=$second second_parent_tree=$secondTree trees_equal=$($tree -eq $secondTree)"
-            if ($tree -ne $secondTree) { throw "合成 merge 树 $tree 与第二父（受审 HEAD）树 $secondTree 不同，不能把本次身份写成受审提交" }
-          }
-          $lifeFiles = @(Get-ChildItem -LiteralPath $lifeDir -Filter "lifecycle-$sha-*.log" -File)
-          if ($lifeFiles.Count -lt 3) { throw "本轮 Viewer/tree 生命周期日志不足 3 份（SHA $sha）" }
-          foreach ($lifeFile in $lifeFiles) {
-            Write-Host "---- $($lifeFile.FullName) ----"
-            $text = Get-Content -LiteralPath $lifeFile.FullName -Raw
-            Write-Host $text
-            Write-Host "---- end ----"
-            if ($text -notmatch "event=lifecycle-open identity=$sha ") { throw "$($lifeFile.Name) 缺少本次 SHA" }
-          }
-          $busyFile = $lifeFiles | Where-Object Name -Match "viewer-close-while-busy" | Select-Object -First 1
-          $heldFile = $lifeFiles | Where-Object Name -Match "viewer-held-close" | Select-Object -First 1
-          $normalFile = $lifeFiles | Where-Object Name -Match "viewer-normal" | Select-Object -First 1
-          if (-not $busyFile -or -not $heldFile -or -not $normalFile) { throw "本轮 Viewer/tree 三条路径日志未齐" }
-          $heldText = Get-Content -LiteralPath $heldFile.FullName -Raw
-          if ($heldText -notmatch "event=main-after-window identity=pending=([1-9]\d*) ") { throw "$($heldFile.Name) 缺少 pending>0" }
-          foreach ($required in @("event=mainwindow-destructor-begin", "event=mainwindow-destructor-end", "event=mainwindow-members-begin", "event=mainwindow-members-end", "event=qobject-child-destroyed identity=viewerWidget", "event=qobject-child-destroyed identity=assemblyTreePanel", "event=main-quick-exit-pending")) {
-            if ($heldText -notmatch [regex]::Escape($required)) { throw "$($heldFile.Name) 缺少 $required" }
-          }
-          $busyText = Get-Content -LiteralPath $busyFile.FullName -Raw
-          if ($busyText -notmatch "event=viewer-created" -or $busyText -notmatch "event=mainwindow-closeEvent-busy") { throw "Viewer busy-close 缺少事件" }
-          $normalText = Get-Content -LiteralPath $normalFile.FullName -Raw
-          if ($normalText -notmatch "event=main-normal-return" -or $normalText -notmatch "event=retirer-end") { throw "Viewer 正常 return 缺少 retirer-end" }
-
-
-      - name: clang-tidy changed C++ files
-        run: |
-          $clangTidy = "C:\Program Files\LLVM\bin\clang-tidy.exe"
-          if (-not (Test-Path -LiteralPath $clangTidy)) { throw "未找到 $clangTidy" }
-          if ($env:GITHUB_EVENT_NAME -eq "pull_request") {
-            $base = git merge-base HEAD "origin/$env:GITHUB_BASE_REF"
-          } else {
-            $base = "HEAD~1"
-          }
-          $files = @(git diff --name-only --diff-filter=ACMR $base HEAD)
-          # bench/ 是独立摸底工具，编译数据库在 build/bench，不在主工程这份里。
-          $cpp = @($files | Where-Object { $_ -match '\.cpp$' -and $_ -notmatch '^bench/' })
-          if ($cpp.Count -eq 0) {
-            Write-Host "没有改动的 .cpp，跳过 clang-tidy"
-            exit 0
-          }
-          # clang-cl 不认识 /MP 和 /external:anglebrackets，clang-tidy 会把这两条未使用参数当成错误。
-          # /w 只关掉编译器警告。/WX 仍留给 cl.exe。clang-tidy 自己的检查还在。
-          python scripts/select_compile_commands.py `
-            --input build/msvc/compile_commands.json `
-            --output-dir build/msvc-tidy `
-            --config RelWithDebInfo
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $clangTidy -p build/msvc-tidy `
-            --extra-arg-before=--driver-mode=cl `
-            --extra-arg=-Wno-unused-command-line-argument `
-            --extra-arg=/w `
-            @cpp
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          name: t10-048-enqueue-diag
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            artifacts/
+            diag-identity.txt
+            build/t10-048-diag/CMakeCache.txt
+            build/t10-048-diag/**/*.rsp
