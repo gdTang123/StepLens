@@ -14,8 +14,10 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <exception>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -88,6 +90,127 @@ unsigned releaseDelayMs() noexcept {
     return static_cast<unsigned>(parsed > 5000 ? 5000 : parsed);
 }
 
+// Diagnostic ring for Windows static-dtor join diagnosis (1111-048).
+// Records are POD + atomics only: never allocate, never take Retirer::m_mutex,
+// and never call lifecycleTrace (which takes LifecycleTrace::mutex and may WriteFile).
+// Flush is allowed only when Retirer::m_mutex is not held. H1/H2 are not exhaustive;
+// flush before join so wait-enter is on disk even if join never returns.
+enum class WorkerDiagEvent : unsigned char {
+    WaitEnter,
+    WaitLeave,
+    FinishEnter,
+    FinishLeave,
+    CloseEnter,
+    CloseLeave,
+    RunExit,
+    JoinBegin
+};
+
+const char* workerDiagName(WorkerDiagEvent ev) noexcept {
+    switch (ev) {
+    case WorkerDiagEvent::WaitEnter:
+        return "worker-wait-enter";
+    case WorkerDiagEvent::WaitLeave:
+        return "worker-wait-leave";
+    case WorkerDiagEvent::FinishEnter:
+        return "worker-finish-enter";
+    case WorkerDiagEvent::FinishLeave:
+        return "worker-finish-leave";
+    case WorkerDiagEvent::CloseEnter:
+        return "worker-close-enter";
+    case WorkerDiagEvent::CloseLeave:
+        return "worker-close-leave";
+    case WorkerDiagEvent::RunExit:
+        return "worker-run-exit";
+    case WorkerDiagEvent::JoinBegin:
+        return "retirer-join-begin";
+    }
+    return "worker-diag-unknown";
+}
+
+struct WorkerDiagSlot {
+    std::atomic<std::uint64_t> published{0};
+    std::uint64_t tid{};
+    WorkerDiagEvent ev{};
+    int head{};
+    int stopping{};
+    int live{};
+    int pending{};
+    int inflight{};
+    std::uintptr_t ptr{};
+};
+
+constexpr std::size_t kWorkerDiagCap = 128;
+WorkerDiagSlot g_workerDiag[kWorkerDiagCap];
+std::atomic<std::uint64_t> g_workerDiagNext{0};
+std::atomic<std::uint64_t> g_workerDiagFlushed{0};
+
+std::uint64_t workerDiagThreadId() noexcept {
+#if defined(_WIN32)
+    return static_cast<std::uint64_t>(GetCurrentThreadId());
+#else
+    return static_cast<std::uint64_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
+#endif
+}
+
+void workerDiagRecord(WorkerDiagEvent ev, int head, int stopping, int live, int pending, int inflight,
+                      std::uintptr_t ptr = 0) noexcept {
+    const auto seq = g_workerDiagNext.fetch_add(1, std::memory_order_relaxed);
+    auto& slot = g_workerDiag[seq % kWorkerDiagCap];
+    slot.published.store(0, std::memory_order_relaxed);
+    slot.tid = workerDiagThreadId();
+    slot.ev = ev;
+    slot.head = head;
+    slot.stopping = stopping;
+    slot.live = live;
+    slot.pending = pending;
+    slot.inflight = inflight;
+    slot.ptr = ptr;
+    slot.published.store(seq + 1, std::memory_order_release);
+}
+
+void workerDiagFlush() noexcept {
+    // Only advance flushed over a contiguous published prefix so a mid-write slot
+    // cannot be skipped and lost. Bounded wait covers a record() still in flight
+    // at flush-before-join; this path never holds Retirer::m_mutex.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(50);
+    for (;;) {
+        auto start = g_workerDiagFlushed.load(std::memory_order_acquire);
+        const auto n = g_workerDiagNext.load(std::memory_order_acquire);
+        auto ready = start;
+        while (ready < n) {
+            if (g_workerDiag[ready % kWorkerDiagCap].published.load(std::memory_order_acquire) != ready + 1) {
+                break;
+            }
+            ++ready;
+        }
+        if (ready > start) {
+            if (!g_workerDiagFlushed.compare_exchange_weak(start, ready, std::memory_order_acq_rel,
+                                                           std::memory_order_acquire)) {
+                continue;
+            }
+            for (auto i = start; i < ready; ++i) {
+                auto& slot = g_workerDiag[i % kWorkerDiagCap];
+                char detail[192];
+                std::snprintf(detail, sizeof(detail),
+                              "seq=%llu tid=%llu head=%d stopping=%d live=%d pending=%d inflight=%d ptr=%llx",
+                              static_cast<unsigned long long>(i), static_cast<unsigned long long>(slot.tid),
+                              slot.head, slot.stopping, slot.live, slot.pending, slot.inflight,
+                              static_cast<unsigned long long>(slot.ptr));
+                lifecycleTrace(workerDiagName(slot.ev), detail);
+            }
+            continue;
+        }
+        if (start >= n) {
+            return;
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            return;
+        }
+        std::this_thread::yield();
+    }
+}
+
 } // namespace
 
 class Retirer {
@@ -104,9 +227,15 @@ public:
             m_stopping = true;
         }
         m_condition.notify_all();
+        workerDiagRecord(WorkerDiagEvent::JoinBegin, 0, 1, m_live.load(std::memory_order_acquire), count(),
+                         m_inFlight.load(std::memory_order_acquire));
+        // Flush before join: if join never returns (H1/H2 or other), wait-enter and
+        // join-begin must already be on the lifecycle log.
+        workerDiagFlush();
         if (m_thread.joinable()) {
             m_thread.join();
         }
+        workerDiagFlush();
         lifecycleTrace("retirer-join-end");
         if (auto hook = g_afterJoinHook.load(std::memory_order_acquire)) {
             hook();
@@ -270,7 +399,13 @@ private:
             } catch (...) {
             }
         }
+        workerDiagRecord(WorkerDiagEvent::CloseEnter, 0, 0, m_live.load(std::memory_order_acquire), count(),
+                         m_inFlight.load(std::memory_order_acquire), reinterpret_cast<std::uintptr_t>(model));
+        workerDiagFlush();
         delete model;
+        workerDiagRecord(WorkerDiagEvent::CloseLeave, 0, 0, m_live.load(std::memory_order_acquire), count(),
+                         m_inFlight.load(std::memory_order_acquire), reinterpret_cast<std::uintptr_t>(model));
+        workerDiagFlush();
         {
             Lock lock(m_mutex);
             m_pending.fetch_sub(1, std::memory_order_acq_rel);
@@ -285,22 +420,37 @@ private:
             DocumentModel* batch = nullptr;
             {
                 std::unique_lock lock(m_mutex);
+                workerDiagRecord(WorkerDiagEvent::WaitEnter, m_head != nullptr ? 1 : 0, m_stopping ? 1 : 0,
+                                 m_live.load(std::memory_order_acquire), count(),
+                                 m_inFlight.load(std::memory_order_acquire));
                 m_condition.wait(lock, [this] {
                     return m_head != nullptr || (m_stopping && m_live.load(std::memory_order_acquire) == 0);
                 });
+                workerDiagRecord(WorkerDiagEvent::WaitLeave, m_head != nullptr ? 1 : 0, m_stopping ? 1 : 0,
+                                 m_live.load(std::memory_order_acquire), count(),
+                                 m_inFlight.load(std::memory_order_acquire));
                 if (!m_head && m_stopping && m_live.load(std::memory_order_acquire) == 0) {
+                    workerDiagRecord(WorkerDiagEvent::RunExit, 0, 1, m_live.load(std::memory_order_acquire),
+                                     count(), m_inFlight.load(std::memory_order_acquire));
                     return;
                 }
                 batch = m_head;
                 m_head = nullptr;
                 m_tail = nullptr;
             }
+            workerDiagRecord(WorkerDiagEvent::FinishEnter, 0, 0, m_live.load(std::memory_order_acquire),
+                             count(), m_inFlight.load(std::memory_order_acquire),
+                             reinterpret_cast<std::uintptr_t>(batch));
+            workerDiagFlush();
             while (batch) {
                 DocumentModel* next = batch->m_releaseNext;
                 batch->m_releaseNext = nullptr;
                 finish(batch);
                 batch = next;
             }
+            workerDiagRecord(WorkerDiagEvent::FinishLeave, 0, 0, m_live.load(std::memory_order_acquire),
+                             count(), m_inFlight.load(std::memory_order_acquire));
+            workerDiagFlush();
         }
     }
 

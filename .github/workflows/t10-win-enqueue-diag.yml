@@ -1,0 +1,219 @@
+# 1111-048 isolated Windows diagnosis. Manual only. Do not add push or pull_request.
+# This file is not on default; GitHub will not list/dispatch it until a same-path
+# workflow_dispatch stub exists on default (repo-external stub, pending 沈批准).
+# Do not open a PR: existing ci.yml and occt-contract.yml would still run on pull_request.
+# Pushing this branch alone does not trigger ci.yml / occt-contract.yml (push is main/tags only)
+# or release.yml (tags only). One run, no retry. Not a Windows pass by itself.
+name: t10-win-enqueue-diag
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Type RUN only after 沈批准. One shot, no retry."
+        required: true
+        type: string
+      checkout_sha:
+        description: "Exact approved candidate SHA (do not use a moving branch tip)."
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: t10-win-enqueue-diag-oneshot
+  cancel-in-progress: false
+
+jobs:
+  diagnose:
+    name: experiment-then-enqueue-notify
+    if: github.event.inputs.confirm == 'RUN'
+    runs-on: windows-2022
+    timeout-minutes: 240
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: utf-8
+      T10_048_PARENT: ed82ec63327591c704e29093393112e9d1476368
+      T10_048_PARENT_TREE: 99391948412f80bead2003b335e3a05b34c8d863
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout locked SHA
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.checkout_sha }}
+          fetch-depth: 0
+
+      - name: Verify locked parent and SHA
+        run: |
+          $want = "${{ github.event.inputs.checkout_sha }}"
+          $head = (git rev-parse HEAD).Trim()
+          $parent = (git rev-parse "HEAD^").Trim()
+          $parentTree = (git rev-parse 'HEAD^^{tree}').Trim()
+          $dirty = (git status --porcelain)
+          "HEAD=$head" | Tee-Object -FilePath "$env:GITHUB_WORKSPACE/diag-identity.txt"
+          Add-Content diag-identity.txt "wanted=$want"
+          Add-Content diag-identity.txt "parent=$parent"
+          Add-Content diag-identity.txt "parent_tree=$parentTree"
+          Add-Content diag-identity.txt "tree=$((git rev-parse 'HEAD^{tree}').Trim())"
+          if ($head -ne $want) { throw "HEAD $head != requested $want" }
+          if ($parent -ne $env:T10_048_PARENT) { throw "parent $parent != locked $env:T10_048_PARENT" }
+          if ($parentTree -ne $env:T10_048_PARENT_TREE) { throw "parent tree mismatch" }
+          if ($dirty) { throw "worktree dirty: $dirty" }
+
+      - name: MSVC x64 environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Early compiler identity
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts/identity-early | Out-Null
+          cmd /c "cl /Bv" > artifacts/identity-early/cl-Bv.txt 2>&1
+          cmake --version > artifacts/identity-early/cmake-version.txt
+          where.exe cl,ninja,link,cmake > artifacts/identity-early/where.txt 2>&1
+
+      - name: No-OCCT static-dtor-join-gate experiment
+        continue-on-error: true
+        id: experiment
+        run: |
+          # 30s watchdog only for this standalone experiment (Linux finished in <1s).
+          # Not applied to the product tests, which keep their own 10s/15s/2s internals.
+          pwsh -File scripts/t10_048_run_experiment.ps1 -OutDir artifacts/experiment -TimeoutMs 30000
+          $code = $LASTEXITCODE
+          "experiment_exit=$code" | Set-Content artifacts/experiment-step-exit.txt
+          exit $code
+
+      - name: Checkout vcpkg 2026.10.16
+        uses: actions/checkout@v4
+        with:
+          repository: microsoft/vcpkg
+          ref: 9eec002df1cd109f8f104cd966a763daf9751489
+          path: vcpkg
+          fetch-depth: 1
+
+      - name: Restore vcpkg binaries
+        id: vcpkg-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            .vcpkg-binary-cache
+            vcpkg/downloads
+          key: vcpkg-occt793-${{ runner.os }}-x64-windows-${{ hashFiles('vcpkg-configs/occt-7.9.3/vcpkg.json', 'vcpkg-configs/occt-7.9.3/vcpkg-configuration.json') }}
+          restore-keys: |
+            vcpkg-occt793-${{ runner.os }}-x64-windows-
+
+      - name: Bootstrap vcpkg
+        id: bootstrap
+        continue-on-error: true
+        run: |
+          $bootstrapped = $false
+          foreach ($attempt in 1..4) {
+            & .\vcpkg\bootstrap-vcpkg.bat -disableMetrics
+            if ($LASTEXITCODE -eq 0) { $bootstrapped = $true; break }
+            Write-Host "bootstrap-vcpkg failed with exit $LASTEXITCODE (attempt $attempt)"
+            if ($attempt -lt 4) { Start-Sleep -Seconds (15 * $attempt) }
+          }
+          if (-not $bootstrapped) { throw "bootstrap-vcpkg failed" }
+          New-Item -ItemType Directory -Force -Path .vcpkg-binary-cache | Out-Null
+          $cache = (Join-Path (Get-Location) ".vcpkg-binary-cache") -replace '\\', '/'
+          $root = Join-Path (Get-Location) "vcpkg"
+          Add-Content -Path $env:GITHUB_ENV -Encoding utf8NoBOM -Value "VCPKG_ROOT=$root"
+          Add-Content -Path $env:GITHUB_ENV -Encoding utf8NoBOM -Value "VCPKG_DISABLE_METRICS=1"
+          Add-Content -Path $env:GITHUB_ENV -Encoding utf8NoBOM -Value "VCPKG_BINARY_SOURCES=clear;files,$cache,readwrite"
+          Add-Content -Path $env:GITHUB_ENV -Encoding utf8NoBOM -Value "VCPKG_FORCE_SYSTEM_BINARIES=1"
+
+      - name: Put ninja 1.13.1 on PATH
+        continue-on-error: true
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP "ninja-1.13.1"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $zip = Join-Path $env:RUNNER_TEMP "ninja-win-1.13.1.zip"
+          $url = "https://github.com/ninja-build/ninja/releases/download/v1.13.1/ninja-win.zip"
+          & curl.exe -fL --retry 8 --retry-all-errors --retry-delay 5 -o $zip $url
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $zip)) {
+            Write-Host "ninja 1.13.1 missing; continuing with runner ninja"
+            exit 0
+          }
+          Expand-Archive -LiteralPath $zip -DestinationPath $dir -Force
+          & (Join-Path $dir "ninja.exe") --version
+          Add-Content -Path $env:GITHUB_PATH -Encoding utf8NoBOM -Value $dir
+
+      - name: Configure contract and build directed target
+        id: build
+        continue-on-error: true
+        run: |
+          if (-not $env:VCPKG_ROOT) { throw "VCPKG_ROOT unset; bootstrap failed" }
+          New-Item -ItemType Directory -Force -Path artifacts/build | Out-Null
+          $toolchain = Join-Path $env:VCPKG_ROOT "scripts/buildsystems/vcpkg.cmake"
+          $manifest = Join-Path (Get-Location) "vcpkg-configs/occt-7.9.3"
+          cmd /c "cmake -S . -B build/t10-048-diag -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DSTEPLENS_OCCT_CONTRACT=ON -DSTEPLENS_EXPECTED_OCCT=7.9.3 -DCMAKE_TOOLCHAIN_FILE=`"$toolchain`" -DVCPKG_TARGET_TRIPLET=x64-windows -DVCPKG_MANIFEST_DIR=`"$manifest`" -DVCPKG_INSTALLED_DIR=`"$PWD/build/t10-048-diag/vcpkg_installed`" > artifacts/build/cmake-configure.log 2>&1"
+          $cfg = $LASTEXITCODE
+          "cmake_configure_exit=$cfg" | Set-Content artifacts/build/exits.txt
+          if ($cfg -ne 0) { exit $cfg }
+          cmd /c "cmake --build build/t10-048-diag --target steplens_model_tests > artifacts/build/cmake-build.log 2>&1"
+          $bld = $LASTEXITCODE
+          Add-Content artifacts/build/exits.txt "cmake_build_exit=$bld"
+          exit $bld
+
+      - name: Capture SDK and compiler identity
+        if: always()
+        continue-on-error: true
+        run: |
+          pwsh -File scripts/t10_048_capture_identity.ps1 -BuildDir build/t10-048-diag -OutDir artifacts/identity
+
+      - name: Save vcpkg binary cache after a successful configure
+        if: always() && steps.build.outcome == 'success' && steps.vcpkg-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            .vcpkg-binary-cache
+            vcpkg/downloads
+          key: ${{ steps.vcpkg-cache.outputs.cache-primary-key }}
+
+      - name: Run EnqueueNotify and hang negative tests
+        id: tests
+        continue-on-error: true
+        run: |
+          if ("${{ steps.build.outcome }}" -ne "success") {
+            "tests_skipped=build_failed" | Set-Content artifacts/tests-skipped.txt
+            exit 2
+          }
+          # Keep original test-internal timeouts. Do not wrap with a shorter ctest timeout.
+          pwsh -File scripts/t10_048_run_directed_tests.ps1 -BuildDir build/t10-048-diag -OutDir artifacts/tests
+          "gtest_exit=$LASTEXITCODE" | Set-Content artifacts/tests-step-exit.txt
+          exit $LASTEXITCODE
+
+      - name: Record composite exits
+        if: always()
+        run: |
+          $exp = "${{ steps.experiment.outcome }}"
+          $boot = "${{ steps.bootstrap.outcome }}"
+          $build = "${{ steps.build.outcome }}"
+          $tests = "${{ steps.tests.outcome }}"
+          @"
+          experiment_outcome=$exp
+          bootstrap_outcome=$boot
+          build_outcome=$build
+          tests_outcome=$tests
+          "@ | Set-Content artifacts/job-outcomes.txt
+          if ($exp -ne "success" -or $boot -ne "success" -or $build -ne "success" -or $tests -ne "success") {
+            exit 1
+          }
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: t10-048-enqueue-diag
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            artifacts/
+            diag-identity.txt
+            build/t10-048-diag/CMakeCache.txt
+            build/t10-048-diag/**/*.rsp
