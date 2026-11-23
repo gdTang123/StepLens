@@ -21,9 +21,9 @@
 #include "scene/SelectionMap.h"
 
 #include <AIS_InteractiveContext.hxx>
+#include <TopoDS_Shape.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Trsf.hxx>
-#include <TopoDS_Shape.hxx>
 
 #include <chrono>
 #include <cstdint>

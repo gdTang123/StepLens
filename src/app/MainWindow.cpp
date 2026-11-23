@@ -1,5 +1,6 @@
 #include "app/MainWindow.h"
 
+#include "app/FileAssociation.h"
 #include "app/settings/Settings.h"
 #include "core/LifecycleTrace.h"
 #include "core/Log.h"
@@ -10,35 +11,34 @@
 #include "pipeline/LoadPipeline.h"
 #include "pipeline/SceneHost.h"
 #include "ui/AssemblyTreePanel.h"
-#include "ui/PropertyPanel.h"
-#include "app/FileAssociation.h"
 #include "ui/LoadingOverlay.h"
+#include "ui/PropertyPanel.h"
 #include "viewer/ViewerWidget.h"
 
 #include <QAction>
 #include <QActionGroup>
-#include <QMenu>
 #include <QApplication>
-#include <QCloseEvent>
 #include <QCheckBox>
+#include <QCloseEvent>
 #include <QComboBox>
 #include <QDateTime>
 #include <QDialog>
 #include <QDialogButtonBox>
-#include <QFormLayout>
-#include <QSignalBlocker>
 #include <QDir>
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QEvent>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QFormLayout>
 #include <QKeySequence>
 #include <QLabel>
+#include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QMimeData>
 #include <QShortcut>
+#include <QSignalBlocker>
 #include <QStatusBar>
 #include <QTimer>
 #include <QToolBar>
@@ -283,9 +283,8 @@ void MainWindow::buildShell() {
     connect(m_viewer, &ViewerWidget::nodeSelected, m_treePanel, &ui::AssemblyTreePanel::selectNode);
     connect(m_viewer, &ViewerWidget::nodeSelected, this, &MainWindow::showSelectedNode);
     connect(m_treePanel, &ui::AssemblyTreePanel::nodeActivated, this, &MainWindow::showSelectedNode);
-    connect(m_treePanel, &ui::AssemblyTreePanel::nodeContextMenu, this, [this](model::NodeId id, const QPoint& pos) {
-        showPartMenu(true, id, pos);
-    });
+    connect(m_treePanel, &ui::AssemblyTreePanel::nodeContextMenu, this,
+            [this](model::NodeId id, const QPoint& pos) { showPartMenu(true, id, pos); });
     connect(m_viewer, &ViewerWidget::partContextMenu, this, &MainWindow::showPartMenu);
 
     m_propertyPanel = new ui::PropertyPanel(this);
@@ -453,17 +452,18 @@ void MainWindow::buildMenus() {
 
     auto* helpMenu = menuBar()->addMenu(tr("帮助"));
     helpMenu->addAction(tr("快捷键说明"), this, [this] {
-        QMessageBox::information(this, tr("快捷键"),
-                                 tr("打开：Ctrl+O\n"
-                                    "适应窗口：F\n"
-                                    "距离：测量 - 距离，依次选择顶点、边或面\n"
-                                    "角度：测量 - 角度，依次选择直线边或平面；状态栏显示无向较小角，0–90°，两位小数\n"
-                                    "取消选择：Esc（没有在选距离或角度时，Esc 取消加载）\n"
-                                    "清除测量：测量 - 清除测量\n"
-                                    "旋转：按住左键拖动\n"
-                                    "平移：按住中键拖动\n"
-                                    "缩放：滚轮，以光标为中心\n"
-                                    "退出：Alt+F4 或文件 - 退出"));
+        QMessageBox::information(
+            this, tr("快捷键"),
+            tr("打开：Ctrl+O\n"
+               "适应窗口：F\n"
+               "距离：测量 - 距离，依次选择顶点、边或面\n"
+               "角度：测量 - 角度，依次选择直线边或平面；状态栏显示无向较小角，0–90°，两位小数\n"
+               "取消选择：Esc（没有在选距离或角度时，Esc 取消加载）\n"
+               "清除测量：测量 - 清除测量\n"
+               "旋转：按住左键拖动\n"
+               "平移：按住中键拖动\n"
+               "缩放：滚轮，以光标为中心\n"
+               "退出：Alt+F4 或文件 - 退出"));
     });
     auto* settingsMenu = menuBar()->addMenu(tr("设置"));
     auto* associate = settingsMenu->addAction(tr("文件关联"));
@@ -472,7 +472,8 @@ void MainWindow::buildMenus() {
         QSignalBlocker blocker(associate);
         associate->setChecked(Settings::instance().associationChosen());
     }
-    associate->setToolTip(tr("默认关闭。勾选后登记本程序并打开系统的默认应用选择窗口，不改写现有默认。取消勾选只删本程序仍拥有的登记"));
+    associate->setToolTip(tr("默认关闭。勾选后登记本程序并打开系统的默认应用选择窗口，不改写现有默认。取消勾"
+                             "选只删本程序仍拥有的登记"));
     connect(associate, &QAction::toggled, this, [this, associate](bool on) {
         const FileAssociationResult result = on ? enableFileAssociation() : disableFileAssociation();
         if (!result.ok) {

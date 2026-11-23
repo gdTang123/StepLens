@@ -118,7 +118,8 @@ private:
     void acceptPointClick();
     void acceptAngleClick();
     void commitPointDistance(double x0, double y0, double z0, double x1, double y1, double z1);
-    void showDistanceMark(double millimeters, double ax, double ay, double az, double bx, double by, double bz);
+    void showDistanceMark(double millimeters, double ax, double ay, double az, double bx, double by,
+                          double bz);
     void discardDistanceGraphics();
 #if STEPLENS_USE_WNT_WINDOW
     void bindWntWindow();

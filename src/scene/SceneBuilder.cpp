@@ -6,13 +6,12 @@
 
 #include <AIS_ConnectedInteractive.hxx>
 #include <BRep_Tool.hxx>
-#include <gp_Trsf.hxx>
 #include <Standard_Failure.hxx>
 #include <StdSelect_BRepOwner.hxx>
 #include <TopoDS.hxx>
+#include <gp_Trsf.hxx>
 
 #include <cmath>
-
 #include <exception>
 #include <format>
 #include <limits>

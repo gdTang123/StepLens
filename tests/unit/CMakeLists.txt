@@ -183,6 +183,20 @@ if(STEPLENS_OCCT_CONTRACT)
                 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
     endif()
 
+    # QA 测量入口：只建 steplens_measure_tests，链接现有 steplens::measure。
+    # 不把该源码并进 steplens_tests，也不使用 tests/harness/t12-measure。
+    add_executable(steplens_measure_tests measure/MeasureComputeTest.cpp)
+    target_include_directories(steplens_measure_tests PRIVATE "${CMAKE_SOURCE_DIR}/src")
+    target_link_libraries(steplens_measure_tests PRIVATE steplens::measure GTest::gtest_main)
+    steplens_apply_warnings(steplens_measure_tests)
+    steplens_apply_exceptions(steplens_measure_tests OFF)
+    set_target_properties(steplens_measure_tests PROPERTIES FOLDER "tests")
+    gtest_discover_tests(steplens_measure_tests
+        DISCOVERY_MODE PRE_TEST
+        PROPERTIES
+            LABELS "unit;occt-contract"
+            ENVIRONMENT "ASAN_OPTIONS=halt_on_error=1:detect_leaks=0")
+
     return()
 endif()
 

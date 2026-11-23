@@ -1,26 +1,25 @@
 #include "scene/PrototypePrs.h"
 
 #include <Aspect_TypeOfLine.hxx>
+#include <BRep_Tool.hxx>
 #include <Graphic3d_AspectLine3d.hxx>
 #include <Graphic3d_Group.hxx>
+#include <Prs3d_Drawer.hxx>
 #include <Prs3d_Presentation.hxx>
 #include <Prs3d_ShadingAspect.hxx>
 #include <PrsMgr_Presentation.hxx>
 #include <PrsMgr_PresentationManager.hxx>
-#include <BRep_Tool.hxx>
-#include <Prs3d_Drawer.hxx>
 #include <Select3D_SensitivePoint.hxx>
-#include <StdSelect_BRepSelectionTool.hxx>
 #include <Select3D_SensitivePrimitiveArray.hxx>
 #include <SelectMgr_EntityOwner.hxx>
 #include <SelectMgr_Selection.hxx>
 #include <StdSelect_BRepOwner.hxx>
+#include <StdSelect_BRepSelectionTool.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Vertex.hxx>
 
 #include <cmath>
-
 #include <type_traits>
 
 namespace steplens::scene {
@@ -100,8 +99,10 @@ void PrototypePrs::ComputeSelection(const opencascade::handle<SelectMgr_Selectio
             if (!std::isfinite(point.X()) || !std::isfinite(point.Y()) || !std::isfinite(point.Z())) {
                 continue;
             }
-            opencascade::handle<StdSelect_BRepOwner> owner = new StdSelect_BRepOwner(vertex, this, 5, Standard_True);
-            opencascade::handle<Select3D_SensitivePoint> sensitive = new Select3D_SensitivePoint(owner, point);
+            opencascade::handle<StdSelect_BRepOwner> owner =
+                new StdSelect_BRepOwner(vertex, this, 5, Standard_True);
+            opencascade::handle<Select3D_SensitivePoint> sensitive =
+                new Select3D_SensitivePoint(owner, point);
             theSelection->Add(sensitive);
         }
         return;
@@ -111,11 +112,13 @@ void PrototypePrs::ComputeSelection(const opencascade::handle<SelectMgr_Selectio
             return;
         }
         const opencascade::handle<Prs3d_Drawer> drawer = Attributes();
-        const double deflection =
-            drawer.IsNull() || !(drawer->DeviationCoefficient() > 0.0) ? 0.001 : drawer->DeviationCoefficient();
-        const double angle = drawer.IsNull() || !(drawer->DeviationAngle() > 0.0) ? 0.5 : drawer->DeviationAngle();
-        StdSelect_BRepSelectionTool::Load(theSelection, this, m_shape, theMode == 2 ? TopAbs_EDGE : TopAbs_FACE,
-                                           deflection, angle);
+        const double deflection = drawer.IsNull() || !(drawer->DeviationCoefficient() > 0.0)
+                                      ? 0.001
+                                      : drawer->DeviationCoefficient();
+        const double angle =
+            drawer.IsNull() || !(drawer->DeviationAngle() > 0.0) ? 0.5 : drawer->DeviationAngle();
+        StdSelect_BRepSelectionTool::Load(theSelection, this, m_shape,
+                                          theMode == 2 ? TopAbs_EDGE : TopAbs_FACE, deflection, angle);
         return;
     }
     if (theMode != 0) {

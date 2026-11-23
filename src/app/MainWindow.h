@@ -26,7 +26,7 @@ class ViewerWidget;
 namespace ui {
 class AssemblyTreePanel;
 class PropertyPanel;
-}
+} // namespace ui
 
 // 主窗口。打开、取消、进度都走 LoadPipeline，界面线程只 tick，不读文件、不三角化。
 // 真实成员/子树拆除顺序由 STEPLENS_LIFECYCLE_LOG 记录；自定义析构体结束不等于整窗已拆完。

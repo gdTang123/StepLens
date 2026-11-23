@@ -23,7 +23,8 @@ AssemblyTreePanel::AssemblyTreePanel(QWidget* parent) : QDockWidget(tr("装配�
         if (!index.isValid()) {
             return;
         }
-        emit nodeContextMenu(static_cast<model::NodeId>(index.internalId()), m_view->viewport()->mapToGlobal(pos));
+        emit nodeContextMenu(static_cast<model::NodeId>(index.internalId()),
+                             m_view->viewport()->mapToGlobal(pos));
     });
     connect(m_model, &AssemblyTreeModel::visibilityChanged, this, &AssemblyTreePanel::visibilityChanged);
 }

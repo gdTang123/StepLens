@@ -14,10 +14,9 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
-#include <windows.h>
-
 #include <objbase.h>
 #include <shobjidl.h>
+#include <windows.h>
 #endif
 
 namespace steplens {
@@ -200,9 +199,8 @@ bool launchDefaultAppChoice(QString* message) {
     const HRESULT init = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     const bool uninit = init == S_OK;
     IApplicationAssociationRegistrationUI* dialog = nullptr;
-    const HRESULT created =
-        CoCreateInstance(CLSID_ApplicationAssociationRegistrationUI, nullptr, CLSCTX_INPROC_SERVER,
-                         IID_PPV_ARGS(&dialog));
+    const HRESULT created = CoCreateInstance(CLSID_ApplicationAssociationRegistrationUI, nullptr,
+                                             CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog));
     HRESULT launched = E_FAIL;
     if (SUCCEEDED(created) && dialog != nullptr) {
         launched = dialog->LaunchAdvancedAssociationUI(L"StepLens");

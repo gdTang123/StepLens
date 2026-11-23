@@ -1,7 +1,6 @@
 #include "viewer/ViewerWidget.h"
 
 #include "measure/AngleMeasure.h"
-
 #include "measure/DistanceMeasure.h"
 #include "occtsupport/occt_compat.h"
 #include "pipeline/SceneHost.h"
@@ -21,6 +20,7 @@
 #include <QTimer>
 #include <QUrl>
 #include <QWheelEvent>
+#include <Quantity_Color.hxx>
 
 #include <AIS_DisplayMode.hxx>
 #include <AIS_InteractiveContext.hxx>
@@ -34,24 +34,23 @@
 #include <Aspect_ScrollDelta.hxx>
 #include <Aspect_TypeOfTriedronPosition.hxx>
 #include <BRepBndLib.hxx>
-#include <BRep_Tool.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
+#include <BRep_Tool.hxx>
 #include <Bnd_Box.hxx>
 #include <Geom_CartesianPoint.hxx>
+#include <Graphic3d_Camera.hxx>
+#include <Image_PixMap.hxx>
 #include <OpenGl_Context.hxx>
-#include <Quantity_Color.hxx>
-#include <TCollection_ExtendedString.hxx>
-#include <TopLoc_Location.hxx>
-#include <TopAbs_ShapeEnum.hxx>
-#include <TopoDS.hxx>
-#include <TopoDS_Shape.hxx>
 #include <OpenGl_FrameBuffer.hxx>
 #include <OpenGl_GraphicDriver.hxx>
 #include <Standard_Failure.hxx>
-#include <Graphic3d_Camera.hxx>
-#include <Image_PixMap.hxx>
+#include <TCollection_ExtendedString.hxx>
+#include <TopAbs_ShapeEnum.hxx>
+#include <TopLoc_Location.hxx>
+#include <TopoDS.hxx>
+#include <TopoDS_Shape.hxx>
 #include <V3d_ImageDumpOptions.hxx>
 #include <V3d_TypeOfOrientation.hxx>
 #include <V3d_View.hxx>
@@ -64,7 +63,6 @@
 #include <cmath>
 #include <optional>
 #include <vector>
-#include <gp_Trsf.hxx>
 
 #if STEPLENS_USE_WNT_WINDOW
 #include <WNT_Window.hxx>
@@ -730,7 +728,8 @@ ViewerWidget::ViewDump ViewerWidget::renderOffscreen(int scale, bool withAlpha) 
     }
     QString convertError;
     dump.image = imageFromPixMap(pixmap, &convertError);
-    if (!convertError.isEmpty() || dump.image.isNull() || dump.image.width() != static_cast<int>(targetWidth) ||
+    if (!convertError.isEmpty() || dump.image.isNull() ||
+        dump.image.width() != static_cast<int>(targetWidth) ||
         dump.image.height() != static_cast<int>(targetHeight)) {
         dump.image = QImage();
         dump.error = convertError.isEmpty() ? QStringLiteral("离屏图像尺寸与目标像素不一致") : convertError;
@@ -851,8 +850,7 @@ void ViewerWidget::mouseMoveEvent(QMouseEvent* event) {
         update();
     }
     if ((m_state->pointDistance || m_state->anglePick) && event->buttons() == Qt::NoButton &&
-        !m_state->context.IsNull() &&
-        !m_state->view.IsNull()) {
+        !m_state->context.IsNull() && !m_state->view.IsNull()) {
         m_state->context->MoveTo(point.x(), point.y(), m_state->view, false);
         update();
     }
@@ -1033,7 +1031,7 @@ bool ViewerWidget::wrapQtFramebuffer() {
     if (driver.IsNull()) {
         return false;
     }
-    const Handle(OpenGl_Context) & gl = driver->GetSharedContext();
+    const Handle(OpenGl_Context)& gl = driver->GetSharedContext();
     if (gl.IsNull()) {
         return false;
     }
@@ -1098,8 +1096,8 @@ Quantity_Color measureColor() {
     return Quantity_Color(0.9, 0.35, 0.05, Quantity_TOC_RGB);
 }
 
-void showMeasureObject(const Handle(AIS_InteractiveContext)& context,
-                       const Handle(AIS_InteractiveObject)& object) {
+void showMeasureObject(const Handle(AIS_InteractiveContext) & context,
+                       const Handle(AIS_InteractiveObject) & object) {
     if (context.IsNull() || object.IsNull()) {
         return;
     }
@@ -1107,8 +1105,8 @@ void showMeasureObject(const Handle(AIS_InteractiveContext)& context,
     context->Deactivate(object);
 }
 
-void eraseMeasureObject(const Handle(AIS_InteractiveContext)& context,
-                        const Handle(AIS_InteractiveObject)& object) {
+void eraseMeasureObject(const Handle(AIS_InteractiveContext) & context,
+                        const Handle(AIS_InteractiveObject) & object) {
     if (context.IsNull() || object.IsNull()) {
         return;
     }
@@ -1169,7 +1167,7 @@ void ViewerWidget::cancelPointDistance() {
 
 void ViewerWidget::clearDistanceMeasurements() {
     discardDistanceGraphics();
-    const QString message = m_state->anglePick       ? tr("测量已清除。请选择第一条直线边或平面")
+    const QString message = m_state->anglePick ? tr("测量已清除。请选择第一条直线边或平面")
                             : m_state->pointDistance ? tr("测量已清除。请选择第一个顶点、边或面")
                                                      : tr("测量已清除");
     emit measureMessage(message);
@@ -1402,7 +1400,8 @@ void ViewerWidget::showDistanceMark(double millimeters, double ax, double ay, do
     opencascade::handle<AIS_TextLabel> label = new AIS_TextLabel();
     const QByteArray utf8 = text.toUtf8();
     label->SetText(TCollection_ExtendedString(utf8.constData(), Standard_True));
-    label->SetPosition(gp_Pnt((from.X() + to.X()) * 0.5, (from.Y() + to.Y()) * 0.5, (from.Z() + to.Z()) * 0.5));
+    label->SetPosition(
+        gp_Pnt((from.X() + to.X()) * 0.5, (from.Y() + to.Y()) * 0.5, (from.Z() + to.Z()) * 0.5));
     label->SetColor(measureColor());
     label->SetZoomable(Standard_True);
     double height = 1.0;
