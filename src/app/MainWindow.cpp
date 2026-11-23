@@ -305,9 +305,16 @@ void MainWindow::buildMenus() {
     auto* displayMode = viewMenu->addAction(tr("显示模式"));
     displayMode->setEnabled(false);
     displayMode->setToolTip(tr("显示模式还没做"));
-    auto* panels = viewMenu->addAction(tr("显示或隐藏面板"));
-    panels->setEnabled(false);
-    panels->setToolTip(tr("装配树和属性面板还没做"));
+    if (m_treePanel != nullptr) {
+        QAction* panels = m_treePanel->toggleViewAction();
+        panels->setText(tr("显示或隐藏面板"));
+        panels->setToolTip(tr("显示或隐藏装配树"));
+        viewMenu->addAction(panels);
+    } else {
+        auto* panels = viewMenu->addAction(tr("显示或隐藏面板"));
+        panels->setEnabled(false);
+        panels->setToolTip(tr("当前没有装配树面板"));
+    }
 
     auto* measureMenu = menuBar()->addMenu(tr("测量"));
     for (const char* name : {"距离", "角度", "清除测量"}) {
