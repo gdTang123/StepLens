@@ -244,7 +244,9 @@ FileAssociationResult revokeOwned(bool* keptForeign) {
     deleteKeyIfEmpty(L"Software\\StepLens\\Capabilities\\FileAssociations");
     deleteKeyIfEmpty(L"Software\\StepLens\\Capabilities");
     deleteKeyIfEmpty(L"Software\\StepLens");
-    Settings::instance().setSavedAssociations({});
+    if (!Settings::instance().setSavedAssociations({})) {
+        return {false, QStringLiteral("本程序的登记已处理，但设置里的备份没有清掉")};
+    }
     if (*keptForeign) {
         return {true, QStringLiteral("已去掉本程序仍拥有的登记。被别人改过的项保留")};
     }
@@ -291,8 +293,11 @@ FileAssociationResult enableFileAssociation() {
     }
     QString dialogMessage;
     if (!launchDefaultAppChoice(&dialogMessage)) {
-        bool ignored = false;
-        revokeOwned(&ignored);
+        bool keptForeign = false;
+        const FileAssociationResult revoked = revokeOwned(&keptForeign);
+        if (!revoked.ok) {
+            return {false, dialogMessage + QStringLiteral("\n") + revoked.message};
+        }
         return {false, dialogMessage};
     }
     return {true, QStringLiteral("已登记本程序，并打开系统的默认应用选择窗口。没有直接改默认应用")};

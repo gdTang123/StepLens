@@ -322,8 +322,12 @@ void MainWindow::buildMenus() {
         for (const QString& path : files) {
             recentMenu->addAction(path, this, [this, path] {
                 if (!QFileInfo::exists(path)) {
-                    Settings::instance().removeRecentFile(path);
-                    QMessageBox::warning(this, tr("无法打开"), tr("文件已不存在，已从最近列表移除"));
+                    if (!Settings::instance().removeRecentFile(path)) {
+                        QMessageBox::warning(this, tr("无法打开"),
+                                             tr("文件已不存在。从最近列表移除没有写入设置文件"));
+                    } else {
+                        QMessageBox::warning(this, tr("无法打开"), tr("文件已不存在，已从最近列表移除"));
+                    }
                     return;
                 }
                 openPath(path);
@@ -442,7 +446,9 @@ void MainWindow::buildMenus() {
         });
         connect(m_viewer, &ViewerWidget::pointDistanceChanged, distance, &QAction::setChecked);
         connect(m_viewer, &ViewerWidget::angleChanged, angle, &QAction::setChecked);
-        connect(m_viewer, &ViewerWidget::measureMessage, statusBar(), &QStatusBar::showMessage);
+        QStatusBar* const bar = statusBar();
+        connect(m_viewer, &ViewerWidget::measureMessage, bar,
+                [bar](const QString& text) { bar->showMessage(text); });
         connect(clearMeasure, &QAction::triggered, m_viewer, &ViewerWidget::clearDistanceMeasurements);
     }
     toolbar->addAction(distance);
