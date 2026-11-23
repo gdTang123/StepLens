@@ -65,7 +65,7 @@ MeasureShape degeneratedEdgeWithVertex() {
     reversed.Orientation(TopAbs_REVERSED);
     builder.Add(edge, forward);
     builder.Add(edge, reversed);
-    builder.Degenerated(edge, Standard_True);
+    builder.Degenerated(edge, true);
     return {edge, gp_Trsf{}};
 }
 

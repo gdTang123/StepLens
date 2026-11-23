@@ -99,8 +99,7 @@ void PrototypePrs::ComputeSelection(const opencascade::handle<SelectMgr_Selectio
             if (!std::isfinite(point.X()) || !std::isfinite(point.Y()) || !std::isfinite(point.Z())) {
                 continue;
             }
-            opencascade::handle<StdSelect_BRepOwner> owner =
-                new StdSelect_BRepOwner(vertex, this, 5, Standard_True);
+            opencascade::handle<StdSelect_BRepOwner> owner = new StdSelect_BRepOwner(vertex, this, 5, true);
             opencascade::handle<Select3D_SensitivePoint> sensitive =
                 new Select3D_SensitivePoint(owner, point);
             theSelection->Add(sensitive);

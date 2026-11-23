@@ -149,8 +149,8 @@ Result<DistanceValue> distanceBetween(const MeasureShape& a, const MeasureShape&
 
     return occt::catchOcctAsResult(
         [&]() -> Result<DistanceValue> {
-            const TopoDS_Shape worldA = a.shape.Moved(TopLoc_Location(a.transform), Standard_True);
-            const TopoDS_Shape worldB = b.shape.Moved(TopLoc_Location(b.transform), Standard_True);
+            const TopoDS_Shape worldA = a.shape.Moved(TopLoc_Location(a.transform), true);
+            const TopoDS_Shape worldB = b.shape.Moved(TopLoc_Location(b.transform), true);
 
             const auto isDegeneratedEdge = [](const TopoDS_Shape& shape) {
                 return shape.ShapeType() == TopAbs_EDGE && BRep_Tool::Degenerated(TopoDS::Edge(shape));
@@ -214,7 +214,7 @@ Result<DistanceValue> distanceBetween(const MeasureShape& a, const MeasureShape&
             };
             int best = 1;
             double bestModel = extrema.PointOnShape1(1).Distance(extrema.PointOnShape2(1));
-            for (Standard_Integer i = 2; i <= extrema.NbSolution(); ++i) {
+            for (int i = 2; i <= extrema.NbSolution(); ++i) {
                 const double candidate = extrema.PointOnShape1(i).Distance(extrema.PointOnShape2(i));
                 if (std::isfinite(candidate) && candidate < bestModel) {
                     bestModel = candidate;

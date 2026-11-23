@@ -27,8 +27,8 @@ Result<AngleValue> angleBetween(const MeasureShape& a, const MeasureShape& b) {
                 return Error{ErrorCode::DegenerateGeometry, "null measurement shape",
                              std::string{kDegenerateMessage}};
 
-            const TopoDS_Shape worldA = a.shape.Moved(TopLoc_Location(a.transform), Standard_True);
-            const TopoDS_Shape worldB = b.shape.Moved(TopLoc_Location(b.transform), Standard_True);
+            const TopoDS_Shape worldA = a.shape.Moved(TopLoc_Location(a.transform), true);
+            const TopoDS_Shape worldB = b.shape.Moved(TopLoc_Location(b.transform), true);
 
             const auto isDegeneratedEdge = [](const TopoDS_Shape& shape) {
                 return shape.ShapeType() == TopAbs_EDGE && BRep_Tool::Degenerated(TopoDS::Edge(shape));

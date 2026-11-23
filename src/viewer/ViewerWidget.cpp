@@ -1031,7 +1031,7 @@ bool ViewerWidget::wrapQtFramebuffer() {
     if (driver.IsNull()) {
         return false;
     }
-    const Handle(OpenGl_Context)& gl = driver->GetSharedContext();
+    const Handle(OpenGl_Context) & gl = driver->GetSharedContext();
     if (gl.IsNull()) {
         return false;
     }
@@ -1167,7 +1167,7 @@ void ViewerWidget::cancelPointDistance() {
 
 void ViewerWidget::clearDistanceMeasurements() {
     discardDistanceGraphics();
-    const QString message = m_state->anglePick ? tr("测量已清除。请选择第一条直线边或平面")
+    const QString message = m_state->anglePick       ? tr("测量已清除。请选择第一条直线边或平面")
                             : m_state->pointDistance ? tr("测量已清除。请选择第一个顶点、边或面")
                                                      : tr("测量已清除");
     emit measureMessage(message);
