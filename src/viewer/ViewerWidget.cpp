@@ -1389,7 +1389,7 @@ void ViewerWidget::showDistanceMark(double millimeters, double ax, double ay, do
     const gp_Pnt from(ax, ay, az);
     const gp_Pnt to(bx, by, bz);
     State::DistanceMark mark;
-    const BRepBuilderAPI_MakeEdge edge(from, to);
+    BRepBuilderAPI_MakeEdge edge(from, to);
     if (edge.IsDone()) {
         opencascade::handle<AIS_Shape> line = new AIS_Shape(edge.Shape());
         line->SetColor(measureColor());
