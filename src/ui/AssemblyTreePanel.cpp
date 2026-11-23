@@ -14,8 +14,16 @@ AssemblyTreePanel::AssemblyTreePanel(QWidget* parent) : QDockWidget(tr("装配�
     setWidget(m_view);
     setObjectName(QStringLiteral("assemblyTreePanel"));
     setMinimumWidth(220);
+    m_view->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(m_view, &QTreeView::clicked, this, [this](const QModelIndex& index) {
         emit nodeActivated(static_cast<model::NodeId>(index.internalId()));
+    });
+    connect(m_view, &QWidget::customContextMenuRequested, this, [this](const QPoint& pos) {
+        const QModelIndex index = m_view->indexAt(pos);
+        if (!index.isValid()) {
+            return;
+        }
+        emit nodeContextMenu(static_cast<model::NodeId>(index.internalId()), m_view->viewport()->mapToGlobal(pos));
     });
     connect(m_model, &AssemblyTreeModel::visibilityChanged, this, &AssemblyTreePanel::visibilityChanged);
 }

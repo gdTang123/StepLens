@@ -20,6 +20,7 @@ public:
 
 signals:
     void nodeActivated(steplens::model::NodeId id);
+    void nodeContextMenu(steplens::model::NodeId id, QPoint globalPos);
     void visibilityChanged(steplens::model::NodeId id, bool visible);
 
 private:

@@ -25,6 +25,7 @@ class SceneHost;
 class ViewerWidget;
 namespace ui {
 class AssemblyTreePanel;
+class PropertyPanel;
 }
 
 // 主窗口。打开、取消、进度都走 LoadPipeline，界面线程只 tick，不读文件、不三角化。
@@ -51,6 +52,11 @@ private:
     void layoutView();
     void openFiles(const QStringList& files);
     void showFailure(const QString& message);
+    void showSelectedNode(model::NodeId id);
+    void showPartMenu(bool hasNode, model::NodeId id, QPoint globalPos);
+    void showOnlyCurrent();
+    void showAllParts();
+    void exportScreenshot();
     void saveOverlayShot();
     void saveModelShots();
     void endProcessNow();
@@ -72,9 +78,14 @@ private:
     ViewerWidget* m_viewer = nullptr;
     LoadingOverlay* m_overlay = nullptr;
     ui::AssemblyTreePanel* m_treePanel = nullptr;
+    ui::PropertyPanel* m_propertyPanel = nullptr;
     std::shared_ptr<const model::DocumentModel> m_treeDocument;
     QLabel* m_hint = nullptr;
+    QLabel* m_selectionLabel = nullptr;
+    QLabel* m_unitLabel = nullptr;
     QLabel* m_fileLabel = nullptr;
+    bool m_hasSelection = false;
+    model::NodeId m_selectedId = 0;
     QString m_dumpDir;
     StatusNotice m_memoryNotice;
     bool m_recentFileRecorded = false;

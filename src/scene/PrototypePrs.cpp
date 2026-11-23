@@ -7,9 +7,18 @@
 #include <Prs3d_ShadingAspect.hxx>
 #include <PrsMgr_Presentation.hxx>
 #include <PrsMgr_PresentationManager.hxx>
+#include <BRep_Tool.hxx>
+#include <Prs3d_Drawer.hxx>
+#include <Select3D_SensitivePoint.hxx>
+#include <StdSelect_BRepSelectionTool.hxx>
 #include <Select3D_SensitivePrimitiveArray.hxx>
 #include <SelectMgr_EntityOwner.hxx>
 #include <SelectMgr_Selection.hxx>
+#include <StdSelect_BRepOwner.hxx>
+#include <TopExp_Explorer.hxx>
+#include <TopoDS.hxx>
+
+#include <cmath>
 
 #include <type_traits>
 
@@ -76,8 +85,39 @@ void PrototypePrs::Compute(const opencascade::handle<PrsMgr_PresentationManager>
 
 void PrototypePrs::ComputeSelection(const opencascade::handle<SelectMgr_Selection>& theSelection,
                                     const int theMode) {
-    // 模式 0 是整体。1 顶点、2 边、4 面留给 T12，这里不建子形状敏感体。
-    if (theMode != 0 || theSelection.IsNull()) {
+    if (theSelection.IsNull()) {
+        return;
+    }
+    // 模式 1 手写顶点。模式 2、4 交给 OCCT 的边/面选择工具，不改距离算法。
+    if (theMode == 1) {
+        if (m_shape.IsNull()) {
+            return;
+        }
+        for (TopExp_Explorer explorer(m_shape, TopAbs_VERTEX); explorer.More(); explorer.Next()) {
+            const TopoDS_Vertex vertex = TopoDS::Vertex(explorer.Current());
+            const gp_Pnt point = BRep_Tool::Pnt(vertex);
+            if (!std::isfinite(point.X()) || !std::isfinite(point.Y()) || !std::isfinite(point.Z())) {
+                continue;
+            }
+            opencascade::handle<StdSelect_BRepOwner> owner = new StdSelect_BRepOwner(vertex, this, 5, Standard_True);
+            opencascade::handle<Select3D_SensitivePoint> sensitive = new Select3D_SensitivePoint(owner, point);
+            theSelection->Add(sensitive);
+        }
+        return;
+    }
+    if (theMode == 2 || theMode == 4) {
+        if (m_shape.IsNull()) {
+            return;
+        }
+        const opencascade::handle<Prs3d_Drawer> drawer = Attributes();
+        const double deflection =
+            drawer.IsNull() || !(drawer->DeviationCoefficient() > 0.0) ? 0.001 : drawer->DeviationCoefficient();
+        const double angle = drawer.IsNull() || !(drawer->DeviationAngle() > 0.0) ? 0.5 : drawer->DeviationAngle();
+        StdSelect_BRepSelectionTool::Load(theSelection, this, m_shape, theMode == 2 ? TopAbs_EDGE : TopAbs_FACE,
+                                           deflection, angle);
+        return;
+    }
+    if (theMode != 0) {
         return;
     }
     opencascade::handle<SelectMgr_EntityOwner> owner = new SelectMgr_EntityOwner(this);

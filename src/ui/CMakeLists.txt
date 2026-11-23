@@ -4,7 +4,9 @@ steplens_add_module(ui
     AssemblyTreeModel.h
     AssemblyTreeModel.cpp
     AssemblyTreePanel.h
-    AssemblyTreePanel.cpp)
+    AssemblyTreePanel.cpp
+    PropertyPanel.h
+    PropertyPanel.cpp)
 target_link_libraries(steplens_ui PUBLIC steplens::model Qt6::Widgets)
 
 # steplens_add_module 在链接 Qt 之前套了语言开关。Qt 会再注入同一组，MSVC 会报 D9025。

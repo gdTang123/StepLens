@@ -288,6 +288,7 @@ jobs:
           python scripts/package.py `
             --prefix "$pwd\dist-stage" `
             --qt-dir "$env:QTDIR" `
+            --vcpkg-bin "$pwd\build\msvc\vcpkg_installed\x64-windows\bin" `
             --output "$pwd\dist\StepLens-0.1.0-windows-x64.zip"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 

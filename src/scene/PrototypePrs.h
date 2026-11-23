@@ -2,7 +2,7 @@
 
 // T08 原型显示对象。Compute() 只把工作线程已经填好的数组挂到 Group 上。
 // 这个对象本身不进交互上下文。实例用 AIS_ConnectedInteractive 引用它。
-// replaceMesh 是 T08+，这里没有。顶点/边/面选择是 T12，这里只做整体选择。
+// replaceMesh 是 T08+，这里没有。选择模式 0 是整体，1 是顶点，2 是边，4 是面。
 
 #if defined(_WIN32)
 #ifndef NOMINMAX

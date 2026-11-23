@@ -107,6 +107,35 @@ QStringList Settings::recentFiles() const {
     return m_ini->value("recentFiles").toStringList();
 }
 
+bool Settings::removeRecentFile(const QString& path) {
+    QStringList files = recentFiles();
+    files.removeAll(path);
+    m_ini->setValue("recentFiles", files);
+    return saveWithFallback();
+}
+
+bool Settings::associationChosen() const {
+    return m_ini->value(QStringLiteral("association/chosen"), false).toBool();
+}
+
+bool Settings::setAssociationChosen(bool on) {
+    m_ini->setValue(QStringLiteral("association/chosen"), on);
+    return saveWithFallback();
+}
+
+QStringList Settings::savedAssociations() const {
+    return m_ini->value(QStringLiteral("association/backup")).toStringList();
+}
+
+bool Settings::setSavedAssociations(const QStringList& values) {
+    if (values.isEmpty()) {
+        m_ini->remove(QStringLiteral("association/backup"));
+    } else {
+        m_ini->setValue(QStringLiteral("association/backup"), values);
+    }
+    return saveWithFallback();
+}
+
 bool Settings::addRecentFile(const QString& path) {
     QStringList files = recentFiles();
     files.removeAll(path);

@@ -1,5 +1,8 @@
 #include "viewer/ViewerWidget.h"
 
+#include "measure/AngleMeasure.h"
+
+#include "measure/DistanceMeasure.h"
 #include "occtsupport/occt_compat.h"
 #include "pipeline/SceneHost.h"
 #include "scene/SceneBuilder.h"
@@ -21,23 +24,46 @@
 
 #include <AIS_DisplayMode.hxx>
 #include <AIS_InteractiveContext.hxx>
+#include <AIS_Point.hxx>
 #include <AIS_Shape.hxx>
+#include <AIS_TextLabel.hxx>
 #include <AIS_ViewController.hxx>
 #include <Aspect_DisplayConnection.hxx>
+#include <Aspect_GradientFillMethod.hxx>
 #include <Aspect_NeutralWindow.hxx>
 #include <Aspect_ScrollDelta.hxx>
 #include <Aspect_TypeOfTriedronPosition.hxx>
+#include <BRepBndLib.hxx>
+#include <BRep_Tool.hxx>
+#include <BRepBuilderAPI_MakeEdge.hxx>
+#include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
+#include <Bnd_Box.hxx>
+#include <Geom_CartesianPoint.hxx>
 #include <OpenGl_Context.hxx>
+#include <Quantity_Color.hxx>
+#include <TCollection_ExtendedString.hxx>
+#include <TopLoc_Location.hxx>
+#include <TopAbs_ShapeEnum.hxx>
+#include <TopoDS.hxx>
+#include <TopoDS_Shape.hxx>
 #include <OpenGl_FrameBuffer.hxx>
 #include <OpenGl_GraphicDriver.hxx>
 #include <Standard_Failure.hxx>
+#include <Graphic3d_Camera.hxx>
+#include <Image_PixMap.hxx>
+#include <V3d_ImageDumpOptions.hxx>
 #include <V3d_TypeOfOrientation.hxx>
 #include <V3d_View.hxx>
 #include <V3d_Viewer.hxx>
 #include <gp_Ax1.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Pnt.hxx>
+#include <gp_Trsf.hxx>
+
+#include <cmath>
+#include <optional>
+#include <vector>
 #include <gp_Trsf.hxx>
 
 #if STEPLENS_USE_WNT_WINDOW
@@ -47,7 +73,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <exception>
+#include <limits>
 
 #if defined(_WIN32) && !STEPLENS_USE_WNT_WINDOW
 // Qt 的头在包含 windows.h 时会定义 NOGDI 和 NOUSER，wingdi.h / winuser.h 里的函数被整段跳过。
@@ -162,8 +190,14 @@ public:
     explicit ViewerSceneHost(ViewerWidget& widget) : m_widget(widget) {}
 
     void reset(std::shared_ptr<const model::DocumentModel> model) override {
+        m_widget.discardDistanceGraphics();
         m_widget.suspendIdlePresentation();
         builder().reset(std::move(model));
+        if (m_widget.pointDistanceActive()) {
+            builder().setVertexPicking(true);
+        } else if (m_widget.angleActive()) {
+            builder().setAnglePicking(true);
+        }
     }
 
     void enqueue(mesh::MeshBatch batch) override {
@@ -176,8 +210,41 @@ public:
     }
 
     void clear() override {
+        m_widget.discardDistanceGraphics();
         releaseBuilder();
         m_widget.restoreIdlePresentation();
+    }
+
+    void setVertexPicking(bool enabled) {
+        if (m_builder) {
+            m_builder->setVertexPicking(enabled);
+        }
+    }
+
+    void setAnglePicking(bool enabled) {
+        if (m_builder) {
+            m_builder->setAnglePicking(enabled);
+        }
+    }
+
+    void setDisplayMode(scene::PrototypePrs::Mode mode) {
+        if (m_builder) {
+            m_builder->setDisplayMode(mode);
+        }
+    }
+
+    [[nodiscard]] std::optional<gp_Pnt> pickedVertex() const {
+        if (!m_builder) {
+            return std::nullopt;
+        }
+        return m_builder->pickedVertex();
+    }
+
+    [[nodiscard]] std::optional<scene::SceneBuilder::PickedElement> pickedElement() const {
+        if (!m_builder) {
+            return std::nullopt;
+        }
+        return m_builder->pickedElement();
     }
 
     void releaseBuilder() {
@@ -246,6 +313,23 @@ struct ViewerWidget::State {
     bool idle = true;
     bool fitPending = false;
     bool triedronShown = false;
+    bool pointDistance = false;
+    bool anglePick = false;
+    struct PendingElement {
+        TopAbs_ShapeEnum type = TopAbs_SHAPE;
+        TopoDS_Shape shape;
+        gp_Trsf transform;
+        gp_Pnt anchor;
+    };
+    std::optional<PendingElement> pendingElement;
+    Handle(AIS_InteractiveObject) pendingMarker;
+    std::optional<PendingElement> pendingAngle;
+    Handle(AIS_InteractiveObject) pendingAngleMarker;
+    struct DistanceMark {
+        Handle(AIS_InteractiveObject) line;
+        Handle(AIS_InteractiveObject) label;
+    };
+    std::vector<DistanceMark> marks;
 };
 
 scene::SceneBuilder& ViewerSceneHost::builder() {
@@ -258,6 +342,11 @@ scene::SceneBuilder& ViewerSceneHost::builder() {
         m_builder = std::make_unique<scene::SceneBuilder>(context);
         m_context = context;
         m_builder->setFirstFrameCallback([this] { m_widget.fitAll(); });
+        if (m_widget.pointDistanceActive()) {
+            m_builder->setVertexPicking(true);
+        } else if (m_widget.angleActive()) {
+            m_builder->setAnglePicking(true);
+        }
     }
     return *m_builder;
 }
@@ -333,7 +422,10 @@ void ViewerWidget::createScene() {
     m_state->viewer->SetLightOn();
     m_state->view = m_state->viewer->CreateView();
     m_state->view->SetImmediateUpdate(false);
-    m_state->view->SetBackgroundColor(Quantity_TOC_RGB, 0.16, 0.18, 0.22);
+    // PRD 第 4 节：浅灰到白的渐变。竖直方向，上浅灰、下白。
+    m_state->view->SetBgGradientColors(Quantity_Color(0.82, 0.84, 0.86, Quantity_TOC_RGB),
+                                       Quantity_Color(1.0, 1.0, 1.0, Quantity_TOC_RGB),
+                                       Aspect_GradientFillMethod_Vertical);
     m_state->context = new AIS_InteractiveContext(m_state->viewer);
     m_state->box = new AIS_Shape(BRepPrimAPI_MakeBox(100.0, 50.0, 90.0).Shape());
     m_state->binding.bind(m_state->context.get());
@@ -485,6 +577,64 @@ SceneHost& ViewerWidget::sceneHost() {
     return *m_state->scene;
 }
 
+QImage imageFromPixMap(const Image_PixMap& pixmap, QString* error) {
+    const auto width = static_cast<int>(pixmap.SizeX());
+    const auto height = static_cast<int>(pixmap.SizeY());
+    if (width <= 0 || height <= 0 || pixmap.IsEmpty()) {
+        *error = QStringLiteral("离屏图像是空的");
+        return {};
+    }
+    QImage::Format format = QImage::Format_Invalid;
+    bool swapRedBlue = false;
+    switch (pixmap.Format()) {
+    case Image_Format_RGB:
+        format = QImage::Format_RGB888;
+        break;
+    case Image_Format_BGR:
+        format = QImage::Format_BGR888;
+        break;
+    case Image_Format_RGBA:
+        format = QImage::Format_RGBA8888;
+        break;
+    case Image_Format_BGRA:
+        format = QImage::Format_RGBA8888;
+        swapRedBlue = true;
+        break;
+    default:
+        *error = QStringLiteral("离屏缓冲的像素格式不能导出");
+        return {};
+    }
+    const int pixelBytes = static_cast<int>(pixmap.SizePixelBytes());
+    const int expected = (format == QImage::Format_RGB888 || format == QImage::Format_BGR888) ? 3 : 4;
+    if (pixelBytes != expected) {
+        *error = QStringLiteral("离屏缓冲的像素字节数与格式不一致");
+        return {};
+    }
+    QImage image(width, height, format);
+    if (image.isNull()) {
+        *error = QStringLiteral("目标图像分配失败");
+        return {};
+    }
+    const bool topDown = pixmap.IsTopDown();
+    for (int y = 0; y < height; ++y) {
+        const int sourceY = topDown ? y : (height - 1 - y);
+        const auto* source = pixmap.Row(static_cast<Standard_Size>(sourceY));
+        auto* dest = image.scanLine(y);
+        if (!swapRedBlue) {
+            std::memcpy(dest, source, static_cast<std::size_t>(width) * static_cast<std::size_t>(pixelBytes));
+        } else {
+            for (int x = 0; x < width; ++x) {
+                const int at = x * 4;
+                dest[at] = source[at + 2];
+                dest[at + 1] = source[at + 1];
+                dest[at + 2] = source[at];
+                dest[at + 3] = source[at + 3];
+            }
+        }
+    }
+    return image;
+}
+
 QImage ViewerWidget::grabView() {
 #if STEPLENS_USE_WNT_WINDOW
     return grab();
@@ -493,9 +643,116 @@ QImage ViewerWidget::grabView() {
 #endif
 }
 
+ViewerWidget::ViewDump ViewerWidget::renderOffscreen(int scale, bool withAlpha) {
+    ViewDump dump;
+    if (scale != 1 && scale != 2 && scale != 4) {
+        dump.error = QStringLiteral("分辨率只能是 1 倍、2 倍或 4 倍");
+        return dump;
+    }
+    if (m_state->view.IsNull() || m_state->viewer.IsNull() || !m_state->paintReady ||
+        m_state->view->Camera().IsNull()) {
+        dump.error = QStringLiteral("当前视图还不能离屏导出");
+        return dump;
+    }
+    const double ratio = static_cast<double>(devicePixelRatioF());
+    const qint64 baseWidth = std::llround(static_cast<double>(width()) * ratio);
+    const qint64 baseHeight = std::llround(static_cast<double>(height()) * ratio);
+    const qint64 targetWidth = baseWidth * static_cast<qint64>(scale);
+    const qint64 targetHeight = baseHeight * static_cast<qint64>(scale);
+    constexpr qint64 kMaxPixels = std::numeric_limits<int>::max();
+    if (baseWidth <= 0 || baseHeight <= 0 || targetWidth > kMaxPixels || targetHeight > kMaxPixels) {
+        dump.error = QStringLiteral("目标像素尺寸不能交给离屏接口");
+        return dump;
+    }
+#if !STEPLENS_USE_WNT_WINDOW
+    if (context() == nullptr) {
+        dump.error = QStringLiteral("视图上下文还没准备好");
+        return dump;
+    }
+    makeCurrent();
+#endif
+    struct ReleaseContext {
+        ViewerWidget* widget;
+        ~ReleaseContext() {
+#if !STEPLENS_USE_WNT_WINDOW
+            widget->doneCurrent();
+#endif
+            widget->update();
+        }
+    } releaseContext{this};
+
+    opencascade::handle<OpenGl_GraphicDriver> driver =
+        opencascade::handle<OpenGl_GraphicDriver>::DownCast(m_state->viewer->Driver());
+    if (driver.IsNull()) {
+        dump.error = QStringLiteral("当前视图没有 OpenGL 驱动，不能离屏导出");
+        return dump;
+    }
+    opencascade::handle<Graphic3d_Camera> savedCamera = new Graphic3d_Camera(m_state->view->Camera());
+    const bool wasOpaque = driver->Options().buffersOpaqueAlpha;
+    struct RestoreView {
+        opencascade::handle<V3d_View> view;
+        opencascade::handle<Graphic3d_Camera> camera;
+        OpenGl_GraphicDriver* driver = nullptr;
+        bool opaque = true;
+        ~RestoreView() {
+            if (driver != nullptr) {
+                driver->ChangeOptions().buffersOpaqueAlpha = opaque;
+            }
+            if (!view.IsNull() && !camera.IsNull()) {
+                view->SetCamera(camera);
+            }
+        }
+    } restoreView{m_state->view, savedCamera, driver.get(), wasOpaque};
+    if (withAlpha) {
+        // 官方清屏：alpha 写入打开时背景 alpha 为 0，渐变背景顶点 alpha 也是 0。
+        driver->ChangeOptions().buffersOpaqueAlpha = false;
+    }
+
+    Image_PixMap pixmap;
+    V3d_ImageDumpOptions params;
+    params.Width = static_cast<Standard_Integer>(targetWidth);
+    params.Height = static_cast<Standard_Integer>(targetHeight);
+    params.BufferType = withAlpha ? Graphic3d_BT_RGBA : Graphic3d_BT_RGB;
+    params.ToAdjustAspect = Standard_True;
+    bool dumped = false;
+    try {
+        dumped = m_state->view->ToPixMap(pixmap, params) == Standard_True;
+    } catch (const Standard_Failure&) {
+        dumped = false;
+    }
+    if (!dumped || pixmap.IsEmpty()) {
+        dump.error = QStringLiteral("离屏渲染失败，没有改用拉伸图");
+        return dump;
+    }
+    if (withAlpha && pixmap.Format() != Image_Format_RGBA && pixmap.Format() != Image_Format_BGRA) {
+        dump.error = QStringLiteral("离屏缓冲没有 alpha，透明 PNG 没有完成");
+        return dump;
+    }
+    QString convertError;
+    dump.image = imageFromPixMap(pixmap, &convertError);
+    if (!convertError.isEmpty() || dump.image.isNull() || dump.image.width() != static_cast<int>(targetWidth) ||
+        dump.image.height() != static_cast<int>(targetHeight)) {
+        dump.image = QImage();
+        dump.error = convertError.isEmpty() ? QStringLiteral("离屏图像尺寸与目标像素不一致") : convertError;
+        return dump;
+    }
+    return dump;
+}
+
 void ViewerWidget::highlightNode(model::NodeId id) {
     if (auto* host = dynamic_cast<ViewerSceneHost*>(m_state->scene.get())) {
         host->highlightNode(id);
+        redraw();
+    }
+}
+
+void ViewerWidget::setPartDisplayMode(int mode) {
+    if (mode != scene::PrototypePrs::Shaded && mode != scene::PrototypePrs::ShadedWithEdges &&
+        mode != scene::PrototypePrs::Wireframe) {
+        return;
+    }
+    if (auto* host = dynamic_cast<ViewerSceneHost*>(m_state->scene.get())) {
+        host->setDisplayMode(static_cast<scene::PrototypePrs::Mode>(mode));
         redraw();
     }
 }
@@ -519,7 +776,7 @@ void ViewerWidget::mousePressEvent(QMouseEvent* event) {
 #else
     QOpenGLWidget::mousePressEvent(event);
 #endif
-    if (event->button() == Qt::LeftButton)
+    if (event->button() == Qt::LeftButton || event->button() == Qt::RightButton)
         m_clickGesture.press(event->position().x(), event->position().y());
     if (!m_state->paintReady) {
         return;
@@ -550,10 +807,30 @@ void ViewerWidget::mouseReleaseEvent(QMouseEvent* event) {
         !m_state->view.IsNull()) {
         m_state->context->MoveTo(point.x(), point.y(), m_state->view, false);
         m_state->context->SelectDetected();
+        if (m_state->pointDistance) {
+            acceptPointClick();
+            return;
+        }
+        if (m_state->anglePick) {
+            acceptAngleClick();
+            return;
+        }
         if (auto* host = dynamic_cast<ViewerSceneHost*>(m_state->scene.get())) {
             if (const auto id = host->selectedNode())
                 emit nodeSelected(*id);
         }
+    }
+    if (event->button() == Qt::RightButton &&
+        m_clickGesture.isClick(event->position().x(), event->position().y()) && !m_state->context.IsNull() &&
+        !m_state->view.IsNull() && !m_state->pointDistance && !m_state->anglePick) {
+        m_state->context->MoveTo(point.x(), point.y(), m_state->view, false);
+        m_state->context->SelectDetected();
+        auto* host = dynamic_cast<ViewerSceneHost*>(m_state->scene.get());
+        const std::optional<model::NodeId> id = host == nullptr ? std::nullopt : host->selectedNode();
+        if (id) {
+            emit nodeSelected(*id);
+        }
+        emit partContextMenu(id.has_value(), id.value_or(0), event->globalPosition().toPoint());
     }
 }
 
@@ -563,7 +840,7 @@ void ViewerWidget::mouseMoveEvent(QMouseEvent* event) {
 #else
     QOpenGLWidget::mouseMoveEvent(event);
 #endif
-    if (event->buttons().testFlag(Qt::LeftButton))
+    if (event->buttons().testFlag(Qt::LeftButton) || event->buttons().testFlag(Qt::RightButton))
         m_clickGesture.move(event->position().x(), event->position().y());
     if (!m_state->paintReady) {
         return;
@@ -571,6 +848,12 @@ void ViewerWidget::mouseMoveEvent(QMouseEvent* event) {
     const Graphic3d_Vec2i point = pixelPoint(event->position(), devicePixelRatioF());
     if (m_state->input.UpdateMousePosition(point, mouseButtons(event->buttons()),
                                            mouseModifiers(event->modifiers()), false)) {
+        update();
+    }
+    if ((m_state->pointDistance || m_state->anglePick) && event->buttons() == Qt::NoButton &&
+        !m_state->context.IsNull() &&
+        !m_state->view.IsNull()) {
+        m_state->context->MoveTo(point.x(), point.y(), m_state->view, false);
         update();
     }
 }
@@ -808,5 +1091,336 @@ void ViewerWidget::paintGL() {
 }
 
 #endif
+
+namespace {
+
+Quantity_Color measureColor() {
+    return Quantity_Color(0.9, 0.35, 0.05, Quantity_TOC_RGB);
+}
+
+void showMeasureObject(const Handle(AIS_InteractiveContext)& context,
+                       const Handle(AIS_InteractiveObject)& object) {
+    if (context.IsNull() || object.IsNull()) {
+        return;
+    }
+    context->Display(object, 0, -1, false);
+    context->Deactivate(object);
+}
+
+void eraseMeasureObject(const Handle(AIS_InteractiveContext)& context,
+                        const Handle(AIS_InteractiveObject)& object) {
+    if (context.IsNull() || object.IsNull()) {
+        return;
+    }
+    context->Remove(object, false);
+}
+
+} // namespace
+
+void ViewerWidget::discardDistanceGraphics() {
+    eraseMeasureObject(m_state->context, m_state->pendingMarker);
+    m_state->pendingMarker.Nullify();
+    for (const auto& mark : m_state->marks) {
+        eraseMeasureObject(m_state->context, mark.line);
+        eraseMeasureObject(m_state->context, mark.label);
+    }
+    m_state->marks.clear();
+    m_state->pendingElement.reset();
+    eraseMeasureObject(m_state->context, m_state->pendingAngleMarker);
+    m_state->pendingAngleMarker.Nullify();
+    m_state->pendingAngle.reset();
+}
+
+bool ViewerWidget::pointDistanceActive() const {
+    return m_state->pointDistance;
+}
+
+void ViewerWidget::beginPointDistance() {
+    if (m_state->anglePick) {
+        cancelAngle();
+    }
+    m_state->pointDistance = true;
+    m_state->pendingElement.reset();
+    eraseMeasureObject(m_state->context, m_state->pendingMarker);
+    m_state->pendingMarker.Nullify();
+    if (auto* host = dynamic_cast<ViewerSceneHost*>(m_state->scene.get())) {
+        host->setVertexPicking(true);
+    }
+    emit pointDistanceChanged(true);
+    emit measureMessage(tr("距离：请选择第一个顶点、边或面"));
+    update();
+}
+
+void ViewerWidget::cancelPointDistance() {
+    if (!m_state->pointDistance) {
+        return;
+    }
+    m_state->pointDistance = false;
+    m_state->pendingElement.reset();
+    eraseMeasureObject(m_state->context, m_state->pendingMarker);
+    m_state->pendingMarker.Nullify();
+    if (auto* host = dynamic_cast<ViewerSceneHost*>(m_state->scene.get())) {
+        host->setVertexPicking(false);
+    }
+    emit pointDistanceChanged(false);
+    emit measureMessage(tr("已取消距离选择"));
+    update();
+}
+
+void ViewerWidget::clearDistanceMeasurements() {
+    discardDistanceGraphics();
+    const QString message = m_state->anglePick       ? tr("测量已清除。请选择第一条直线边或平面")
+                            : m_state->pointDistance ? tr("测量已清除。请选择第一个顶点、边或面")
+                                                     : tr("测量已清除");
+    emit measureMessage(message);
+    update();
+}
+
+bool ViewerWidget::angleActive() const {
+    return m_state->anglePick;
+}
+
+void ViewerWidget::beginAngle() {
+    if (m_state->pointDistance) {
+        cancelPointDistance();
+    }
+    m_state->anglePick = true;
+    m_state->pendingAngle.reset();
+    eraseMeasureObject(m_state->context, m_state->pendingAngleMarker);
+    m_state->pendingAngleMarker.Nullify();
+    if (auto* host = dynamic_cast<ViewerSceneHost*>(m_state->scene.get())) {
+        host->setAnglePicking(true);
+    }
+    emit angleChanged(true);
+    emit measureMessage(tr("角度：请选择第一条直线边或平面"));
+    update();
+}
+
+void ViewerWidget::cancelAngle() {
+    if (!m_state->anglePick) {
+        return;
+    }
+    m_state->anglePick = false;
+    m_state->pendingAngle.reset();
+    eraseMeasureObject(m_state->context, m_state->pendingAngleMarker);
+    m_state->pendingAngleMarker.Nullify();
+    if (auto* host = dynamic_cast<ViewerSceneHost*>(m_state->scene.get())) {
+        host->setAnglePicking(false);
+    }
+    emit angleChanged(false);
+    emit measureMessage(tr("已取消角度选择"));
+    update();
+}
+
+void ViewerWidget::acceptAngleClick() {
+    auto* host = dynamic_cast<ViewerSceneHost*>(m_state->scene.get());
+    if (host == nullptr) {
+        emit measureMessage(tr("没有点到边或面"));
+        return;
+    }
+    const std::optional<scene::SceneBuilder::PickedElement> picked = host->pickedElement();
+    if (!picked || picked->shape.IsNull() ||
+        (picked->shape.ShapeType() != TopAbs_EDGE && picked->shape.ShapeType() != TopAbs_FACE)) {
+        emit measureMessage(tr("没有点到边或面"));
+        return;
+    }
+    State::PendingElement element;
+    element.type = picked->shape.ShapeType();
+    element.shape = picked->shape;
+    element.transform = picked->transform;
+    if (!m_state->pendingAngle) {
+        m_state->pendingAngle = element;
+        eraseMeasureObject(m_state->context, m_state->pendingAngleMarker);
+        opencascade::handle<AIS_Shape> marker = new AIS_Shape(element.shape);
+        marker->SetLocalTransformation(element.transform);
+        marker->SetColor(measureColor());
+        marker->SetWidth(2.0);
+        m_state->pendingAngleMarker = marker;
+        showMeasureObject(m_state->context, m_state->pendingAngleMarker);
+        emit measureMessage(tr("角度：请选择第二条直线边或平面"));
+        update();
+        return;
+    }
+    const State::PendingElement first = *m_state->pendingAngle;
+    m_state->pendingAngle.reset();
+    eraseMeasureObject(m_state->context, m_state->pendingAngleMarker);
+    m_state->pendingAngleMarker.Nullify();
+    measure::MeasureShape start;
+    start.shape = first.shape;
+    start.transform = first.transform;
+    measure::MeasureShape end;
+    end.shape = element.shape;
+    end.transform = element.transform;
+    const auto result = measure::angleBetween(start, end);
+    if (!result.ok()) {
+        emit measureMessage(QString::fromUtf8(result.error().userMessage.c_str()));
+        update();
+        return;
+    }
+    const QString text = QString::number(result.value().degrees, 'f', 2) + QStringLiteral("°");
+    // 放在两次所选形状的包围盒中心，沿用距离标注的文字样式。这个点不是角度顶点，也不画弧。
+    Bnd_Box box;
+    BRepBndLib::Add(first.shape.Moved(TopLoc_Location(first.transform), Standard_True), box);
+    BRepBndLib::Add(element.shape.Moved(TopLoc_Location(element.transform), Standard_True), box);
+    gp_Pnt at(0.0, 0.0, 0.0);
+    if (!box.IsVoid()) {
+        const gp_Pnt low = box.CornerMin();
+        const gp_Pnt high = box.CornerMax();
+        at = gp_Pnt((low.X() + high.X()) * 0.5, (low.Y() + high.Y()) * 0.5, (low.Z() + high.Z()) * 0.5);
+    }
+    if (!std::isfinite(at.X()) || !std::isfinite(at.Y()) || !std::isfinite(at.Z())) {
+        at = gp_Pnt(0.0, 0.0, 0.0);
+    }
+    opencascade::handle<AIS_TextLabel> label = new AIS_TextLabel();
+    const QByteArray utf8 = text.toUtf8();
+    label->SetText(TCollection_ExtendedString(utf8.constData(), Standard_True));
+    label->SetPosition(at);
+    label->SetColor(measureColor());
+    label->SetZoomable(Standard_True);
+    double height = 1.0;
+    if (const auto document = this->document()) {
+        const Bnd_Box& world = document->worldBox();
+        if (!world.IsVoid()) {
+            const double diagonal = world.CornerMin().Distance(world.CornerMax());
+            if (std::isfinite(diagonal) && diagonal > 0.0) {
+                height = diagonal * 0.02;
+            }
+        }
+    }
+    label->SetHeight(height);
+    State::DistanceMark mark;
+    mark.label = label;
+    showMeasureObject(m_state->context, mark.label);
+    m_state->marks.push_back(std::move(mark));
+    emit measureMessage(text);
+    update();
+}
+
+void ViewerWidget::acceptPointClick() {
+    auto* host = dynamic_cast<ViewerSceneHost*>(m_state->scene.get());
+    if (host == nullptr) {
+        emit measureMessage(tr("没有点到顶点、边或面"));
+        return;
+    }
+    const std::optional<scene::SceneBuilder::PickedElement> picked = host->pickedElement();
+    if (!picked || picked->shape.IsNull()) {
+        emit measureMessage(tr("没有点到顶点、边或面"));
+        return;
+    }
+    State::PendingElement element;
+    element.type = picked->shape.ShapeType();
+    element.shape = picked->shape;
+    element.transform = picked->transform;
+    if (element.type == TopAbs_VERTEX) {
+        element.anchor = BRep_Tool::Pnt(TopoDS::Vertex(element.shape)).Transformed(element.transform);
+    }
+    if (!m_state->pendingElement) {
+        m_state->pendingElement = element;
+        eraseMeasureObject(m_state->context, m_state->pendingMarker);
+        if (element.type == TopAbs_VERTEX) {
+            opencascade::handle<AIS_Point> marker = new AIS_Point(new Geom_CartesianPoint(element.anchor));
+            marker->SetColor(measureColor());
+            m_state->pendingMarker = marker;
+        } else {
+            opencascade::handle<AIS_Shape> marker = new AIS_Shape(element.shape);
+            marker->SetLocalTransformation(element.transform);
+            marker->SetColor(measureColor());
+            marker->SetWidth(2.0);
+            m_state->pendingMarker = marker;
+        }
+        showMeasureObject(m_state->context, m_state->pendingMarker);
+        emit measureMessage(tr("距离：请选择第二个顶点、边或面"));
+        update();
+        return;
+    }
+    const State::PendingElement first = *m_state->pendingElement;
+    m_state->pendingElement.reset();
+    eraseMeasureObject(m_state->context, m_state->pendingMarker);
+    m_state->pendingMarker.Nullify();
+    if (first.type == TopAbs_VERTEX && element.type == TopAbs_VERTEX) {
+        commitPointDistance(first.anchor.X(), first.anchor.Y(), first.anchor.Z(), element.anchor.X(),
+                            element.anchor.Y(), element.anchor.Z());
+        return;
+    }
+    const auto document = this->document();
+    if (!document) {
+        emit measureMessage(tr("没有打开的模型"));
+        return;
+    }
+    measure::MeasureShape start;
+    start.shape = first.shape;
+    start.transform = first.transform;
+    measure::MeasureShape end;
+    end.shape = element.shape;
+    end.transform = element.transform;
+    const auto result = measure::distanceBetween(start, end, document->lengthUnitToMm());
+    if (!result.ok()) {
+        emit measureMessage(QString::fromUtf8(result.error().userMessage.c_str()));
+        return;
+    }
+    showDistanceMark(result.value().millimeters, result.value().pointA.X(), result.value().pointA.Y(),
+                     result.value().pointA.Z(), result.value().pointB.X(), result.value().pointB.Y(),
+                     result.value().pointB.Z());
+}
+
+void ViewerWidget::commitPointDistance(double x0, double y0, double z0, double x1, double y1, double z1) {
+    const gp_Pnt first(x0, y0, z0);
+    const gp_Pnt second(x1, y1, z1);
+    const auto document = this->document();
+    if (!document) {
+        emit measureMessage(tr("没有打开的模型"));
+        return;
+    }
+    measure::MeasureShape start;
+    start.shape = BRepBuilderAPI_MakeVertex(first).Shape();
+    measure::MeasureShape end;
+    end.shape = BRepBuilderAPI_MakeVertex(second).Shape();
+    const auto result = measure::distanceBetween(start, end, document->lengthUnitToMm());
+    if (!result.ok()) {
+        emit measureMessage(QString::fromUtf8(result.error().userMessage.c_str()));
+        return;
+    }
+    showDistanceMark(result.value().millimeters, result.value().pointA.X(), result.value().pointA.Y(),
+                     result.value().pointA.Z(), result.value().pointB.X(), result.value().pointB.Y(),
+                     result.value().pointB.Z());
+}
+
+void ViewerWidget::showDistanceMark(double millimeters, double ax, double ay, double az, double bx, double by,
+                                    double bz) {
+    const QString text = QString::number(millimeters, 'f', 3) + QStringLiteral(" mm");
+    const gp_Pnt from(ax, ay, az);
+    const gp_Pnt to(bx, by, bz);
+    State::DistanceMark mark;
+    const BRepBuilderAPI_MakeEdge edge(from, to);
+    if (edge.IsDone()) {
+        opencascade::handle<AIS_Shape> line = new AIS_Shape(edge.Shape());
+        line->SetColor(measureColor());
+        line->SetWidth(2.0);
+        mark.line = line;
+        showMeasureObject(m_state->context, mark.line);
+    }
+    opencascade::handle<AIS_TextLabel> label = new AIS_TextLabel();
+    const QByteArray utf8 = text.toUtf8();
+    label->SetText(TCollection_ExtendedString(utf8.constData(), Standard_True));
+    label->SetPosition(gp_Pnt((from.X() + to.X()) * 0.5, (from.Y() + to.Y()) * 0.5, (from.Z() + to.Z()) * 0.5));
+    label->SetColor(measureColor());
+    label->SetZoomable(Standard_True);
+    double height = 1.0;
+    if (const auto document = this->document()) {
+        const Bnd_Box& box = document->worldBox();
+        if (!box.IsVoid()) {
+            const double diagonal = box.CornerMin().Distance(box.CornerMax());
+            if (std::isfinite(diagonal) && diagonal > 0.0) {
+                height = diagonal * 0.02;
+            }
+        }
+    }
+    label->SetHeight(height);
+    mark.label = label;
+    showMeasureObject(m_state->context, mark.label);
+    m_state->marks.push_back(std::move(mark));
+    emit measureMessage(text);
+    update();
+}
 
 } // namespace steplens

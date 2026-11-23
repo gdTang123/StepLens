@@ -81,11 +81,11 @@ $env:PATH = "$env:QTDIR\bin;$env:PATH"
 .\build\msvc\RelWithDebInfo\StepLens.exe
 ```
 
-打一个带 Qt 运行时的 zip（还不含 OCCT DLL 和 VC++ 运行库，那些是 T17）：
+打绿色版 zip（Qt、按 dumpbin 收集的 vcpkg DLL、不旧于工具集的官方 VC 再发行库）。没有在本机跑过这条命令：
 
 ```powershell
 cmake --install build\msvc --config RelWithDebInfo --prefix dist-stage
-python scripts\package.py --prefix dist-stage --qt-dir $env:QTDIR --output dist\StepLens-0.1.0-windows-x64.zip
+python scripts\package.py --prefix dist-stage --qt-dir $env:QTDIR --vcpkg-bin build\msvc\vcpkg_installed\x64-windows\bin --output dist\StepLens-0.1.0-windows-x64.zip
 ```
 
 其他预设：`msvc-asan`（AddressSanitizer）、`msvc-tbb`（给 OCCT 打开 oneTBB，默认构建不启用），都继承 7.9.3。`msvc-occt801` 是 OCCT 8.0.1 对照，不是默认。日常用 `msvc` 或 `cmake --workflow --preset ci`。
@@ -105,4 +105,4 @@ scripts/  package.py、fetch_samples.py、make_big_step.py
 
 ## 许可证
 
-内部使用，保留所有权利，见 [LICENSE](LICENSE)。Qt、OCCT、FreeType 只动态链接，许可证文本在做绿色版（T17）时放进 `licenses/`。
+内部使用，保留所有权利，见 [LICENSE](LICENSE)。Qt、OCCT、FreeType 及其默认传递依赖的许可证副本在 [packaging/licenses](packaging/licenses)，来源见那里的 `SOURCES.txt`。这不是法律审查结论。

@@ -24,6 +24,9 @@ public:
     bool setData(const QModelIndex& index, const QVariant& value, int role = Qt::EditRole) override;
     Qt::ItemFlags flags(const QModelIndex& index) const override;
     [[nodiscard]] QModelIndex indexOf(model::NodeId id) const;
+    [[nodiscard]] QString displayName(model::NodeId id) const;
+    void showOnly(model::NodeId id);
+    void showAll();
     [[nodiscard]] std::shared_ptr<const model::DocumentModel> document() const {
         return m_model;
     }

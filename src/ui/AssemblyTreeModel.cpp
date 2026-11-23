@@ -132,6 +132,55 @@ Qt::ItemFlags AssemblyTreeModel::flags(const QModelIndex& item) const {
     return Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsUserCheckable;
 }
 
+QString AssemblyTreeModel::displayName(model::NodeId id) const {
+    if (!m_model || id >= m_model->nodeCount()) {
+        return {};
+    }
+    const auto& node = m_model->node(id);
+    if (!node.name.empty()) {
+        return QString::fromStdU16String(node.name);
+    }
+    return tr("未命名-%1").arg(static_cast<qulonglong>(id) + 1);
+}
+
+void AssemblyTreeModel::showOnly(model::NodeId id) {
+    if (!m_model || id >= m_model->nodeCount() || m_visible.size() != m_model->nodeCount()) {
+        return;
+    }
+    std::vector<std::uint8_t> next(m_model->nodeCount(), 0);
+    for (model::NodeId current = id;;) {
+        next[current] = 1;
+        if (current == 0) {
+            break;
+        }
+        current = m_model->node(current).parent;
+    }
+    std::vector<model::NodeId> pending{id};
+    while (!pending.empty()) {
+        const model::NodeId current = pending.back();
+        pending.pop_back();
+        next[current] = 1;
+        const auto& children = m_model->node(current).children;
+        pending.insert(pending.end(), children.begin(), children.end());
+    }
+    m_visible.swap(next);
+    for (model::NodeId current = 0; current < m_model->nodeCount(); ++current) {
+        emit dataChanged(indexOf(current), indexOf(current), {Qt::CheckStateRole});
+        emit visibilityChanged(current, effectiveVisible(current));
+    }
+}
+
+void AssemblyTreeModel::showAll() {
+    if (!m_model || m_visible.size() != m_model->nodeCount()) {
+        return;
+    }
+    std::fill(m_visible.begin(), m_visible.end(), static_cast<std::uint8_t>(1));
+    for (model::NodeId current = 0; current < m_model->nodeCount(); ++current) {
+        emit dataChanged(indexOf(current), indexOf(current), {Qt::CheckStateRole});
+        emit visibilityChanged(current, true);
+    }
+}
+
 QModelIndex AssemblyTreeModel::indexOf(model::NodeId id) const {
     if (!m_model || id >= m_model->nodeCount())
         return {};
