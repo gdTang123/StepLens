@@ -388,6 +388,8 @@ jobs:
           & ./.github/scripts/Record-SteplensLaunchIdentity.ps1 -Exe $exe -OutDir $evidence -Phase before -CheckoutSha $sha -CheckoutTree $tree -IdentityFile $idFile
           $identityBefore = $LASTEXITCODE
           $env:STEPLENS_APP_EXIT_VIEWER = "1"
+          # 三路子进程继承这个目录，各自写 logs\gl-init-<pid>.txt，不另造上下文。
+          $env:STEPLENS_GL_INIT_TRACE = $lifeDir
           $ctestLog = Join-Path $env:RUNNER_TEMP "app-exit-viewer.log"
           $regex = "^AppExit\.(ViewerTreeCloseEventWhileBusy|ViewerTreeQuitWhenReadyHeldClose|ViewerTreeNormalReturn)$"
           ctest --test-dir build/msvc -C RelWithDebInfo --no-tests=error --output-on-failure --output-log $ctestLog -R $regex
@@ -443,6 +445,7 @@ jobs:
           path: |
             build/msvc/**/*.dmp
             build/msvc/**/*.stack.txt
+            build/msvc/**/gl-init-*.txt
             build/msvc/view-crash-identity/**
           retention-days: 7
           if-no-files-found: ignore

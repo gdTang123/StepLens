@@ -14,6 +14,7 @@
 #include <QMimeData>
 #include <QMouseEvent>
 #include <QOpenGLContext>
+#include <QPaintEvent>
 #include <QResizeEvent>
 #include <QShowEvent>
 #include <QSurfaceFormat>
@@ -71,16 +72,25 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <exception>
 #include <limits>
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
 
 #if defined(_WIN32) && !STEPLENS_USE_WNT_WINDOW
 // Qt 的头在包含 windows.h 时会定义 NOGDI 和 NOUSER，wingdi.h / winuser.h 里的函数被整段跳过。
-// 包含守卫让后面再包含 windows.h 不会展开，所以按 SDK 原型补上 NeutralWindow 要用的两个函数。
+// 包含守卫让后面再包含 windows.h 不会展开，所以按 SDK 原型补上要用的函数。
 extern "C" {
 __declspec(dllimport) HDC __stdcall wglGetCurrentDC(void);
 __declspec(dllimport) HWND __stdcall WindowFromDC(HDC);
+__declspec(dllimport) void* __stdcall wglGetCurrentContext(void);
+__declspec(dllimport) void* __stdcall wglGetProcAddress(const char* name);
+__declspec(dllimport) void* __stdcall GetModuleHandleA(const char* name);
+__declspec(dllimport) void* __stdcall GetProcAddress(void* module, const char* name);
+__declspec(dllimport) unsigned long __stdcall GetCurrentProcessId(void);
 }
 #endif
 
@@ -88,6 +98,118 @@ namespace steplens {
 namespace {
 
 constexpr int kFrameIntervalMs = 16;
+
+#if !STEPLENS_USE_WNT_WINDOW
+// 目录由 STEPLENS_GL_INIT_TRACE 给出。每个进程写 gl-init-<pid>.txt。
+// 只读已经 current 的状态。没有 current 就记无 current，不调用会建立 current 的接口。
+void traceGlInit(const QOpenGLWidget& widget, const char* site) {
+    const QByteArray spec = qgetenv("STEPLENS_GL_INIT_TRACE");
+    if (spec.isEmpty() || spec == "0" || (!spec.contains('/') && !spec.contains('\\'))) {
+        return;
+    }
+    QByteArray dir = spec;
+    while (dir.endsWith('/') || dir.endsWith('\\')) {
+        dir.chop(1);
+    }
+    const char sep = dir.contains('\\') ? '\\' : '/';
+    const QSurfaceFormat requested = widget.format();
+    const QOpenGLContext* context = QOpenGLContext::currentContext();
+    const bool qtCurrent = context != nullptr;
+#if defined(_WIN32)
+    const unsigned long pid = GetCurrentProcessId();
+    void* wglContext = wglGetCurrentContext();
+    const bool wglCurrent = wglContext != nullptr;
+    void* viewportExport = nullptr;
+    const void* versionText = nullptr;
+    const void* rendererText = nullptr;
+    void* useProgram = nullptr;
+    void* bindBuffer = nullptr;
+    void* enableFn = nullptr;
+    if (void* opengl = GetModuleHandleA("opengl32.dll")) {
+        viewportExport = GetProcAddress(opengl, "glViewport");
+        if (wglCurrent) {
+            using GetStringFn = const unsigned char*(__stdcall*)(unsigned int);
+            auto getString = reinterpret_cast<GetStringFn>(GetProcAddress(opengl, "glGetString"));
+            if (getString != nullptr) {
+                versionText = getString(0x1F02);
+                rendererText = getString(0x1F01);
+            }
+        }
+    }
+    if (wglCurrent) {
+        useProgram = wglGetProcAddress("glUseProgram");
+        bindBuffer = wglGetProcAddress("glBindBuffer");
+        enableFn = wglGetProcAddress("glEnable");
+    }
+#else
+    const unsigned long pid = static_cast<unsigned long>(::getpid());
+    void* wglContext = nullptr;
+    const bool wglCurrent = false;
+    void* viewportExport = nullptr;
+    const void* versionText = nullptr;
+    const void* rendererText = nullptr;
+    void* useProgram = nullptr;
+    void* bindBuffer = nullptr;
+    void* enableFn = nullptr;
+    static_cast<void>(wglContext);
+    static_cast<void>(viewportExport);
+    static_cast<void>(versionText);
+    static_cast<void>(rendererText);
+    static_cast<void>(useProgram);
+    static_cast<void>(bindBuffer);
+    static_cast<void>(enableFn);
+#endif
+    const QByteArray path =
+        dir + sep + "gl-init-" + QByteArray::number(static_cast<qulonglong>(pid)) + ".txt";
+    FILE* file = std::fopen(path.constData(), "ab");
+    if (file == nullptr) {
+        return;
+    }
+    char actualVersion[32] = "none";
+    char actualProfile[16] = "na";
+    char actualRenderable[16] = "na";
+    if (qtCurrent) {
+        std::snprintf(actualVersion, sizeof(actualVersion), "%d.%d", context->format().majorVersion(),
+                      context->format().minorVersion());
+        std::snprintf(actualProfile, sizeof(actualProfile), "%d",
+                      static_cast<int>(context->format().profile()));
+        std::snprintf(actualRenderable, sizeof(actualRenderable), "%d",
+                      static_cast<int>(context->format().renderableType()));
+    }
+    auto queriedPointer = [](bool queried, void* value, char* buffer, std::size_t bufferSize) {
+        if (!queried) {
+            std::snprintf(buffer, bufferSize, "not-queried");
+            return;
+        }
+        std::snprintf(buffer, bufferSize, "%p", value);
+    };
+    char useBuf[32];
+    char bindBuf[32];
+    char enableBuf[32];
+    queriedPointer(wglCurrent, useProgram, useBuf, sizeof(useBuf));
+    queriedPointer(wglCurrent, bindBuffer, bindBuf, sizeof(bindBuf));
+    queriedPointer(wglCurrent, enableFn, enableBuf, sizeof(enableBuf));
+    std::fprintf(file,
+                 "site=%s pid=%lu qt_ctx=%s valid=%d wgl_ctx=%s widget=%d.%d widget_profile=%d "
+                 "widget_renderable=%d actual=%s actual_profile=%s actual_renderable=%s "
+                 "gl_version=%s gl_renderer=%s query_viewport=GetProcAddress(opengl32) "
+                 "viewport_export=%p query_useProgram=%s useProgram=%s query_bindBuffer=%s bindBuffer=%s "
+                 "query_enable=%s enable=%s\n",
+                 site, pid, qtCurrent ? "present" : "none", qtCurrent && context->isValid() ? 1 : 0,
+                 wglCurrent ? "present" : "none", requested.majorVersion(), requested.minorVersion(),
+                 static_cast<int>(requested.profile()), static_cast<int>(requested.renderableType()),
+                 actualVersion, actualProfile, actualRenderable,
+                 !wglCurrent ? "not-queried"
+                             : (versionText != nullptr ? static_cast<const char*>(versionText) : "null"),
+                 !wglCurrent ? "not-queried"
+                             : (rendererText != nullptr ? static_cast<const char*>(rendererText) : "null"),
+                 viewportExport, wglCurrent ? "wglGetProcAddress" : "not-queried", useBuf,
+                 wglCurrent ? "wglGetProcAddress" : "not-queried", bindBuf,
+                 wglCurrent ? "wglGetProcAddress" : "not-queried", enableBuf);
+    std::fflush(file);
+    std::fclose(file);
+}
+#endif
 constexpr double kFullTurn = 6.283185307179586;
 constexpr double kFitMargin = 0.01;
 constexpr double kTriedronScale = 0.1;
@@ -981,6 +1103,13 @@ void ViewerWidget::releaseGl() {
 }
 
 void ViewerWidget::initializeGL() {
+    struct ExitTrace {
+        const QOpenGLWidget* widget;
+        ~ExitTrace() {
+            traceGlInit(*widget, "initializeGL-exit");
+        }
+    } exitTrace{this};
+    traceGlInit(*this, "initializeGL-enter");
     try {
         if (m_state->view.IsNull()) {
             createScene();
@@ -1023,6 +1152,11 @@ void ViewerWidget::initializeGL() {
     } catch (...) {
         qWarning("StepLens: NeutralWindow init failed");
     }
+}
+
+void ViewerWidget::paintEvent(QPaintEvent* event) {
+    traceGlInit(*this, "paint-before");
+    QOpenGLWidget::paintEvent(event);
 }
 
 bool ViewerWidget::wrapQtFramebuffer() {

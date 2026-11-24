@@ -101,6 +101,7 @@ protected:
 #else
     void initializeGL() override;
     void paintGL() override;
+    void paintEvent(QPaintEvent* event) override;
 #endif
 
 private:
