@@ -37,13 +37,16 @@ std::shared_ptr<const model::DocumentModel> buildModel(std::size_t instanceCount
     XCAFApp_Application::GetApplication()->NewDocument("BinXCAF", document);
     const auto shapes = XCAFDoc_DocumentTool::ShapeTool(document->Main());
     const TDF_Label part = shapes->AddShape(BRepPrimAPI_MakeBox(1.0, 1.0, 1.0).Shape(), false);
+    // 窄字符串构造不会按 UTF-8 解码，中文会变成逐字节的代码单元。
+    // AutoNaming 还会给实体写上 "SOLID"，未命名实例就会显示定义名而不是「未命名-N」。
+    static_cast<void>(part.ForgetAttribute(TDataStd_Name::GetID()));
     const TDF_Label root = withAssembly ? shapes->NewShape() : part;
     if (withAssembly)
-        TDataStd_Name::Set(root, TCollection_ExtendedString{"总装"});
+        TDataStd_Name::Set(root, TCollection_ExtendedString(u"总装"));
     for (std::size_t i = 0; i < instanceCount; ++i) {
         const TDF_Label instance = shapes->AddComponent(root, part, TopLoc_Location{});
         if (i == 0)
-            TDataStd_Name::Set(instance, TCollection_ExtendedString{"已命名零件"});
+            TDataStd_Name::Set(instance, TCollection_ExtendedString(u"已命名零件"));
     }
     io::LoadedDocument loaded;
     loaded.doc = std::move(document);
