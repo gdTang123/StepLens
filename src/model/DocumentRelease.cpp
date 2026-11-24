@@ -286,11 +286,11 @@ private:
             {
                 std::unique_lock lock(m_mutex);
                 m_condition.wait(lock, [this] { return m_head != nullptr || m_stopping; });
-                // 停机后不再 Close。~Retirer 已经走在 main 返回之后；队列里的模型若在这里
-                // finish，Windows 子进程会停在 retirer-stop（pending/live/inflight 仍为 1），
-                // 父进程 WaitForSingleObject 得到 WAIT_TIMEOUT。pending>0 的生产路径在此之前
-                // 已经 TerminateProcess / quick_exit。
-                if (m_stopping) {
+                // producer 还停在 notify 之前时不能 Close：Windows 上 delete 会卡在那个
+                // deleter 里，join 不再返回（retirer-stop 后 WAIT_TIMEOUT）。
+                // inflight 已经归零时必须把队列 Close 掉，否则进程退不出
+                // （TwoThousandNodes 测试体 OK 之后 ctest 超时 1500s）。
+                if (m_stopping && (m_head == nullptr || m_inFlight.load(std::memory_order_acquire) != 0)) {
                     return;
                 }
                 batch = m_head;
