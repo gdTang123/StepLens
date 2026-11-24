@@ -381,11 +381,23 @@ jobs:
           if (-not (Test-Path -LiteralPath $exe)) { throw "未找到 $exe" }
           $lifeDir = Join-Path (Split-Path -Parent $exe) "logs"
           New-Item -ItemType Directory -Force -Path $lifeDir | Out-Null
+          $evidence = Join-Path (Get-Location) "build\msvc\view-crash-identity"
+          $sha = (git rev-parse HEAD).Trim()
+          $tree = (git rev-parse "HEAD^{tree}").Trim()
+          $idFile = Join-Path (Get-Location) "build\msvc\steplens-build-identity.txt"
+          & ./.github/scripts/Record-SteplensLaunchIdentity.ps1 -Exe $exe -OutDir $evidence -Phase before -CheckoutSha $sha -CheckoutTree $tree -IdentityFile $idFile
+          $identityBefore = $LASTEXITCODE
           $env:STEPLENS_APP_EXIT_VIEWER = "1"
           $ctestLog = Join-Path $env:RUNNER_TEMP "app-exit-viewer.log"
           $regex = "^AppExit\.(ViewerTreeCloseEventWhileBusy|ViewerTreeQuitWhenReadyHeldClose|ViewerTreeNormalReturn)$"
           ctest --test-dir build/msvc -C RelWithDebInfo --no-tests=error --output-on-failure --output-log $ctestLog -R $regex
-          if ($LASTEXITCODE -ne 0) { throw "产品 Viewer/tree 退出三路径失败，退出码 $LASTEXITCODE" }
+          $viewerCode = $LASTEXITCODE
+          & ./.github/scripts/Record-SteplensLaunchIdentity.ps1 -Exe $exe -OutDir $evidence -Phase after -CheckoutSha $sha -CheckoutTree $tree -IdentityFile $idFile
+          $identityAfter = $LASTEXITCODE
+          if ($viewerCode -ne 0) { exit $viewerCode }
+          if ($identityBefore -ne 0 -or $identityAfter -ne 0) {
+            throw "启动 exe/PDB 符号身份缺证，before=$identityBefore after=$identityAfter"
+          }
           $ctestText = Get-Content -LiteralPath $ctestLog -Raw
           if ($ctestText -match '\[  SKIPPED \]|No tests were found|Not Run') {
             throw "Viewer AppExit 被跳过或未发现，不能算成功"
@@ -423,6 +435,17 @@ jobs:
           $normalText = Get-Content -LiteralPath $normalFile.FullName -Raw
           if ($normalText -notmatch "event=main-normal-return" -or $normalText -notmatch "event=retirer-end") { throw "Viewer 正常 return 缺少 retirer-end" }
 
+      - name: Upload viewer crash dumps
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: StepLens-viewer-crash
+          path: |
+            build/msvc/**/*.dmp
+            build/msvc/**/*.stack.txt
+            build/msvc/view-crash-identity/**
+          retention-days: 7
+          if-no-files-found: ignore
 
       - name: clang-tidy changed C++ files
         run: |
