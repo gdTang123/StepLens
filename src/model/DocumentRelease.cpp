@@ -111,16 +111,8 @@ public:
         if (auto hook = g_afterJoinHook.load(std::memory_order_acquire)) {
             hook();
         }
-        // 已准入 producer 覆盖到最后一次通知；归零后不再通知 cv。这里用限时等待，
-        // 不把“再读一次计数”当成门闩，也不依赖 inFlight 归零之后的唤醒。
-        {
-            std::unique_lock lock(m_mutex);
-            while (m_inFlight.load(std::memory_order_acquire) != 0) {
-                m_condition.wait_for(lock, std::chrono::milliseconds(20),
-                                     [this] { return m_inFlight.load(std::memory_order_acquire) == 0; });
-            }
-        }
-        // 不在析构中访问 XCAF/Log；静态寿命顺序由 instance() 的首次构造依赖保证。
+        // 工作线程已退出。drain 在析构返回前接收尾投递，直到已构造模型都 Close。
+        drainAdmittedQueueAfterJoin();
         io::setHeapReleasePendingProbe(nullptr);
         lifecycleTrace("retirer-end",
                        "pending=" + std::to_string(count()) +
@@ -256,6 +248,43 @@ private:
         if (!model->m_retired.load(std::memory_order_relaxed)) {
             m_pending.fetch_add(1, std::memory_order_release);
             model->m_retired.store(true, std::memory_order_release);
+        }
+    }
+
+    // join 与 afterJoinHook 之后调用。退出只在持锁观察到 inflight、队列、live 同时为 0。
+    // 20ms 只重检「notify 早于 inflight 减票」，超时不放弃 Close。
+    // ~Retirer 已返回之后的调用不在此列。停机期间再构造模型属于既有契约外。
+    void drainAdmittedQueueAfterJoin() {
+        for (;;) {
+            DocumentModel* batch = nullptr;
+            {
+                std::unique_lock lock(m_mutex);
+                while (m_inFlight.load(std::memory_order_acquire) != 0) {
+                    m_condition.wait_for(lock, std::chrono::milliseconds(20),
+                                         [this] { return m_inFlight.load(std::memory_order_acquire) == 0; });
+                }
+                if (m_head != nullptr) {
+                    batch = m_head;
+                    m_head = nullptr;
+                    m_tail = nullptr;
+                } else if (m_live.load(std::memory_order_acquire) == 0) {
+                    return;
+                } else {
+                    m_condition.wait_for(lock, std::chrono::milliseconds(20), [this] {
+                        return m_head != nullptr || m_live.load(std::memory_order_acquire) == 0 ||
+                               m_inFlight.load(std::memory_order_acquire) != 0;
+                    });
+                    continue;
+                }
+            }
+            while (batch) {
+                DocumentModel* next = batch->m_releaseNext;
+                batch->m_releaseNext = nullptr;
+                lifecycleTrace("retirer-drain-finish",
+                               std::to_string(reinterpret_cast<std::uintptr_t>(batch)));
+                finish(batch);
+                batch = next;
+            }
         }
     }
 

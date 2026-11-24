@@ -57,6 +57,7 @@ namespace {
 namespace model = steplens::model;
 std::atomic<bool> enqueueGateEntered{false};
 std::atomic<bool> releaseEnqueueGate{false};
+std::atomic<bool> releaseLateLive{false};
 std::atomic<bool> dependencyBeforeLockEntered{false};
 std::atomic<bool> dependencyAfterLockEntered{false};
 std::atomic<bool> dependencyLockWaitWasSerialized{false};
@@ -84,6 +85,9 @@ void blockProducerBeforeNotify() {
 }
 void releaseProducerAfterJoin() {
     releaseEnqueueGate.store(true, std::memory_order_release);
+}
+void releaseLateLiveAfterJoin() {
+    releaseLateLive.store(true, std::memory_order_release);
 }
 std::shared_ptr<const steplens::model::DocumentModel> makeModel() {
     using namespace steplens;
@@ -678,6 +682,122 @@ TEST(DocumentRelease, EnqueueNotifyIsCoveredByInFlightAcrossStop) {
     // producer-inflight-release is traced just before fetch_sub; retirer-end follows the
     // destructor's actual zero wait, so this marker is not interpreted as the decrement.
     EXPECT_LT(notifyAt, inflightAt);
+    // gate 跨过 stop 时，提前 return 留下的队列要在 inflight 归零之后 finish，不能只看进程退出。
+    const auto drainAt = logged.find("event=retirer-drain-finish");
+    ASSERT_NE(drainAt, std::string::npos) << logged;
+    EXPECT_LT(inflightAt, drainAt);
+    EXPECT_LT(drainAt, endAt);
+    EXPECT_NE(logged.find("event=retirer-end identity=pending=0 "), std::string::npos) << logged;
+    EXPECT_NE(logged.find("event=retirer-end identity=pending=0 live=0 "), std::string::npos) << logged;
+}
+
+TEST(DocumentRelease, LiveReferenceDroppedDuringRetirerIsClosed) {
+    steplens::test::TempDir dir;
+    const auto logPath = dir.path() / "lifecycle-late-live.log";
+    const TestEnvValue childMark = readTestEnvironment("STEPLENS_R1_LATE_LIVE_CHILD");
+    if (childMark.present && !childMark.value.empty()) {
+        releaseLateLive.store(false, std::memory_order_release);
+        steplens::initializeLifecycleTrace();
+        model::setDocumentReleaseAfterJoinHookForTesting(releaseLateLiveAfterJoin);
+        auto* held = new std::shared_ptr<const model::DocumentModel>(makeModel());
+        ASSERT_TRUE(*held);
+        std::thread([held] {
+            while (!releaseLateLive.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            steplens::lifecycleTrace("late-live-release");
+            held->reset();
+            delete held;
+        }).detach();
+        steplens::lifecycleTrace("late-live-held-across-return");
+        return;
+    }
+
+#if defined(_WIN32)
+    char module[MAX_PATH]{};
+    ASSERT_GT(GetModuleFileNameA(nullptr, module, MAX_PATH), 0u);
+    SetEnvironmentVariableA("STEPLENS_R1_LATE_LIVE_CHILD", "1");
+    SetEnvironmentVariableA("STEPLENS_LIFECYCLE_LOG", logPath.string().c_str());
+    STARTUPINFOA startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    std::string command = std::string("\"") + module +
+                          "\" --gtest_filter=DocumentRelease.LiveReferenceDroppedDuringRetirerIsClosed";
+    ASSERT_TRUE(CreateProcessA(nullptr, command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr,
+                               &startup, &process));
+    SetEnvironmentVariableA("STEPLENS_R1_LATE_LIVE_CHILD", nullptr);
+    SetEnvironmentVariableA("STEPLENS_LIFECYCLE_LOG", nullptr);
+    const DWORD waitResult = WaitForSingleObject(process.hProcess, 10000);
+    DWORD exitCode = 9;
+    if (waitResult == WAIT_TIMEOUT) {
+        TerminateProcess(process.hProcess, 9);
+        const DWORD reapResult = WaitForSingleObject(process.hProcess, 5000);
+        GetExitCodeProcess(process.hProcess, &exitCode);
+        EXPECT_EQ(reapResult, WAIT_OBJECT_0) << "TerminateProcess 后未能在有限时间内回收";
+    } else {
+        GetExitCodeProcess(process.hProcess, &exitCode);
+    }
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    EXPECT_EQ(waitResult, WAIT_OBJECT_0);
+    EXPECT_EQ(exitCode, 0u);
+#else
+    const auto exePath = std::filesystem::read_symlink("/proc/self/exe");
+    const std::string exe = exePath.string();
+    setenv("STEPLENS_R1_LATE_LIVE_CHILD", "1", 1);
+    setenv("STEPLENS_LIFECYCLE_LOG", logPath.string().c_str(), 1);
+    const pid_t child = fork();
+    if (child < 0) {
+        unsetenv("STEPLENS_R1_LATE_LIVE_CHILD");
+        unsetenv("STEPLENS_LIFECYCLE_LOG");
+        FAIL() << "fork failed";
+    }
+    if (child == 0) {
+        setenv("ASAN_OPTIONS", "halt_on_error=1:detect_leaks=0", 1);
+        execl(exe.c_str(), exe.c_str(),
+              "--gtest_filter=DocumentRelease.LiveReferenceDroppedDuringRetirerIsClosed",
+              static_cast<char*>(nullptr));
+        _exit(127);
+    }
+    unsetenv("STEPLENS_R1_LATE_LIVE_CHILD");
+    unsetenv("STEPLENS_LIFECYCLE_LOG");
+    int status = 0;
+    bool exited = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (std::chrono::steady_clock::now() < deadline) {
+        const pid_t result = waitpid(child, &status, WNOHANG);
+        if (result == child) {
+            exited = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    if (!exited) {
+        kill(child, SIGKILL);
+        waitpid(child, &status, 0);
+    }
+    EXPECT_TRUE(exited);
+    ASSERT_TRUE(exited);
+    ASSERT_TRUE(WIFEXITED(status));
+    EXPECT_EQ(WEXITSTATUS(status), 0);
+#endif
+    ASSERT_TRUE(std::filesystem::is_regular_file(logPath)) << logPath;
+    std::ifstream in(logPath);
+    const std::string logged((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    const auto heldAt = logged.find("late-live-held-across-return");
+    const auto releaseAt = logged.find("late-live-release");
+    const auto joinAt = logged.find("retirer-join-end");
+    const auto drainAt = logged.find("event=retirer-drain-finish");
+    const auto endAt = logged.find("retirer-end");
+    ASSERT_NE(heldAt, std::string::npos) << logged;
+    ASSERT_NE(releaseAt, std::string::npos) << logged;
+    ASSERT_NE(joinAt, std::string::npos) << logged;
+    ASSERT_NE(drainAt, std::string::npos) << logged;
+    ASSERT_NE(endAt, std::string::npos) << logged;
+    EXPECT_LT(joinAt, releaseAt);
+    EXPECT_LT(releaseAt, drainAt);
+    EXPECT_LT(drainAt, endAt);
+    EXPECT_NE(logged.find("event=retirer-end identity=pending=0 live=0 "), std::string::npos) << logged;
 }
 
 TEST(DocumentRelease, ReleaseDelayKeepsPendingTicketUntilCloseCompletes) {

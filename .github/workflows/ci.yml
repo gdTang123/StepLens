@@ -86,6 +86,11 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Build identity regression
+        run: |
+          & ./.github/scripts/Assert-SteplensBuildIdentity.Tests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: clang-format
         run: |
           $clangFormat = "C:\Program Files\LLVM\bin\clang-format.exe"
@@ -342,19 +347,8 @@ jobs:
           $idFile = Join-Path (Get-Location) "build\msvc\steplens-build-identity.txt"
           if (-not (Test-Path -LiteralPath $idFile)) { throw "缺少构建身份文件 $idFile" }
           $idText = Get-Content -LiteralPath $idFile -Raw
-          if ($idText -notmatch "(?m)^sha=([0-9a-f]{40})$") { throw "构建身份缺 sha: $idText" }
-          $cmakeSha = $Matches[1]
-          if ($idText -notmatch "(?m)^tree=([0-9a-f]{40})$") { throw "构建身份缺 tree: $idText" }
-          $cmakeTree = $Matches[1]
-          Write-Host "ci_identity checkout_head=$sha checkout_tree=$tree cmake_sha=$cmakeSha cmake_tree=$cmakeTree parent_count=$($parents.Count) parents=$($parents -join ' ') github_sha=$env:GITHUB_SHA"
-          if ($cmakeSha -ne $sha) { throw "CMake 编译 SHA $cmakeSha 与当前 checkout $sha 不一致（过期重配/未重配）" }
-          if ($cmakeTree -ne $tree) { throw "CMake 编译 tree $cmakeTree 与当前 checkout tree $tree 不一致" }
-          if ($parents.Count -ge 2) {
-            $second = (git rev-parse "HEAD^2").Trim()
-            $secondTree = (git rev-parse "HEAD^2^{tree}").Trim()
-            Write-Host "ci_identity synthetic_merge=1 second_parent=$second second_parent_tree=$secondTree trees_equal=$($tree -eq $secondTree)"
-            if ($tree -ne $secondTree) { throw "合成 merge 树 $tree 与第二父（受审 HEAD）树 $secondTree 不同，不能把本次身份写成受审提交" }
-          }
+          . ./.github/scripts/Assert-SteplensBuildIdentity.ps1
+          Assert-SteplensBuildIdentity -IdentityText $idText -CheckoutSha $sha -CheckoutTree $tree -Parents $parents -ResolveSecondParentWithGit
           $lifeFiles = @(Get-ChildItem -LiteralPath $lifeDir -Filter "lifecycle-$sha-*.log" -File)
           if ($lifeFiles.Count -lt 3) { throw "本轮 offscreen 生命周期日志不足 3 份（SHA $sha）" }
           foreach ($lifeFile in $lifeFiles) {
@@ -404,19 +398,8 @@ jobs:
           $idFile = Join-Path (Get-Location) "build\msvc\steplens-build-identity.txt"
           if (-not (Test-Path -LiteralPath $idFile)) { throw "缺少构建身份文件 $idFile" }
           $idText = Get-Content -LiteralPath $idFile -Raw
-          if ($idText -notmatch "(?m)^sha=([0-9a-f]{40})$") { throw "构建身份缺 sha: $idText" }
-          $cmakeSha = $Matches[1]
-          if ($idText -notmatch "(?m)^tree=([0-9a-f]{40})$") { throw "构建身份缺 tree: $idText" }
-          $cmakeTree = $Matches[1]
-          Write-Host "ci_identity checkout_head=$sha checkout_tree=$tree cmake_sha=$cmakeSha cmake_tree=$cmakeTree parent_count=$($parents.Count) parents=$($parents -join ' ') github_sha=$env:GITHUB_SHA"
-          if ($cmakeSha -ne $sha) { throw "CMake 编译 SHA $cmakeSha 与当前 checkout $sha 不一致（过期重配/未重配）" }
-          if ($cmakeTree -ne $tree) { throw "CMake 编译 tree $cmakeTree 与当前 checkout tree $tree 不一致" }
-          if ($parents.Count -ge 2) {
-            $second = (git rev-parse "HEAD^2").Trim()
-            $secondTree = (git rev-parse "HEAD^2^{tree}").Trim()
-            Write-Host "ci_identity synthetic_merge=1 second_parent=$second second_parent_tree=$secondTree trees_equal=$($tree -eq $secondTree)"
-            if ($tree -ne $secondTree) { throw "合成 merge 树 $tree 与第二父（受审 HEAD）树 $secondTree 不同，不能把本次身份写成受审提交" }
-          }
+          . ./.github/scripts/Assert-SteplensBuildIdentity.ps1
+          Assert-SteplensBuildIdentity -IdentityText $idText -CheckoutSha $sha -CheckoutTree $tree -Parents $parents -ResolveSecondParentWithGit
           $lifeFiles = @(Get-ChildItem -LiteralPath $lifeDir -Filter "lifecycle-$sha-*.log" -File)
           if ($lifeFiles.Count -lt 3) { throw "本轮 Viewer/tree 生命周期日志不足 3 份（SHA $sha）" }
           foreach ($lifeFile in $lifeFiles) {

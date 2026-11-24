@@ -103,6 +103,8 @@ int main(int argc, char* argv[]) {
                                  steplens::model::documentsPendingRelease());
     }
     // 窗口已经拆完。若 Close 还在后台跑，不能再往下拆 QApplication 和 OCCT 静态对象。
+    // pending>0 仍走快退，不声称 Close 已完成。pending==0 只说明闸门上没有未完成退役票；
+    // 其后的静态 ~Retirer 仍接收尾投递，并等到已构造模型 Close 完。
     if (steplens::model::documentsPendingRelease() > 0) {
         steplens::lifecycleTrace("main-quick-exit-pending",
                                  "pending=" + std::to_string(steplens::model::documentsPendingRelease()), 0);
