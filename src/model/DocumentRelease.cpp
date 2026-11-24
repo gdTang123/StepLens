@@ -285,10 +285,12 @@ private:
             DocumentModel* batch = nullptr;
             {
                 std::unique_lock lock(m_mutex);
-                m_condition.wait(lock, [this] {
-                    return m_head != nullptr || (m_stopping && m_live.load(std::memory_order_acquire) == 0);
-                });
-                if (!m_head && m_stopping && m_live.load(std::memory_order_acquire) == 0) {
+                m_condition.wait(lock, [this] { return m_head != nullptr || m_stopping; });
+                // 停机后不再 Close。~Retirer 已经走在 main 返回之后；队列里的模型若在这里
+                // finish，Windows 子进程会停在 retirer-stop（pending/live/inflight 仍为 1），
+                // 父进程 WaitForSingleObject 得到 WAIT_TIMEOUT。pending>0 的生产路径在此之前
+                // 已经 TerminateProcess / quick_exit。
+                if (m_stopping) {
                     return;
                 }
                 batch = m_head;
@@ -319,7 +321,7 @@ private:
 
 namespace {
 // 先建立 mutex、locApp 和 LogState，再构造 Retirer。静态析构按已完成构造的反序执行，
-// 因而 Retirer stop/drain/join 先于 mutex/App/LogState 拆除。正常 return 且 live/pending 已归零时，
+// 因而 Retirer stop/join 先于 mutex/App/LogState 拆除。正常 return 且 live/pending 已归零时，
 // Retirer 只回收空闲线程，不应再 Close；pending>0 时 main.cpp 用 quick_exit/TerminateProcess 跳过
 // 静态析构。若外部存在 companion，它也只是 locApp 的寿命上界；本段不依赖它代替 ASan。
 // 真实 MainWindow 成员/子树析构顺序由 STEPLENS_LIFECYCLE_LOG 取证；QObject
