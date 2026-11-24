@@ -82,14 +82,12 @@
 
 #if defined(_WIN32) && !STEPLENS_USE_WNT_WINDOW
 // Qt 的头在包含 windows.h 时会定义 NOGDI 和 NOUSER，wingdi.h / winuser.h 里的函数被整段跳过。
-// 包含守卫让后面再包含 windows.h 不会展开，所以按 SDK 原型补上要用的函数。
+// GetModuleHandleA / GetProcAddress 在 libloaderapi.h，不在这段守卫里，不能再声明一遍。
 extern "C" {
 __declspec(dllimport) HDC __stdcall wglGetCurrentDC(void);
 __declspec(dllimport) HWND __stdcall WindowFromDC(HDC);
 __declspec(dllimport) void* __stdcall wglGetCurrentContext(void);
 __declspec(dllimport) void* __stdcall wglGetProcAddress(const char* name);
-__declspec(dllimport) void* __stdcall GetModuleHandleA(const char* name);
-__declspec(dllimport) void* __stdcall GetProcAddress(void* module, const char* name);
 __declspec(dllimport) unsigned long __stdcall GetCurrentProcessId(void);
 }
 #endif
@@ -125,8 +123,8 @@ void traceGlInit(const QOpenGLWidget& widget, const char* site) {
     void* useProgram = nullptr;
     void* bindBuffer = nullptr;
     void* enableFn = nullptr;
-    if (void* opengl = GetModuleHandleA("opengl32.dll")) {
-        viewportExport = GetProcAddress(opengl, "glViewport");
+    if (HMODULE opengl = GetModuleHandleA("opengl32.dll")) {
+        viewportExport = reinterpret_cast<void*>(GetProcAddress(opengl, "glViewport"));
         if (wglCurrent) {
             using GetStringFn = const unsigned char*(__stdcall*)(unsigned int);
             auto getString = reinterpret_cast<GetStringFn>(GetProcAddress(opengl, "glGetString"));
@@ -161,7 +159,14 @@ void traceGlInit(const QOpenGLWidget& widget, const char* site) {
 #endif
     const QByteArray path =
         dir + sep + "gl-init-" + QByteArray::number(static_cast<qulonglong>(pid)) + ".txt";
-    FILE* file = std::fopen(path.constData(), "ab");
+    FILE* file = nullptr;
+#if defined(_MSC_VER)
+    if (fopen_s(&file, path.constData(), "ab") != 0) {
+        file = nullptr;
+    }
+#else
+    file = std::fopen(path.constData(), "ab");
+#endif
     if (file == nullptr) {
         return;
     }
