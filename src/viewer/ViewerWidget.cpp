@@ -14,6 +14,7 @@
 #include <QMimeData>
 #include <QMouseEvent>
 #include <QOpenGLContext>
+#include <QOpenGLFunctions>
 #include <QPaintEvent>
 #include <QResizeEvent>
 #include <QShowEvent>
@@ -211,6 +212,93 @@ void traceGlInit(const QOpenGLWidget& widget, const char* site) {
                  viewportExport, wglCurrent ? "wglGetProcAddress" : "not-queried", useBuf,
                  wglCurrent ? "wglGetProcAddress" : "not-queried", bindBuf,
                  wglCurrent ? "wglGetProcAddress" : "not-queried", enableBuf);
+    std::fflush(file);
+    std::fclose(file);
+}
+
+// CI 软件后端取证，不是能力门。仅 STEPLENS_GL_INIT_TRACE 为目录时追加 gl-backend-<pid>.txt。
+// 调用点只有 initializeGL：Qt 保证此时 context 已 current。不 makeCurrent，不改绘制流程。
+// 版本和渲染器走当前 context 的 functions()；software 模块只用 HMODULE 观察，缺失不判失败。
+void traceQtSoftwareBackend() {
+    const QByteArray spec = qgetenv("STEPLENS_GL_INIT_TRACE");
+    if (spec.isEmpty() || spec == "0" || (!spec.contains('/') && !spec.contains('\\'))) {
+        return;
+    }
+    QByteArray dir = spec;
+    while (dir.endsWith('/') || dir.endsWith('\\')) {
+        dir.chop(1);
+    }
+    const char sep = dir.contains('\\') ? '\\' : '/';
+#if defined(_WIN32)
+    const unsigned long pid = GetCurrentProcessId();
+#else
+    const unsigned long pid = static_cast<unsigned long>(::getpid());
+#endif
+    const QOpenGLContext* context = QOpenGLContext::currentContext();
+    QByteArray actualVersion = "no-current";
+    QByteArray actualProfile = "no-current";
+    QByteArray actualRenderable = "no-current";
+    QByteArray versionText = "no-current";
+    QByteArray rendererText = "no-current";
+    int valid = 0;
+    if (context != nullptr) {
+        valid = context->isValid() ? 1 : 0;
+        const QSurfaceFormat actual = context->format();
+        actualVersion =
+            QByteArray::number(actual.majorVersion()) + '.' + QByteArray::number(actual.minorVersion());
+        actualProfile = QByteArray::number(static_cast<int>(actual.profile()));
+        actualRenderable = QByteArray::number(static_cast<int>(actual.renderableType()));
+        versionText = "no-functions";
+        rendererText = "no-functions";
+        if (QOpenGLFunctions* functions = context->functions()) {
+            const auto* version = functions->glGetString(GL_VERSION);
+            const auto* renderer = functions->glGetString(GL_RENDERER);
+            versionText = version != nullptr ? reinterpret_cast<const char*>(version) : "null";
+            rendererText = renderer != nullptr ? reinterpret_cast<const char*>(renderer) : "null";
+        }
+    }
+    QByteArray moduleName = "opengl32sw.dll";
+    const QByteArray overrideName = qgetenv("QT_OPENGL_DLL");
+    if (!overrideName.isEmpty()) {
+        moduleName = overrideName;
+    }
+    int moduleLoaded = 0;
+    QByteArray modulePath = "not-loaded";
+#if defined(_WIN32)
+    const HMODULE softwareModule = GetModuleHandleA(moduleName.constData());
+    if (softwareModule != nullptr) {
+        moduleLoaded = 1;
+        wchar_t pathBuffer[MAX_PATH] = {};
+        const DWORD pathLength = GetModuleFileNameW(softwareModule, pathBuffer, MAX_PATH);
+        if (pathLength > 0 && pathLength < MAX_PATH) {
+            modulePath = QString::fromWCharArray(pathBuffer, static_cast<int>(pathLength)).toUtf8();
+        } else {
+            modulePath = "loaded-path-unavailable";
+        }
+    }
+#else
+    modulePath = "not-windows";
+#endif
+    const QByteArray path =
+        dir + sep + "gl-backend-" + QByteArray::number(static_cast<qulonglong>(pid)) + ".txt";
+    FILE* file = nullptr;
+#if defined(_MSC_VER)
+    if (fopen_s(&file, path.constData(), "ab") != 0) {
+        file = nullptr;
+    }
+#else
+    file = std::fopen(path.constData(), "ab");
+#endif
+    if (file == nullptr) {
+        return;
+    }
+    std::fprintf(file,
+                 "route=QOpenGLContext::format+functions site=initializeGL pid=%lu qt_ctx=%s valid=%d "
+                 "actual=%s actual_profile=%s actual_renderable=%s gl_version=%s gl_renderer=%s "
+                 "software_module=%s software_loaded=%d software_path=%s\n",
+                 pid, context != nullptr ? "present" : "none", valid, actualVersion.constData(),
+                 actualProfile.constData(), actualRenderable.constData(), versionText.constData(),
+                 rendererText.constData(), moduleName.constData(), moduleLoaded, modulePath.constData());
     std::fflush(file);
     std::fclose(file);
 }
@@ -1108,6 +1196,9 @@ void ViewerWidget::releaseGl() {
 }
 
 void ViewerWidget::initializeGL() {
+#if !STEPLENS_USE_WNT_WINDOW
+    traceQtSoftwareBackend();
+#endif
     struct ExitTrace {
         const QOpenGLWidget* widget;
         ~ExitTrace() {

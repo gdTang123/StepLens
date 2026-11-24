@@ -60,7 +60,13 @@ int main(int argc, char* argv[]) {
 
 #if defined(_WIN32)
     // OCCT 不走 ANGLE。必须在 QApplication 之前。
-    QApplication::setAttribute(Qt::AA_UseDesktopOpenGL);
+    // Qt 6.12 requestedRenderer 先看 AA_UseDesktopOpenGL，命中即 DesktopGl，不再读 QT_OPENGL。
+    // 只有精确等于 software 时不设该属性，让官方路径选 SoftwareRasterizer。
+    // 未设置、desktop、angle 以及其它值仍强制桌面。
+    const QByteArray qtOpengl = qgetenv("QT_OPENGL");
+    if (qtOpengl != "software") {
+        QApplication::setAttribute(Qt::AA_UseDesktopOpenGL);
+    }
     // 每监视器 V2。Qt 6 的入口也会设；这里提前设上，125% 和 150% 按系统缩放，不取整到 100% 或 200%。
     // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 的值是 (HANDLE)-4。
     if (HMODULE user32 = GetModuleHandleW(L"user32.dll")) {

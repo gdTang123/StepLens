@@ -325,8 +325,77 @@ jobs:
           path: dist/StepLens-0.1.0-windows-x64.zip
           retention-days: 7
 
+      - name: Prepare Qt software OpenGL
+        id: software-gl
+        if: steps.product-build.outcome == 'success' && !cancelled()
+        run: |
+          # unit 或 offscreen 失败不能跳过。取消不启动。不用 continue-on-error。
+          # 每次重新下载并核对官方 SHA。先删本轮 exe 旁的 DLL，已存在不等于已部署。
+          $ErrorActionPreference = "Stop"
+          $log = Join-Path (Get-Location) "build\msvc\gl-software-prepare.log"
+          New-Item -ItemType Directory -Force -Path (Split-Path -Parent $log) | Out-Null
+          Set-Content -LiteralPath $log -Value "result=started" -Encoding utf8NoBOM
+          function Add-PrepareLog([string]$line) {
+            Add-Content -LiteralPath $log -Value $line -Encoding utf8NoBOM
+            Write-Host $line
+          }
+          $stamp = Join-Path (Get-Location) "build\msvc\this-build-succeeded.txt"
+          if (-not (Test-Path -LiteralPath $stamp)) {
+            Add-PrepareLog "result=fail reason=missing-build-stamp"
+            throw "本次构建未成功，拒绝准备软件库或使用已有的 StepLens.exe"
+          }
+          $exe = Join-Path (Get-Location) "build\msvc\RelWithDebInfo\StepLens.exe"
+          if (-not (Test-Path -LiteralPath $exe)) {
+            Add-PrepareLog "result=fail reason=missing-exe"
+            throw "未找到 $exe"
+          }
+          $swDest = Join-Path (Split-Path -Parent $exe) "opengl32sw.dll"
+          if (Test-Path -LiteralPath $swDest) {
+            Remove-Item -LiteralPath $swDest -Force
+            Add-PrepareLog "removed-existing=$swDest"
+          }
+          $swUrl = "https://download.qt.io/development_releases/prebuilt/llvmpipe/windows/opengl32sw-64-mesa_11_2_2-signed_sha256.7z"
+          $swSha = "c61f801c1760aa24b02c7a8354323cddf368b86f8f5c34b50b3b224f7d728afd"
+          $swArchive = Join-Path $env:RUNNER_TEMP "opengl32sw-64-mesa_11_2_2-signed_sha256.7z"
+          if (Test-Path -LiteralPath $swArchive) { Remove-Item -LiteralPath $swArchive -Force }
+          Add-PrepareLog "download=$swUrl"
+          Invoke-WebRequest -UseBasicParsing -Uri $swUrl -OutFile $swArchive
+          $swActual = (Get-FileHash -LiteralPath $swArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+          Add-PrepareLog "archive_sha256=$swActual"
+          if ($swActual -ne $swSha) {
+            Add-PrepareLog "result=fail reason=sha256"
+            throw "opengl32sw 归档 SHA256 不符: $swActual"
+          }
+          $swExtract = Join-Path $env:RUNNER_TEMP "opengl32sw-extract"
+          if (Test-Path -LiteralPath $swExtract) { Remove-Item -LiteralPath $swExtract -Recurse -Force }
+          New-Item -ItemType Directory -Force -Path $swExtract | Out-Null
+          & 7z x $swArchive "-o$swExtract" -y
+          if ($LASTEXITCODE -ne 0) {
+            Add-PrepareLog "result=fail reason=extract exit=$LASTEXITCODE"
+            throw "解压 opengl32sw 失败: $LASTEXITCODE"
+          }
+          $swDll = Get-ChildItem -LiteralPath $swExtract -Recurse -Filter "opengl32sw.dll" -File | Select-Object -First 1
+          if (-not $swDll) {
+            Add-PrepareLog "result=fail reason=archive-missing-dll"
+            throw "归档中没有 opengl32sw.dll"
+          }
+          Copy-Item -LiteralPath $swDll.FullName -Destination $swDest -Force
+          $copied = Get-FileHash -LiteralPath $swDest -Algorithm SHA256
+          $sourceHash = Get-FileHash -LiteralPath $swDll.FullName -Algorithm SHA256
+          if ($copied.Hash -ne $sourceHash.Hash) {
+            if (Test-Path -LiteralPath $swDest) { Remove-Item -LiteralPath $swDest -Force }
+            Add-PrepareLog "result=fail reason=copy-hash"
+            throw "复制后的 opengl32sw.dll 与解压文件不一致"
+          }
+          Add-PrepareLog "result=ok"
+          Add-PrepareLog "dll=$swDest"
+          Add-PrepareLog "dll_sha256=$($copied.Hash.ToLowerInvariant())"
+          "dll=$swDest" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8NoBOM
+
       # 冒烟读的是 build 目录里的 StepLens.exe，不依赖上面的 zip。PR 上打包被跳过时这里仍然跑。
+      # success() 保持 unit 失败时不跑 offscreen。准备失败或构建失败也不能启动。
       - name: Smoke the empty window offscreen
+        if: steps.product-build.outcome == 'success' && steps.software-gl.outcome == 'success' && success()
         run: |
           # G1-5：离屏平台没有可判定的 GPU 帧缓冲。这里只确认进程还活着。
           # 100%/150% DPI、resize、逐帧不是单色，见 docs/bench/t09-gpu-smoke-checklist.md。
@@ -337,6 +406,14 @@ jobs:
           $env:PATH = "$vcpkgBin;$(Join-Path $env:QTDIR 'bin');$env:PATH"
           $exe = Join-Path (Get-Location) "build\msvc\RelWithDebInfo\StepLens.exe"
           if (-not (Test-Path -LiteralPath $exe)) { throw "未找到 $exe" }
+          $swDest = "${{ steps.software-gl.outputs.dll }}"
+          if ([string]::IsNullOrWhiteSpace($swDest) -or -not (Test-Path -LiteralPath $swDest)) {
+            throw "本次 software DLL 未准备好: $swDest"
+          }
+          # 仅本 step。offscreen 启动和 ctest 子进程继承；不写 GITHUB_ENV。
+          $env:QT_OPENGL = "software"
+          Write-Host "QT_OPENGL=$env:QT_OPENGL"
+          Write-Host "software_dll=$swDest"
           $proc = Start-Process -FilePath $exe -PassThru -WindowStyle Hidden
           Start-Sleep -Seconds 5
           if ($proc.HasExited) {
@@ -388,10 +465,10 @@ jobs:
           if ($normalText -notmatch "event=main-normal-return" -or $normalText -notmatch "event=retirer-end") { throw "正常 return 缺少 retirer-end" }
 
 
-      # 构建成功才跑。success()||failure() 让前置 unit 失败后仍采证；取消的作业不跑。
+      # 构建成功且本轮 software 准备成功才跑。success()||failure() 让前置 unit 失败后仍采证；取消不跑。
       # 不使用 continue-on-error。Viewer 非 0 用原退出码；身份失败在 Viewer 为 0 时仍让本步失败。
       - name: Smoke product shutdown with viewer and tree
-        if: steps.product-build.outcome == 'success' && (success() || failure())
+        if: steps.product-build.outcome == 'success' && steps.software-gl.outcome == 'success' && (success() || failure())
         run: |
           # 非 offscreen 隐藏窗口：三条真实 Viewer/tree 路径，不是像素拾取或帧对比。
           # 每个进程用合成 box.step、硬超时 60 秒和本轮唯一 SHA/nonce 生命周期日志。
@@ -415,12 +492,25 @@ jobs:
           $env:STEPLENS_APP_EXIT_VIEWER = "1"
           # 三路子进程继承这个目录，各自写 logs\gl-init-<pid>.txt，不另造上下文。
           $env:STEPLENS_GL_INIT_TRACE = $lifeDir
+          $swDest = "${{ steps.software-gl.outputs.dll }}"
+          if ([string]::IsNullOrWhiteSpace($swDest) -or -not (Test-Path -LiteralPath $swDest)) {
+            throw "本次 software DLL 未准备好: $swDest"
+          }
+          # 仅本 step。三路 ctest 子进程继承 software；不写 GITHUB_ENV。
+          $env:QT_OPENGL = "software"
+          Write-Host "QT_OPENGL=$env:QT_OPENGL"
+          Write-Host "software_dll=$swDest"
           $ctestLog = Join-Path $env:RUNNER_TEMP "app-exit-viewer.log"
           $regex = "^AppExit\.(ViewerTreeCloseEventWhileBusy|ViewerTreeQuitWhenReadyHeldClose|ViewerTreeNormalReturn)$"
           ctest --test-dir build/msvc -C RelWithDebInfo --no-tests=error --output-on-failure --output-log $ctestLog -R $regex
           $viewerCode = $LASTEXITCODE
           & ./.github/scripts/Record-SteplensLaunchIdentity.ps1 -Exe $exe -OutDir $evidence -Phase after -CheckoutSha $sha -CheckoutTree $tree -IdentityFile $idFile
           $identityAfter = $LASTEXITCODE
+          Get-ChildItem -LiteralPath $lifeDir -Filter "gl-backend-*.txt" -File -ErrorAction SilentlyContinue | ForEach-Object {
+            Write-Host "---- $($_.FullName) ----"
+            Write-Host (Get-Content -LiteralPath $_.FullName -Raw)
+            Write-Host "---- end ----"
+          }
           if ($viewerCode -ne 0) { exit $viewerCode }
           if ($identityBefore -ne 0 -or $identityAfter -ne 0) {
             throw "启动 exe/PDB 符号身份缺证，before=$identityBefore after=$identityAfter"
@@ -471,7 +561,17 @@ jobs:
             build/msvc/**/*.dmp
             build/msvc/**/*.stack.txt
             build/msvc/**/gl-init-*.txt
+            build/msvc/gl-software-prepare.log
             build/msvc/view-crash-identity/**
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Upload Qt software backend evidence
+        if: steps.product-build.outcome == 'success' && (success() || failure())
+        uses: actions/upload-artifact@v4
+        with:
+          name: StepLens-gl-backend
+          path: build/msvc/**/gl-backend-*.txt
           retention-days: 7
           if-no-files-found: ignore
 
