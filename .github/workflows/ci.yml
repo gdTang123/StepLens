@@ -356,6 +356,15 @@ jobs:
             --require-redist
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Upload QA package dependency observation
+        if: steps.qa-package.outcome == 'failure' && !cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: StepLens-qa-package-observe
+          path: build/msvc/package-dependency-observe.txt
+          retention-days: 7
+          if-no-files-found: ignore
+
       - name: Prepare Qt software OpenGL
         id: software-gl
         if: steps.product-build.outcome == 'success' && !cancelled()

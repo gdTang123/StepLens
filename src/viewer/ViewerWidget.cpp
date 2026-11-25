@@ -8,9 +8,12 @@
 #include "viewer/GlCleanup.h"
 #include "viewer/SceneHostBinding.h"
 
+#include <QCoreApplication>
 #include <QDebug>
+#include <QDir>
 #include <QDragEnterEvent>
 #include <QDropEvent>
+#include <QFile>
 #include <QMimeData>
 #include <QMouseEvent>
 #include <QOpenGLContext>
@@ -519,6 +522,10 @@ struct ViewerWidget::State {
     std::unique_ptr<ViewerSceneHost> scene;
     SceneHostBinding binding;
     double angle = 0.0;
+    enum class GlInitObserved { NotExecuted, ReturnedTrue, ReturnedFalse, Threw };
+    GlInitObserved glInitObserved = GlInitObserved::NotExecuted;
+    QString glInitError;
+    int glInitPhase = 0;
     bool paintReady = false;
     bool fboWarned = false;
     bool resourcesAlive = false;
@@ -856,15 +863,90 @@ QImage ViewerWidget::grabView() {
 #endif
 }
 
+#ifndef STEPLENS_GIT_SHA
+#define STEPLENS_GIT_SHA "unknown"
+#endif
+
+void ViewerWidget::writeFrameGuardObserve(bool viewNull, bool viewerNull, bool paintReady,
+                                          bool cameraEvaluated, bool cameraNull) {
+    const QByteArray spec = qgetenv("STEPLENS_DUMP_SHOTS");
+    if (spec.isEmpty()) {
+        return;
+    }
+    QDir dir(QFile::decodeName(spec));
+    if (!dir.mkpath(QStringLiteral("."))) {
+        return;
+    }
+    const QString build = QString::fromUtf8(STEPLENS_GIT_SHA);
+    QString safe;
+    safe.reserve(build.size());
+    for (const QChar ch : build) {
+        const char16_t c = ch.unicode();
+        const bool ok = (c >= u'0' && c <= u'9') || (c >= u'A' && c <= u'Z') || (c >= u'a' && c <= u'z') ||
+                        c == u'.' || c == u'_' || c == u'-';
+        safe.append(ok ? ch : QChar(u'_'));
+    }
+    const qint64 pid = QCoreApplication::applicationPid();
+    const QString path = dir.filePath(QStringLiteral("frame-observe-%1-%2.txt").arg(pid).arg(safe));
+    QString camera = QStringLiteral("未求值");
+    if (cameraEvaluated) {
+        camera = cameraNull ? QStringLiteral("1") : QStringLiteral("0");
+    }
+    QString initText = QStringLiteral("未执行");
+    switch (m_state->glInitObserved) {
+    case State::GlInitObserved::NotExecuted:
+        initText = QStringLiteral("未执行");
+        break;
+    case State::GlInitObserved::ReturnedTrue:
+        initText = QStringLiteral("返回 true");
+        break;
+    case State::GlInitObserved::ReturnedFalse:
+        initText = QStringLiteral("返回 false");
+        break;
+    case State::GlInitObserved::Threw:
+        initText = QStringLiteral("调用抛出");
+        break;
+    }
+    const QString error = m_state->glInitError.isEmpty() ? QStringLiteral("无") : m_state->glInitError;
+    QString body;
+    body += QStringLiteral("pid=%1\n").arg(pid);
+    body += QStringLiteral("build=%1\n").arg(build);
+    body += QStringLiteral("view_null=%1\n").arg(viewNull ? 1 : 0);
+    body += QStringLiteral("viewer_null=%1\n").arg(viewerNull ? 1 : 0);
+    body += QStringLiteral("paint_ready=%1\n").arg(paintReady ? 1 : 0);
+    body += QStringLiteral("camera_null=%1\n").arg(camera);
+    body += QStringLiteral("gl_init=%1\n").arg(initText);
+    body += QStringLiteral("gl_init_phase=%1\n").arg(m_state->glInitPhase);
+    body += QStringLiteral("gl_init_error=%1\n").arg(error);
+    body += QStringLiteral("limit=只记录 initializeGL 里已有的那一次 OpenGl_Context::Init。没有再次调用 "
+                           "Init、makeCurrent、渲染或清除 GL "
+                           "错误。phase 0 且 gl_init 为未执行表示调用还没发生。camera_null "
+                           "为未求值表示原短路没有调用 Camera。\n");
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        return;
+    }
+    file.write(body.toUtf8());
+}
+
 ViewerWidget::ViewDump ViewerWidget::renderOffscreen(int scale, bool withAlpha) {
     ViewDump dump;
     if (scale != 1 && scale != 2 && scale != 4) {
         dump.error = QStringLiteral("分辨率只能是 1 倍、2 倍或 4 倍");
         return dump;
     }
-    if (m_state->view.IsNull() || m_state->viewer.IsNull() || !m_state->paintReady ||
-        m_state->view->Camera().IsNull()) {
+    const bool viewNull = m_state->view.IsNull();
+    const bool viewerNull = m_state->viewer.IsNull();
+    const bool paintReady = m_state->paintReady;
+    bool cameraEvaluated = false;
+    bool cameraNull = false;
+    if (!viewNull && !viewerNull && paintReady) {
+        cameraNull = m_state->view->Camera().IsNull();
+        cameraEvaluated = true;
+    }
+    if (viewNull || viewerNull || !paintReady || cameraNull) {
         dump.error = QStringLiteral("当前视图还不能离屏导出");
+        writeFrameGuardObserve(viewNull, viewerNull, paintReady, cameraEvaluated, cameraNull);
         return dump;
     }
     const double ratio = static_cast<double>(devicePixelRatioF());
@@ -1215,10 +1297,16 @@ void ViewerWidget::initializeGL() {
         }
         bindContextCleanup();
         Handle(OpenGl_Context) gl = new OpenGl_Context();
-        if (!gl->Init(true)) {
+        m_state->glInitPhase = 1;
+        const auto initCode = gl->Init(true);
+        m_state->glInitPhase = 2;
+        if (!initCode) {
+            m_state->glInitObserved = State::GlInitObserved::ReturnedFalse;
+            m_state->glInitError = QStringLiteral("OpenGl_Context::Init 返回 false");
             qWarning("StepLens: OpenGl_Context::Init failed; 3D smoke stays blank");
             return;
         }
+        m_state->glInitObserved = State::GlInitObserved::ReturnedTrue;
         const int pixelWidth = std::max(1, static_cast<int>(std::lround(width() * devicePixelRatioF())));
         const int pixelHeight = std::max(1, static_cast<int>(std::lround(height() * devicePixelRatioF())));
         Handle(Aspect_NeutralWindow) window = new Aspect_NeutralWindow();
@@ -1242,10 +1330,29 @@ void ViewerWidget::initializeGL() {
         m_state->view->SetWindow(window, gl->RenderingContext());
         displayBox();
     } catch (const Standard_Failure& failure) {
-        qWarning("StepLens: NeutralWindow init failed: %s", steplens::occt::failureMessage(failure));
+        const char* message = steplens::occt::failureMessage(failure);
+        if (m_state->glInitPhase == 1) {
+            m_state->glInitObserved = State::GlInitObserved::Threw;
+            m_state->glInitError = QString::fromUtf8(message);
+        } else if (m_state->glInitPhase == 0) {
+            m_state->glInitError = QStringLiteral("未执行；调用前异常：") + QString::fromUtf8(message);
+        }
+        qWarning("StepLens: NeutralWindow init failed: %s", message);
     } catch (const std::exception& ex) {
+        if (m_state->glInitPhase == 1) {
+            m_state->glInitObserved = State::GlInitObserved::Threw;
+            m_state->glInitError = QString::fromUtf8(ex.what());
+        } else if (m_state->glInitPhase == 0) {
+            m_state->glInitError = QStringLiteral("未执行；调用前异常：") + QString::fromUtf8(ex.what());
+        }
         qWarning("StepLens: NeutralWindow init failed: %s", ex.what());
     } catch (...) {
+        if (m_state->glInitPhase == 1) {
+            m_state->glInitObserved = State::GlInitObserved::Threw;
+            m_state->glInitError = QStringLiteral("没有异常消息");
+        } else if (m_state->glInitPhase == 0) {
+            m_state->glInitError = QStringLiteral("未执行；调用前异常没有消息");
+        }
         qWarning("StepLens: NeutralWindow init failed");
     }
 }

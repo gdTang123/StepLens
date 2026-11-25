@@ -346,15 +346,159 @@ def dependents_of(dumpbin: Path, binary: Path) -> list[str] | None:
     return names
 
 
+def observe_log_path(vcpkg_bin: Path) -> Path:
+    return vcpkg_bin.parent.parent.parent / "package-dependency-observe.txt"
+
+
+def write_observe(vcpkg_bin: Path, lines: list[str]) -> None:
+    path = observe_log_path(vcpkg_bin)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+
+
+def system_basis(name: str) -> str:
+    lowered = name.lower()
+    if lowered in SYSTEM_DLLS:
+        return "SYSTEM_DLLS 精确匹配，不查找磁盘，不复制"
+    if lowered.startswith("api-ms-win-") or lowered.startswith("ext-ms-"):
+        return "api-ms-win- 或 ext-ms- 前缀，不查找磁盘，不复制"
+    return "is_system_dll 为真，但没有落到已知规则"
+
+
+def parse_list_identity(stem: str, triplet: str) -> tuple[str, str] | None:
+    suffix = "_" + triplet
+    if not stem.endswith(suffix):
+        return None
+    rest = stem[: -len(suffix)]
+    port, sep, version = rest.partition("_")
+    if not sep or not port or not version:
+        return None
+    return port, version
+
+
+def license_paths(triplet_dir: Path, port: str) -> str:
+    share = triplet_dir / "share" / port
+    if not share.is_dir():
+        return "安装树无 share 目录，许可路径未找到"
+    found: list[str] = []
+    for name in ("copyright", "LICENSE", "LICENSE.txt", "COPYING"):
+        candidate = share / name
+        if candidate.is_file():
+            found.append(str(candidate))
+    for candidate in sorted(share.glob("vcpkg.spdx.json")):
+        if candidate.is_file():
+            found.append(str(candidate))
+    if not found:
+        return "安装树未找到许可文件"
+    return ";".join(found)
+
+
+def attribute_z_lines(vcpkg_bin: Path, seen: bool) -> list[str]:
+    seen_text = "true" if seen else "false"
+    info = vcpkg_bin.parent.parent / "vcpkg" / "info"
+    triplet = vcpkg_bin.parent.name
+    triplet_dir = vcpkg_bin.parent
+    if not info.is_dir():
+        return [
+            "kind=z.dll-manifest | seen_in_scan="
+            + seen_text
+            + " | port= | version= | list= | license= | basis=安装清单目录不存在："
+            + str(info)
+            + "，未归属"
+        ]
+    lines: list[str] = []
+    target = "z.dll"
+    for list_file in sorted(info.glob("*.list")):
+        try:
+            content = list_file.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            lines.append(
+                "kind=z.dll-manifest | seen_in_scan="
+                + seen_text
+                + " | port= | version= | list="
+                + str(list_file)
+                + " | license= | basis=清单读取失败："
+                + str(exc)
+            )
+            continue
+        hit = False
+        for raw in content.splitlines():
+            normalized = raw.strip().replace("\\", "/")
+            if normalized and Path(normalized).name.lower() == target:
+                hit = True
+                break
+        if not hit:
+            continue
+        identity = parse_list_identity(list_file.stem, triplet)
+        if identity is None:
+            lines.append(
+                "kind=z.dll-manifest | seen_in_scan="
+                + seen_text
+                + " | port=未能解析 | version=未能解析 | list="
+                + str(list_file)
+                + " | license=未按端口查找 | basis=清单路径末段是 z.dll，文件名不是 {port}_{version}_"
+                + triplet
+                + ".list"
+            )
+            continue
+        port, version = identity
+        lines.append(
+            "kind=z.dll-manifest | seen_in_scan="
+            + seen_text
+            + " | port="
+            + port
+            + " | version="
+            + version
+            + " | list="
+            + str(list_file)
+            + " | license="
+            + license_paths(triplet_dir, port)
+            + " | basis=本次 vcpkg info 清单的路径末段是 z.dll"
+        )
+    if not lines:
+        lines.append(
+            "kind=z.dll-manifest | seen_in_scan="
+            + seen_text
+            + " | port= | version= | list= | license= | basis=本次 info 清单没有路径末段等于 z.dll，未归属"
+        )
+    return lines
+
+
+def finish_observe(
+    vcpkg_bin: Path,
+    entries: list[str],
+    missing: list[str],
+    refused: list[str],
+    dumpbin_failed: list[Path],
+    scan: str,
+) -> None:
+    seen_z = any(part == "dll=z.dll" for line in entries for part in line.split(" | "))
+    header = [
+        "result=fail",
+        "scan=" + scan,
+        "missing_names=" + ",".join(sorted(set(missing))),
+        "refused_names=" + ",".join(sorted(set(refused))),
+        "dumpbin_failed=" + ",".join(str(path) for path in dumpbin_failed),
+    ]
+    body = header + entries + attribute_z_lines(vcpkg_bin, seen_z)
+    try:
+        write_observe(vcpkg_bin, body)
+    except OSError as exc:
+        print(f"依赖观察日志没有写成：{exc}", file=sys.stderr)
+
+
 def collect_dependencies(app_dir: Path, vcpkg_bin: Path, dumpbin: Path) -> set[str] | None:
     if not vcpkg_bin.is_dir():
         print(f"vcpkg bin 不存在：{vcpkg_bin}", file=sys.stderr)
+        finish_observe(vcpkg_bin, [], [], [], [], "not-started")
         return None
     queue = [path for path in app_dir.rglob("*") if path.suffix.lower() in {".exe", ".dll"}]
     seen: set[Path] = set()
     needed_vc: set[str] = set()
     missing: list[str] = []
     refused: list[str] = []
+    dumpbin_failed: list[Path] = []
+    entries: list[str] = []
     while queue:
         binary = queue.pop()
         resolved = binary.resolve()
@@ -363,27 +507,68 @@ def collect_dependencies(app_dir: Path, vcpkg_bin: Path, dumpbin: Path) -> set[s
         seen.add(resolved)
         names = dependents_of(dumpbin, binary)
         if names is None:
-            return None
+            dumpbin_failed.append(resolved)
+            entries.append(
+                "kind=dumpbin-failed | dll= | importer="
+                + str(resolved)
+                + " | resolved= | resolved_exists= | basis=dumpbin /dependents 失败，已继续扫描其余已入队文件"
+            )
+            continue
+        importer = str(resolved)
         for name in names:
             if is_system_dll(name):
+                entries.append(
+                    "kind=system-not-copied | dll="
+                    + name
+                    + " | importer="
+                    + importer
+                    + " | resolved=未在磁盘解析 | resolved_exists=not-checked | basis="
+                    + system_basis(name)
+                )
                 continue
             if is_vc_runtime(name):
                 needed_vc.add(name)
+                entries.append(
+                    "kind=vc-runtime | dll="
+                    + name
+                    + " | importer="
+                    + importer
+                    + " | resolved=未在 vcpkg bin 解析 | resolved_exists=not-checked | basis=VC 运行库前缀，本步不复制，留给 Redist"
+                )
                 continue
             destination = app_dir / name
             if destination.is_file():
                 queue.append(destination)
                 continue
             source = vcpkg_bin / name
-            if not source.is_file():
+            exists = source.is_file()
+            if not exists:
                 missing.append(name)
+                entries.append(
+                    "kind=missing | dll="
+                    + name
+                    + " | importer="
+                    + importer
+                    + " | resolved="
+                    + str(source)
+                    + " | resolved_exists=false | basis=不是系统名单、不是 API set 前缀、不是 VC 运行库前缀；vcpkg bin 无此文件"
+                )
                 continue
             if not license_ready(name):
                 refused.append(name)
+                entries.append(
+                    "kind=refused | dll="
+                    + name
+                    + " | importer="
+                    + importer
+                    + " | resolved="
+                    + str(source)
+                    + " | resolved_exists=true | basis=vcpkg bin 有此文件，LICENSED_PREFIXES 不匹配文件名，不复制"
+                )
                 continue
             shutil.copy2(source, destination)
             queue.append(destination)
-    if missing or refused:
+    if missing or refused or dumpbin_failed:
         if missing:
             print("这些依赖不在 vcpkg bin，也不是系统 DLL，已停止：" + ", ".join(sorted(set(missing))), file=sys.stderr)
         if refused:
@@ -391,6 +576,7 @@ def collect_dependencies(app_dir: Path, vcpkg_bin: Path, dumpbin: Path) -> set[s
                 "这些 DLL 没有对应的许可证材料，不复制：" + ", ".join(sorted(set(refused))),
                 file=sys.stderr,
             )
+        finish_observe(vcpkg_bin, entries, missing, refused, dumpbin_failed, "finished")
         return None
     return needed_vc
 

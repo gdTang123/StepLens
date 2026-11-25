@@ -32,6 +32,8 @@ target_link_libraries(steplens_viewer PRIVATE
     steplens::measure
     steplens::occt_vis
     "${OPENGL_gl_LIBRARY}")
+target_compile_definitions(steplens_viewer PRIVATE
+    "STEPLENS_GIT_SHA=\"${STEPLENS_GIT_SHA}\"")
 if(STEPLENS_USE_WNT_WINDOW)
     target_compile_definitions(steplens_viewer PUBLIC STEPLENS_USE_WNT_WINDOW=1)
 endif()

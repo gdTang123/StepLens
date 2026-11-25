@@ -130,6 +130,9 @@ private:
     void releaseGl();
 #endif
 
+    void writeFrameGuardObserve(bool viewNull, bool viewerNull, bool paintReady, bool cameraEvaluated,
+                                bool cameraNull);
+
     struct State;
     std::unique_ptr<State> m_state;
     viewer::ClickGesture m_clickGesture;
