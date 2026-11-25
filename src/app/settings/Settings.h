@@ -38,6 +38,11 @@ public:
     [[nodiscard]] MemorySettings memory() const;
     [[nodiscard]] QStringList recentFiles() const;
     [[nodiscard]] bool addRecentFile(const QString& path);
+    [[nodiscard]] bool removeRecentFile(const QString& path);
+    [[nodiscard]] bool associationChosen() const;
+    [[nodiscard]] bool setAssociationChosen(bool on);
+    [[nodiscard]] QStringList savedAssociations() const;
+    [[nodiscard]] bool setSavedAssociations(const QStringList& values);
     [[nodiscard]] QString fileName() const;
     [[nodiscard]] QSettings::Format format() const;
     static Settings& instance();

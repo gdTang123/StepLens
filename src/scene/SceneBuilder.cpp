@@ -5,8 +5,13 @@
 #include "occtsupport/occt_compat.h"
 
 #include <AIS_ConnectedInteractive.hxx>
+#include <BRep_Tool.hxx>
 #include <Standard_Failure.hxx>
+#include <StdSelect_BRepOwner.hxx>
+#include <TopoDS.hxx>
+#include <gp_Trsf.hxx>
 
+#include <cmath>
 #include <exception>
 #include <format>
 #include <limits>
@@ -16,6 +21,44 @@ namespace steplens::scene {
 namespace {
 
 constexpr int kWholeSelection = 0;
+constexpr int kVertexSelection = 1;
+constexpr int kEdgeSelection = 2;
+constexpr int kFaceSelection = 4;
+
+void setDistanceSelection(const opencascade::handle<AIS_InteractiveContext>& context,
+                          const opencascade::handle<AIS_InteractiveObject>& object, bool enabled) {
+    if (context.IsNull() || object.IsNull()) {
+        return;
+    }
+    if (enabled) {
+        context->Deactivate(object, kWholeSelection);
+        context->Activate(object, kVertexSelection, false);
+        context->Activate(object, kEdgeSelection, false);
+        context->Activate(object, kFaceSelection, false);
+        return;
+    }
+    context->Deactivate(object, kVertexSelection);
+    context->Deactivate(object, kEdgeSelection);
+    context->Deactivate(object, kFaceSelection);
+    context->Activate(object, kWholeSelection, false);
+}
+
+void setEdgeFaceSelection(const opencascade::handle<AIS_InteractiveContext>& context,
+                          const opencascade::handle<AIS_InteractiveObject>& object, bool enabled) {
+    if (context.IsNull() || object.IsNull()) {
+        return;
+    }
+    if (enabled) {
+        context->Deactivate(object, kWholeSelection);
+        context->Deactivate(object, kVertexSelection);
+        context->Activate(object, kEdgeSelection, false);
+        context->Activate(object, kFaceSelection, false);
+        return;
+    }
+    context->Deactivate(object, kEdgeSelection);
+    context->Deactivate(object, kFaceSelection);
+    context->Activate(object, kWholeSelection, false);
+}
 
 int clampCount(std::size_t count) {
     constexpr auto kMax = static_cast<std::size_t>(std::numeric_limits<int>::max());
@@ -68,8 +111,12 @@ void SceneBuilder::reset(std::shared_ptr<const model::DocumentModel> model) {
     m_overrides.clear();
     m_protos.clear();
     auto previous = std::move(m_model);
+    const bool same = previous && model && previous.get() == model.get();
     m_model = std::move(model);
-    model::retireDocument(std::move(previous));
+    if (same)
+        model::handoffDocument(std::move(previous));
+    else
+        model::retireDocument(std::move(previous));
     if (m_model) {
         m_protos.assign(m_model->prototypes().size(), {});
         m_seen.assign(m_model->prototypes().size(), 0);
@@ -140,6 +187,26 @@ void SceneBuilder::pump() {
     finishIfReady();
 }
 
+void SceneBuilder::setDisplayMode(PrototypePrs::Mode mode) {
+    m_mode = mode;
+    if (m_ctx.IsNull() || !m_model) {
+        return;
+    }
+    for (model::NodeId id = 0; id < m_model->nodeCount(); ++id) {
+        for (const auto& object : m_map.objectsOf(id)) {
+            if (object.IsNull() || !m_ctx->IsDisplayed(object)) {
+                continue;
+            }
+            m_ctx->SetDisplayMode(object, static_cast<int>(mode), false);
+            if (m_vertexPicking) {
+                setDistanceSelection(m_ctx, object, true);
+            } else if (m_anglePicking) {
+                setEdgeFaceSelection(m_ctx, object, true);
+            }
+        }
+    }
+}
+
 void SceneBuilder::setNodeVisible(model::NodeId id, bool visible) {
     if (!m_model || id >= m_model->nodeCount()) {
         return;
@@ -155,6 +222,128 @@ void SceneBuilder::highlightNode(model::NodeId id) {
     selectTree(id);
 }
 
+void SceneBuilder::setVertexPicking(bool enabled) {
+    m_vertexPicking = enabled;
+    if (enabled) {
+        m_anglePicking = false;
+    }
+    if (m_ctx.IsNull() || !m_model) {
+        return;
+    }
+    for (model::NodeId id = 0; id < m_model->nodeCount(); ++id) {
+        for (const auto& object : m_map.objectsOf(id)) {
+            if (object.IsNull() || !m_ctx->IsDisplayed(object)) {
+                continue;
+            }
+            setDistanceSelection(m_ctx, object, enabled);
+        }
+    }
+    m_ctx->ClearSelected(false);
+}
+
+void SceneBuilder::setAnglePicking(bool enabled) {
+    m_anglePicking = enabled;
+    if (enabled) {
+        m_vertexPicking = false;
+    }
+    if (m_ctx.IsNull() || !m_model) {
+        return;
+    }
+    for (model::NodeId id = 0; id < m_model->nodeCount(); ++id) {
+        for (const auto& object : m_map.objectsOf(id)) {
+            if (object.IsNull() || !m_ctx->IsDisplayed(object)) {
+                continue;
+            }
+            setEdgeFaceSelection(m_ctx, object, enabled);
+        }
+    }
+    m_ctx->ClearSelected(false);
+}
+
+std::optional<gp_Pnt> SceneBuilder::pickedVertex() const {
+    if (m_ctx.IsNull()) {
+        return std::nullopt;
+    }
+    for (m_ctx->InitSelected(); m_ctx->MoreSelected(); m_ctx->NextSelected()) {
+        const opencascade::handle<StdSelect_BRepOwner> owner =
+            opencascade::handle<StdSelect_BRepOwner>::DownCast(m_ctx->SelectedOwner());
+        if (owner.IsNull() || owner->Shape().IsNull() || owner->Shape().ShapeType() != TopAbs_VERTEX) {
+            continue;
+        }
+        const gp_Pnt local = BRep_Tool::Pnt(TopoDS::Vertex(owner->Shape()));
+        gp_Trsf trsf = owner->Location().Transformation();
+        if (trsf.Form() == gp_Identity) {
+            const opencascade::handle<AIS_InteractiveObject> object = m_ctx->SelectedInteractive();
+            if (!object.IsNull()) {
+                trsf = object->Transformation();
+            }
+        }
+        const gp_Pnt world = local.Transformed(trsf);
+        if (!std::isfinite(world.X()) || !std::isfinite(world.Y()) || !std::isfinite(world.Z())) {
+            continue;
+        }
+        return world;
+    }
+    return std::nullopt;
+}
+
+std::optional<SceneBuilder::PickedElement> SceneBuilder::pickedElement() const {
+    if (m_ctx.IsNull()) {
+        return std::nullopt;
+    }
+    std::optional<PickedElement> vertex;
+    std::optional<PickedElement> edge;
+    std::optional<PickedElement> face;
+    for (m_ctx->InitSelected(); m_ctx->MoreSelected(); m_ctx->NextSelected()) {
+        const opencascade::handle<StdSelect_BRepOwner> owner =
+            opencascade::handle<StdSelect_BRepOwner>::DownCast(m_ctx->SelectedOwner());
+        if (owner.IsNull() || owner->Shape().IsNull()) {
+            continue;
+        }
+        const TopAbs_ShapeEnum type = owner->Shape().ShapeType();
+        if (type != TopAbs_VERTEX && type != TopAbs_EDGE && type != TopAbs_FACE) {
+            continue;
+        }
+        PickedElement item;
+        item.shape = owner->Shape();
+        item.transform = owner->Location().Transformation();
+        if (item.transform.Form() == gp_Identity) {
+            const opencascade::handle<AIS_InteractiveObject> object = m_ctx->SelectedInteractive();
+            if (!object.IsNull()) {
+                item.transform = object->Transformation();
+            }
+        }
+        if (type == TopAbs_VERTEX) {
+            vertex = std::move(item);
+        } else if (type == TopAbs_EDGE) {
+            edge = std::move(item);
+        } else {
+            face = std::move(item);
+        }
+    }
+    if (vertex) {
+        return vertex;
+    }
+    if (edge) {
+        return edge;
+    }
+    return face;
+}
+
+std::optional<model::NodeId> SceneBuilder::selectedNode() {
+    if (m_ctx.IsNull()) {
+        return std::nullopt;
+    }
+    m_ctx->InitSelected();
+    while (m_ctx->MoreSelected()) {
+        if (const auto id = nodeOf(m_ctx->SelectedInteractive())) {
+            return id;
+        }
+        m_ctx->NextSelected();
+    }
+    return std::nullopt;
+}
+
 std::optional<model::NodeId>
 SceneBuilder::nodeOf(const opencascade::handle<AIS_InteractiveObject>& object) const {
     return m_map.nodeOf(object);
@@ -162,6 +351,10 @@ SceneBuilder::nodeOf(const opencascade::handle<AIS_InteractiveObject>& object) c
 
 opencascade::handle<AIS_InteractiveObject> SceneBuilder::objectOf(model::NodeId id) const {
     return m_map.objectOf(id);
+}
+
+std::vector<opencascade::handle<AIS_InteractiveObject>> SceneBuilder::objectsOf(model::NodeId id) const {
+    return m_map.objectsOf(id);
 }
 
 opencascade::handle<PrototypePrs> SceneBuilder::sharedPrototype(model::PrototypeId id) const {
@@ -244,6 +437,11 @@ void SceneBuilder::show(const opencascade::handle<AIS_InteractiveObject>& object
         return;
     }
     m_ctx->Display(object, static_cast<int>(m_mode), kWholeSelection, false);
+    if (m_vertexPicking) {
+        setDistanceSelection(m_ctx, object, true);
+    } else if (m_anglePicking) {
+        setEdgeFaceSelection(m_ctx, object, true);
+    }
 }
 
 void SceneBuilder::erase(const opencascade::handle<AIS_InteractiveObject>& object) {
@@ -257,20 +455,19 @@ void SceneBuilder::erase(const opencascade::handle<AIS_InteractiveObject>& objec
 
 void SceneBuilder::applyVisible(model::NodeId id, bool visible) {
     const model::AssemblyNode& node = m_model->node(id);
-    if (node.prototype != model::kNoPrototype) {
+    if (visible) {
+        m_hidden.erase(id);
+    } else {
+        m_hidden.insert(id);
+    }
+    for (const auto& object : m_map.objectsOf(id)) {
         if (visible) {
-            m_hidden.erase(id);
+            show(object);
         } else {
-            m_hidden.insert(id);
+            erase(object);
         }
-        const auto object = m_map.objectOf(id);
-        if (!object.IsNull()) {
-            if (visible) {
-                show(object);
-            } else {
-                erase(object);
-            }
-        }
+    }
+    if (node.prototype != model::kNoPrototype) {
         return;
     }
     for (const model::NodeId child : node.children) {
@@ -280,11 +477,12 @@ void SceneBuilder::applyVisible(model::NodeId id, bool visible) {
 
 void SceneBuilder::selectTree(model::NodeId id) {
     const model::AssemblyNode& node = m_model->node(id);
-    if (node.prototype != model::kNoPrototype) {
-        const auto object = m_map.objectOf(id);
+    for (const auto& object : m_map.objectsOf(id)) {
         if (!object.IsNull()) {
             m_ctx->AddOrRemoveSelected(object, false);
         }
+    }
+    if (node.prototype != model::kNoPrototype) {
         return;
     }
     for (const model::NodeId child : node.children) {

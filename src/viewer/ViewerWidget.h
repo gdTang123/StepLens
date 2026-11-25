@@ -1,5 +1,8 @@
 #pragma once
 
+#include "model/DocumentModel.h"
+#include "viewer/ClickGesture.h"
+
 #include <QImage>
 #include <QOpenGLWidget>
 #include <QString>
@@ -55,11 +58,34 @@ public:
     void setStandardView(StandardView view);
     void redraw();
     [[nodiscard]] bool showingModel() const;
+    [[nodiscard]] std::shared_ptr<const model::DocumentModel> document() const;
     [[nodiscard]] SceneHost& sceneHost();
     [[nodiscard]] QImage grabView();
+    // scale 只能是 1、2、4。按视口像素的倍数离屏重绘，不放大已有图像。
+    // withAlpha 为真时要求背景 alpha。失败时 error 非空，不返回替代图。
+    struct ViewDump {
+        QImage image;
+        QString error;
+    };
+    [[nodiscard]] ViewDump renderOffscreen(int scale, bool withAlpha);
+    void highlightNode(model::NodeId id);
+    void setNodeVisible(model::NodeId id, bool visible);
+    void setPartDisplayMode(int mode);
+    void beginPointDistance();
+    void cancelPointDistance();
+    void beginAngle();
+    void cancelAngle();
+    void clearDistanceMeasurements();
+    [[nodiscard]] bool pointDistanceActive() const;
+    [[nodiscard]] bool angleActive() const;
 
 signals:
     void filesDropped(const QStringList& paths);
+    void nodeSelected(steplens::model::NodeId id);
+    void partContextMenu(bool hasNode, steplens::model::NodeId id, QPoint globalPos);
+    void pointDistanceChanged(bool active);
+    void angleChanged(bool active);
+    void measureMessage(const QString& text);
 
 protected:
     void mousePressEvent(QMouseEvent* event) override;
@@ -75,6 +101,7 @@ protected:
 #else
     void initializeGL() override;
     void paintGL() override;
+    void paintEvent(QPaintEvent* event) override;
 #endif
 
 private:
@@ -89,6 +116,12 @@ private:
     void drawScene();
     void noteRedrawRequest(bool again);
     void showTriedron();
+    void acceptPointClick();
+    void acceptAngleClick();
+    void commitPointDistance(double x0, double y0, double z0, double x1, double y1, double z1);
+    void showDistanceMark(double millimeters, double ax, double ay, double az, double bx, double by,
+                          double bz);
+    void discardDistanceGraphics();
 #if STEPLENS_USE_WNT_WINDOW
     void bindWntWindow();
 #else
@@ -97,8 +130,12 @@ private:
     void releaseGl();
 #endif
 
+    void writeFrameGuardObserve(bool viewNull, bool viewerNull, bool paintReady, bool cameraEvaluated,
+                                bool cameraNull);
+
     struct State;
     std::unique_ptr<State> m_state;
+    viewer::ClickGesture m_clickGesture;
 };
 
 } // namespace steplens

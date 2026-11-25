@@ -1,5 +1,7 @@
 #include "core/OcctLoadContract.h"
 
+#include "core/LifecycleTrace.h"
+
 #include <atomic>
 #include <stdexcept>
 
@@ -19,6 +21,11 @@ void initializeInterfaceStaticOnMainThread() {
 
 std::mutex& xcafDocumentMutex() {
     static std::mutex mutex;
+    static struct MutexDtorTrace {
+        ~MutexDtorTrace() {
+            lifecycleTrace("xcaf-mutex-dtor");
+        }
+    } trace;
     return mutex;
 }
 

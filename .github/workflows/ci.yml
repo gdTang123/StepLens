@@ -22,6 +22,15 @@ on:
       - '**.md'
       - '**/*.md'
   workflow_dispatch:
+    inputs:
+      mode:
+        description: default 跑现有 CI。只有精确值 redist-probe 才做只读采件，不编译产品。
+        required: false
+        default: default
+        type: choice
+        options:
+          - default
+          - redist-probe
 
 permissions:
   contents: read
@@ -37,6 +46,7 @@ jobs:
   # Linux 托管 runner 比 Windows 便宜。只编 core，不下载 Qt、不编 OCCT。
   core:
     name: core-tests-tsan
+    if: github.event_name != 'workflow_dispatch' || github.event.inputs.mode != 'redist-probe'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -72,6 +82,7 @@ jobs:
 
   windows:
     name: windows-build
+    if: github.event_name != 'workflow_dispatch' || github.event.inputs.mode != 'redist-probe'
     runs-on: windows-2022
     timeout-minutes: 240
     env:
@@ -85,6 +96,11 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Build identity regression
+        run: |
+          & ./.github/scripts/Assert-SteplensBuildIdentity.Tests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: clang-format
         run: |
@@ -203,18 +219,38 @@ jobs:
           & $ninja --version
           Add-Content -Path $env:GITHUB_PATH -Encoding utf8NoBOM -Value $dir
 
-      - name: Configure, build, test
+      # 配置和编译与 unit 分开。unit 失败不能跳过后面的 Viewer 采证，构建失败也不能拿旧 exe。
+      # 不用 continue-on-error：unit 这一步自己失败，作业就保持红色，后面的成功步骤不能把它改绿。
+      - name: Configure and build
+        id: product-build
         run: |
           Write-Host "VCPKG_ROOT=$env:VCPKG_ROOT"
           Write-Host "QTDIR=$env:QTDIR"
           cmake --version
-          cmd /c "cmake --workflow --preset ci > build-msvc.log 2>&1"
+          $stamp = Join-Path (Get-Location) "build\msvc\this-build-succeeded.txt"
+          if (Test-Path -LiteralPath $stamp) { Remove-Item -LiteralPath $stamp -Force }
+          cmd /c "cmake --preset msvc > build-msvc-configure.log 2>&1"
+          $configureCode = $LASTEXITCODE
+          Get-Content -LiteralPath build-msvc-configure.log
+          if ($configureCode -ne 0) { exit $configureCode }
+          cmd /c "cmake --build --preset release > build-msvc.log 2>&1"
           $buildCode = $LASTEXITCODE
           Get-Content -LiteralPath build-msvc.log
           if ($buildCode -ne 0) { exit $buildCode }
+          pwsh -File scripts/check_build_log.ps1 -Log build-msvc-configure.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           pwsh -File scripts/check_build_log.ps1 -Log build-msvc.log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           pwsh -File scripts/verify_occt_link.ps1 -BuildDir build/msvc -Report build/msvc/occt-link-report.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $sha = (git rev-parse HEAD).Trim()
+          New-Item -ItemType Directory -Force -Path (Split-Path -Parent $stamp) | Out-Null
+          Set-Content -LiteralPath $stamp -Value "sha=$sha`n" -Encoding utf8NoBOM
+
+      - name: Unit tests
+        id: unit-tests
+        run: |
+          ctest --preset unit
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       # 契约腿是 ASan，不能代表产品分配器。这条是 RelWithDebInfo、无 sanitizer。
@@ -288,6 +324,7 @@ jobs:
           python scripts/package.py `
             --prefix "$pwd\dist-stage" `
             --qt-dir "$env:QTDIR" `
+            --vcpkg-bin "$pwd\build\msvc\vcpkg_installed\x64-windows\bin" `
             --output "$pwd\dist\StepLens-0.1.0-windows-x64.zip"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -299,8 +336,119 @@ jobs:
           path: dist/StepLens-0.1.0-windows-x64.zip
           retention-days: 7
 
+      # 非发布 QA 包。qa/ PR 不能代替本次构建成功门；unit 失败不跳过，取消不跑。
+      - name: QA package verification
+        id: qa-package
+        if: github.event_name == 'pull_request' && startsWith(github.head_ref, 'qa/') && steps.product-build.outcome == 'success' && !cancelled()
+        env:
+          QA_PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          $stamp = Join-Path (Get-Location) "build\msvc\this-build-succeeded.txt"
+          if (-not (Test-Path -LiteralPath $stamp)) { throw "本次构建未成功，拒绝使用已有产物做 QA 打包" }
+          $sha = (git rev-parse HEAD).Trim()
+          $tree = (git rev-parse "HEAD^{tree}").Trim()
+          if ($sha -notmatch '^[0-9a-f]{40}$' -or $tree -notmatch '^[0-9a-f]{40}$') {
+            throw "checkout SHA/tree 不是 40 位十六进制"
+          }
+          if ($env:QA_PR_HEAD -notmatch '^[0-9a-f]{40}$') {
+            throw "pull_request.head.sha 不是 40 位十六进制，不猜测"
+          }
+          cmake --install build/msvc --config RelWithDebInfo --prefix "$pwd\dist-stage"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          python scripts/package.py `
+            --prefix "$pwd\dist-stage" `
+            --qt-dir "$env:QTDIR" `
+            --vcpkg-bin "$pwd\build\msvc\vcpkg_installed\x64-windows\bin" `
+            --output "$pwd\dist\StepLens-0.1.0-windows-x64.zip" `
+            --checkout-sha $sha `
+            --checkout-tree $tree `
+            --pr-head-sha $env:QA_PR_HEAD `
+            --require-redist
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload QA package dependency observation
+        if: steps.qa-package.outcome == 'failure' && !cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: StepLens-qa-package-observe
+          path: |
+            build/msvc/package-dependency-observe.txt
+            build/msvc/windows-module-evidence.txt
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Prepare Qt software OpenGL
+        id: software-gl
+        if: steps.product-build.outcome == 'success' && !cancelled()
+        run: |
+          # unit 或 offscreen 失败不能跳过。取消不启动。不用 continue-on-error。
+          # 每次重新下载并核对官方 SHA。先删本轮 exe 旁的 DLL，已存在不等于已部署。
+          $ErrorActionPreference = "Stop"
+          $log = Join-Path (Get-Location) "build\msvc\gl-software-prepare.log"
+          New-Item -ItemType Directory -Force -Path (Split-Path -Parent $log) | Out-Null
+          Set-Content -LiteralPath $log -Value "result=started" -Encoding utf8NoBOM
+          function Add-PrepareLog([string]$line) {
+            Add-Content -LiteralPath $log -Value $line -Encoding utf8NoBOM
+            Write-Host $line
+          }
+          $stamp = Join-Path (Get-Location) "build\msvc\this-build-succeeded.txt"
+          if (-not (Test-Path -LiteralPath $stamp)) {
+            Add-PrepareLog "result=fail reason=missing-build-stamp"
+            throw "本次构建未成功，拒绝准备软件库或使用已有的 StepLens.exe"
+          }
+          $exe = Join-Path (Get-Location) "build\msvc\RelWithDebInfo\StepLens.exe"
+          if (-not (Test-Path -LiteralPath $exe)) {
+            Add-PrepareLog "result=fail reason=missing-exe"
+            throw "未找到 $exe"
+          }
+          $swDest = Join-Path (Split-Path -Parent $exe) "opengl32sw.dll"
+          if (Test-Path -LiteralPath $swDest) {
+            Remove-Item -LiteralPath $swDest -Force
+            Add-PrepareLog "removed-existing=$swDest"
+          }
+          $swUrl = "https://download.qt.io/development_releases/prebuilt/llvmpipe/windows/opengl32sw-64-mesa_11_2_2-signed_sha256.7z"
+          $swSha = "c61f801c1760aa24b02c7a8354323cddf368b86f8f5c34b50b3b224f7d728afd"
+          $swArchive = Join-Path $env:RUNNER_TEMP "opengl32sw-64-mesa_11_2_2-signed_sha256.7z"
+          if (Test-Path -LiteralPath $swArchive) { Remove-Item -LiteralPath $swArchive -Force }
+          Add-PrepareLog "download=$swUrl"
+          Invoke-WebRequest -UseBasicParsing -Uri $swUrl -OutFile $swArchive
+          $swActual = (Get-FileHash -LiteralPath $swArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+          Add-PrepareLog "archive_sha256=$swActual"
+          if ($swActual -ne $swSha) {
+            Add-PrepareLog "result=fail reason=sha256"
+            throw "opengl32sw 归档 SHA256 不符: $swActual"
+          }
+          $swExtract = Join-Path $env:RUNNER_TEMP "opengl32sw-extract"
+          if (Test-Path -LiteralPath $swExtract) { Remove-Item -LiteralPath $swExtract -Recurse -Force }
+          New-Item -ItemType Directory -Force -Path $swExtract | Out-Null
+          & 7z x $swArchive "-o$swExtract" -y
+          if ($LASTEXITCODE -ne 0) {
+            Add-PrepareLog "result=fail reason=extract exit=$LASTEXITCODE"
+            throw "解压 opengl32sw 失败: $LASTEXITCODE"
+          }
+          $swDll = Get-ChildItem -LiteralPath $swExtract -Recurse -Filter "opengl32sw.dll" -File | Select-Object -First 1
+          if (-not $swDll) {
+            Add-PrepareLog "result=fail reason=archive-missing-dll"
+            throw "归档中没有 opengl32sw.dll"
+          }
+          Copy-Item -LiteralPath $swDll.FullName -Destination $swDest -Force
+          $copied = Get-FileHash -LiteralPath $swDest -Algorithm SHA256
+          $sourceHash = Get-FileHash -LiteralPath $swDll.FullName -Algorithm SHA256
+          if ($copied.Hash -ne $sourceHash.Hash) {
+            if (Test-Path -LiteralPath $swDest) { Remove-Item -LiteralPath $swDest -Force }
+            Add-PrepareLog "result=fail reason=copy-hash"
+            throw "复制后的 opengl32sw.dll 与解压文件不一致"
+          }
+          Add-PrepareLog "result=ok"
+          Add-PrepareLog "dll=$swDest"
+          Add-PrepareLog "dll_sha256=$($copied.Hash.ToLowerInvariant())"
+          "dll=$swDest" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8NoBOM
+
       # 冒烟读的是 build 目录里的 StepLens.exe，不依赖上面的 zip。PR 上打包被跳过时这里仍然跑。
+      # success() 保持 unit 失败时不跑 offscreen。准备失败或构建失败也不能启动。
       - name: Smoke the empty window offscreen
+        if: steps.product-build.outcome == 'success' && steps.software-gl.outcome == 'success' && success()
         run: |
           # G1-5：离屏平台没有可判定的 GPU 帧缓冲。这里只确认进程还活着。
           # 100%/150% DPI、resize、逐帧不是单色，见 docs/bench/t09-gpu-smoke-checklist.md。
@@ -311,6 +459,14 @@ jobs:
           $env:PATH = "$vcpkgBin;$(Join-Path $env:QTDIR 'bin');$env:PATH"
           $exe = Join-Path (Get-Location) "build\msvc\RelWithDebInfo\StepLens.exe"
           if (-not (Test-Path -LiteralPath $exe)) { throw "未找到 $exe" }
+          $swDest = "${{ steps.software-gl.outputs.dll }}"
+          if ([string]::IsNullOrWhiteSpace($swDest) -or -not (Test-Path -LiteralPath $swDest)) {
+            throw "本次 software DLL 未准备好: $swDest"
+          }
+          # 仅本 step。offscreen 启动和 ctest 子进程继承；不写 GITHUB_ENV。
+          $env:QT_OPENGL = "software"
+          Write-Host "QT_OPENGL=$env:QT_OPENGL"
+          Write-Host "software_dll=$swDest"
           $proc = Start-Process -FilePath $exe -PassThru -WindowStyle Hidden
           Start-Sleep -Seconds 5
           if ($proc.HasExited) {
@@ -318,18 +474,222 @@ jobs:
           }
           Stop-Process -Id $proc.Id -Force
           Write-Host "空窗口在 offscreen 平台下保持运行"
-          # 模型已经显示后再关窗口。合成 STEP，不依赖 STEPLENS_SAMPLES。
-          # 进程应正常退出：后台 Close 还没完时直接结束，不和 OCCT 静态析构抢。
+          # 模型已经显示后再关窗口。每个进程使用合成 box.step，最多运行 60 秒。
+          # 生命周期日志由测试创建唯一 SHA/nonce 文件；HeldClose 由 Close gate 因果控制。
           $env:STEPLENS_APP_EXIT = "1"
-          ctest --preset unit -C RelWithDebInfo -R "^AppExit\.CloseAfterDisplayedModelExitsCleanly$" --no-tests=error --output-on-failure
-          if ($LASTEXITCODE -ne 0) { throw "显示模型后关闭窗口没有干净退出，退出码 $LASTEXITCODE" }
-          $closeLog = Join-Path (Split-Path -Parent $exe) "logs\steplens.log"
-          if (-not (Test-Path -LiteralPath $closeLog)) { throw "未找到退出日志 $closeLog" }
-          Write-Host "---- steplens.log ----"
-          Get-Content -LiteralPath $closeLog
-          Write-Host "---- end steplens.log ----"
-          $hit = Select-String -LiteralPath $closeLog -Pattern "退出时文档仍在后台关闭，结束进程" -SimpleMatch
-          if (-not $hit) { throw "日志里没有后台关闭后结束进程这一行" }
+          $lifeDir = Join-Path (Split-Path -Parent $exe) "logs"
+          New-Item -ItemType Directory -Force -Path $lifeDir | Out-Null
+          # AppExit 带 label app_exit，已被 unit 预设排除。这里必须用 --test-dir 发现测试。
+          # SKIPPED 不能算成功。offscreen 只覆盖 NullSceneHost 分支。
+          $ctestLog = Join-Path $env:RUNNER_TEMP "app-exit-offscreen.log"
+          $regex = "^AppExit\.(CloseEventWhileBusyQuickExits|CloseAfterDisplayedModelExitsCleanly|NormalReturnAfterCloseCompletes)$"
+          ctest --test-dir build/msvc -C RelWithDebInfo --no-tests=error --output-on-failure --output-log $ctestLog -R $regex
+          if ($LASTEXITCODE -ne 0) { throw "产品退出三路径（offscreen）失败，退出码 $LASTEXITCODE" }
+          $ctestText = Get-Content -LiteralPath $ctestLog -Raw
+          if ($ctestText -match '\[  SKIPPED \]|No tests were found|Not Run') {
+            throw "offscreen AppExit 被跳过或未发现，不能算成功"
+          }
+          # 产品身份是编译期 STEPLENS_GIT_SHA（cmake 写入的构建身份），不是环境注入，也不写死 63e/7f4。
+          # 必须实际比较：cmake 身份 == 当前 checkout；合成 merge 的树 == 第二父（受审 HEAD）树。
+          $sha = (git rev-parse HEAD).Trim()
+          $tree = (git rev-parse "HEAD^{tree}").Trim()
+          $parents = @(& git rev-parse "HEAD^@" 2>$null)
+          $idFile = Join-Path (Get-Location) "build\msvc\steplens-build-identity.txt"
+          if (-not (Test-Path -LiteralPath $idFile)) { throw "缺少构建身份文件 $idFile" }
+          $idText = Get-Content -LiteralPath $idFile -Raw
+          . ./.github/scripts/Assert-SteplensBuildIdentity.ps1
+          Assert-SteplensBuildIdentity -IdentityText $idText -CheckoutSha $sha -CheckoutTree $tree -Parents $parents -ResolveSecondParentWithGit
+          $lifeFiles = @(Get-ChildItem -LiteralPath $lifeDir -Filter "lifecycle-$sha-*.log" -File)
+          if ($lifeFiles.Count -lt 3) { throw "本轮 offscreen 生命周期日志不足 3 份（SHA $sha）" }
+          foreach ($lifeFile in $lifeFiles) {
+            Write-Host "---- $($lifeFile.FullName) ----"
+            $text = Get-Content -LiteralPath $lifeFile.FullName -Raw
+            Write-Host $text
+            Write-Host "---- end ----"
+            if ($text -notmatch "event=lifecycle-open identity=$sha ") { throw "$($lifeFile.Name) 缺少本次 SHA" }
+          }
+          $busy = ($lifeFiles | Where-Object Name -Match "offscreen-close-while-busy").Count
+          $held = ($lifeFiles | Where-Object Name -Match "offscreen-quit-when-ready").Count
+          $normal = ($lifeFiles | Where-Object Name -Match "offscreen-normal-return").Count
+          if ($busy -lt 1 -or $held -lt 1 -or $normal -lt 1) { throw "本轮 offscreen 三条路径日志未齐" }
+          $heldText = Get-Content -LiteralPath ($lifeFiles | Where-Object Name -Match "offscreen-quit-when-ready" | Select-Object -First 1).FullName -Raw
+          if ($heldText -notmatch "event=main-after-window identity=pending=([1-9]\d*) " -or $heldText -notmatch "event=main-quick-exit-pending") { throw "HeldClose 缺少 pending>0 因果回执" }
+          $normalText = Get-Content -LiteralPath ($lifeFiles | Where-Object Name -Match "offscreen-normal-return" | Select-Object -First 1).FullName -Raw
+          if ($normalText -notmatch "event=main-normal-return" -or $normalText -notmatch "event=retirer-end") { throw "正常 return 缺少 retirer-end" }
+
+
+      # 构建成功且本轮 software 准备成功才跑。success()||failure() 让前置 unit 失败后仍采证；取消不跑。
+      # 不使用 continue-on-error。Viewer 非 0 用原退出码；身份失败在 Viewer 为 0 时仍让本步失败。
+      - name: Smoke product shutdown with viewer and tree
+        if: steps.product-build.outcome == 'success' && steps.software-gl.outcome == 'success' && (success() || failure())
+        run: |
+          # 非 offscreen 隐藏窗口：三条真实 Viewer/tree 路径，不是像素拾取或帧对比。
+          # 每个进程用合成 box.step、硬超时 60 秒和本轮唯一 SHA/nonce 生命周期日志。
+          # 不用 --preset unit，否则 app_exit 标签会被排除。
+          $stamp = Join-Path (Get-Location) "build\msvc\this-build-succeeded.txt"
+          if (-not (Test-Path -LiteralPath $stamp)) { throw "本次构建未成功，拒绝采证已有的 StepLens.exe" }
+          $env:QT_PLUGIN_PATH = Join-Path $env:QTDIR "plugins"
+          $vcpkgBin = Join-Path (Get-Location) "build\msvc\vcpkg_installed\x64-windows\bin"
+          $env:PATH = "$vcpkgBin;$(Join-Path $env:QTDIR 'bin');$env:PATH"
+          if (Test-Path Env:QT_QPA_PLATFORM) { Remove-Item Env:QT_QPA_PLATFORM }
+          $exe = Join-Path (Get-Location) "build\msvc\RelWithDebInfo\StepLens.exe"
+          if (-not (Test-Path -LiteralPath $exe)) { throw "未找到 $exe" }
+          $lifeDir = Join-Path (Split-Path -Parent $exe) "logs"
+          New-Item -ItemType Directory -Force -Path $lifeDir | Out-Null
+          $evidence = Join-Path (Get-Location) "build\msvc\view-crash-identity"
+          $sha = (git rev-parse HEAD).Trim()
+          $tree = (git rev-parse "HEAD^{tree}").Trim()
+          $idFile = Join-Path (Get-Location) "build\msvc\steplens-build-identity.txt"
+          & ./.github/scripts/Record-SteplensLaunchIdentity.ps1 -Exe $exe -OutDir $evidence -Phase before -CheckoutSha $sha -CheckoutTree $tree -IdentityFile $idFile
+          $identityBefore = $LASTEXITCODE
+          $env:STEPLENS_APP_EXIT_VIEWER = "1"
+          # 三路子进程继承这个目录，各自写 logs\gl-init-<pid>.txt，不另造上下文。
+          $env:STEPLENS_GL_INIT_TRACE = $lifeDir
+          $swDest = "${{ steps.software-gl.outputs.dll }}"
+          if ([string]::IsNullOrWhiteSpace($swDest) -or -not (Test-Path -LiteralPath $swDest)) {
+            throw "本次 software DLL 未准备好: $swDest"
+          }
+          # 仅本 step。三路 ctest 子进程继承 software；不写 GITHUB_ENV。
+          $env:QT_OPENGL = "software"
+          Write-Host "QT_OPENGL=$env:QT_OPENGL"
+          Write-Host "software_dll=$swDest"
+          $ctestLog = Join-Path $env:RUNNER_TEMP "app-exit-viewer.log"
+          $regex = "^AppExit\.(ViewerTreeCloseEventWhileBusy|ViewerTreeQuitWhenReadyHeldClose|ViewerTreeNormalReturn)$"
+          ctest --test-dir build/msvc -C RelWithDebInfo --no-tests=error --output-on-failure --output-log $ctestLog -R $regex
+          $viewerCode = $LASTEXITCODE
+          & ./.github/scripts/Record-SteplensLaunchIdentity.ps1 -Exe $exe -OutDir $evidence -Phase after -CheckoutSha $sha -CheckoutTree $tree -IdentityFile $idFile
+          $identityAfter = $LASTEXITCODE
+          Get-ChildItem -LiteralPath $lifeDir -Filter "gl-backend-*.txt" -File -ErrorAction SilentlyContinue | ForEach-Object {
+            Write-Host "---- $($_.FullName) ----"
+            Write-Host (Get-Content -LiteralPath $_.FullName -Raw)
+            Write-Host "---- end ----"
+          }
+          if ($viewerCode -ne 0) { exit $viewerCode }
+          if ($identityBefore -ne 0 -or $identityAfter -ne 0) {
+            throw "启动 exe/PDB 符号身份缺证，before=$identityBefore after=$identityAfter"
+          }
+          $ctestText = Get-Content -LiteralPath $ctestLog -Raw
+          if ($ctestText -match '\[  SKIPPED \]|No tests were found|Not Run') {
+            throw "Viewer AppExit 被跳过或未发现，不能算成功"
+          }
+          # 产品身份是编译期 STEPLENS_GIT_SHA（cmake 写入的构建身份），不是环境注入，也不写死 63e/7f4。
+          # 必须实际比较：cmake 身份 == 当前 checkout；合成 merge 的树 == 第二父（受审 HEAD）树。
+          $sha = (git rev-parse HEAD).Trim()
+          $tree = (git rev-parse "HEAD^{tree}").Trim()
+          $parents = @(& git rev-parse "HEAD^@" 2>$null)
+          $idFile = Join-Path (Get-Location) "build\msvc\steplens-build-identity.txt"
+          if (-not (Test-Path -LiteralPath $idFile)) { throw "缺少构建身份文件 $idFile" }
+          $idText = Get-Content -LiteralPath $idFile -Raw
+          . ./.github/scripts/Assert-SteplensBuildIdentity.ps1
+          Assert-SteplensBuildIdentity -IdentityText $idText -CheckoutSha $sha -CheckoutTree $tree -Parents $parents -ResolveSecondParentWithGit
+          $lifeFiles = @(Get-ChildItem -LiteralPath $lifeDir -Filter "lifecycle-$sha-*.log" -File)
+          if ($lifeFiles.Count -lt 3) { throw "本轮 Viewer/tree 生命周期日志不足 3 份（SHA $sha）" }
+          foreach ($lifeFile in $lifeFiles) {
+            Write-Host "---- $($lifeFile.FullName) ----"
+            $text = Get-Content -LiteralPath $lifeFile.FullName -Raw
+            Write-Host $text
+            Write-Host "---- end ----"
+            if ($text -notmatch "event=lifecycle-open identity=$sha ") { throw "$($lifeFile.Name) 缺少本次 SHA" }
+          }
+          $busyFile = $lifeFiles | Where-Object Name -Match "viewer-close-while-busy" | Select-Object -First 1
+          $heldFile = $lifeFiles | Where-Object Name -Match "viewer-held-close" | Select-Object -First 1
+          $normalFile = $lifeFiles | Where-Object Name -Match "viewer-normal" | Select-Object -First 1
+          if (-not $busyFile -or -not $heldFile -or -not $normalFile) { throw "本轮 Viewer/tree 三条路径日志未齐" }
+          $heldText = Get-Content -LiteralPath $heldFile.FullName -Raw
+          if ($heldText -notmatch "event=main-after-window identity=pending=([1-9]\d*) ") { throw "$($heldFile.Name) 缺少 pending>0" }
+          foreach ($required in @("event=mainwindow-destructor-begin", "event=mainwindow-destructor-end", "event=mainwindow-members-begin", "event=mainwindow-members-end", "event=qobject-child-destroyed identity=viewerWidget", "event=qobject-child-destroyed identity=assemblyTreePanel", "event=main-quick-exit-pending")) {
+            if ($heldText -notmatch [regex]::Escape($required)) { throw "$($heldFile.Name) 缺少 $required" }
+          }
+          $busyText = Get-Content -LiteralPath $busyFile.FullName -Raw
+          if ($busyText -notmatch "event=viewer-created" -or $busyText -notmatch "event=mainwindow-closeEvent-busy") { throw "Viewer busy-close 缺少事件" }
+          $normalText = Get-Content -LiteralPath $normalFile.FullName -Raw
+          if ($normalText -notmatch "event=main-normal-return" -or $normalText -notmatch "event=retirer-end") { throw "Viewer 正常 return 缺少 retirer-end" }
+
+      # 真实 Viewer 帧。不设置 offscreen。无图、空图、整幅单色都失败。
+      # 本次构建和 software 准备都成功且未取消才启动。qa/ 不能代替这两道门。
+      - name: QA view framebuffer
+        id: qa-view
+        if: github.event_name == 'pull_request' && startsWith(github.head_ref, 'qa/') && steps.product-build.outcome == 'success' && steps.software-gl.outcome == 'success' && !cancelled()
+        run: |
+          $stamp = Join-Path (Get-Location) "build\msvc\this-build-succeeded.txt"
+          if (-not (Test-Path -LiteralPath $stamp)) { throw "本次构建未成功，拒绝使用已有的 StepLens.exe 做帧验收" }
+          $swDest = "${{ steps.software-gl.outputs.dll }}"
+          if ([string]::IsNullOrWhiteSpace($swDest) -or -not (Test-Path -LiteralPath $swDest)) {
+            throw "本次 software DLL 未准备好: $swDest"
+          }
+          # 仅本 step。帧验收进程继承 software、Qt 插件和 OCCT DLL；不写 GITHUB_ENV。
+          $env:QT_PLUGIN_PATH = Join-Path $env:QTDIR "plugins"
+          $vcpkgBin = Join-Path (Get-Location) "build\msvc\vcpkg_installed\x64-windows\bin"
+          $env:PATH = "$vcpkgBin;$(Join-Path $env:QTDIR 'bin');$env:PATH"
+          $env:QT_OPENGL = "software"
+          Write-Host "QT_OPENGL=$env:QT_OPENGL"
+          Write-Host "software_dll=$swDest"
+          if (Test-Path Env:QT_QPA_PLATFORM) { Remove-Item Env:QT_QPA_PLATFORM }
+          $sha = (git rev-parse HEAD).Trim()
+          $tree = (git rev-parse "HEAD^{tree}").Trim()
+          $bin = Join-Path (Get-Location) "build\msvc\RelWithDebInfo"
+          $dump = Join-Path (Get-Location) "dist\view-shot"
+          & ./.github/scripts/Assert-SteplensViewShot.ps1 `
+            -Exe (Join-Path $bin "StepLens.exe") `
+            -Writer (Join-Path $bin "steplens_write_box_step.exe") `
+            -DumpDir $dump `
+            -IdentityFile (Join-Path (Get-Location) "build\msvc\steplens-build-identity.txt") `
+            -CheckoutSha $sha `
+            -CheckoutTree $tree
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # 成功验收包只在打包和帧都成功后上传。退出码 0 或已有 zip 不是像素通过。
+      - name: Upload QA package verification
+        if: steps.qa-package.outcome == 'success' && steps.qa-view.outcome == 'success' && !cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: StepLens-qa-windows-x64
+          path: |
+            dist/StepLens-0.1.0-windows-x64.zip
+            dist/StepLens-0.1.0-windows-x64.zip.manifest.txt
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Upload QA view framebuffer
+        if: steps.qa-view.outcome == 'success' && !cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: StepLens-qa-view-shot
+          path: dist/view-shot/**
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Upload QA view failure evidence
+        if: steps.qa-view.outcome == 'failure' && !cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: StepLens-qa-view-shot-failure
+          path: dist/view-shot/**
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Upload viewer crash dumps
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: StepLens-viewer-crash
+          path: |
+            build/msvc/**/*.dmp
+            build/msvc/**/*.stack.txt
+            build/msvc/**/gl-init-*.txt
+            build/msvc/gl-software-prepare.log
+            build/msvc/view-crash-identity/**
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Upload Qt software backend evidence
+        if: steps.product-build.outcome == 'success' && (success() || failure())
+        uses: actions/upload-artifact@v4
+        with:
+          name: StepLens-gl-backend
+          path: build/msvc/**/gl-backend-*.txt
+          retention-days: 7
+          if-no-files-found: ignore
 
       - name: clang-tidy changed C++ files
         run: |
@@ -360,3 +720,37 @@ jobs:
             --extra-arg=/w `
             @cpp
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  redist-probe:
+    name: redist-probe
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'redist-probe'
+    runs-on: windows-2022
+    timeout-minutes: 20
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: utf-8
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout probe script
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: MSVC x64 environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Read-only Redist probe
+        run: python scripts/redist_probe.py --output build/redist-probe.txt
+
+      - name: Upload Redist probe text
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: StepLens-redist-probe
+          path: build/redist-probe.txt
+          retention-days: 7
+          if-no-files-found: error

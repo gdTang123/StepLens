@@ -11,6 +11,7 @@
 #include "io/ILoader.h"
 #include "mesh/Tessellator.h"
 #include "model/DocumentModel.h"
+#include "model/DocumentRelease.h"
 #include "occtsupport/OcctBoundary.h"
 
 #include <BRepPrimAPI_MakeBox.hxx>
@@ -54,6 +55,13 @@ namespace {
 int documentCount() {
     std::lock_guard lock(steplens::xcafDocumentMutex());
     return XCAFApp_Application::GetApplication()->NbDocuments();
+}
+
+void expectDocumentsReleased(int before) {
+    // 必须先交还全部 DocumentModel shared_ptr，以及仍指向同一份 XCAF 文档的测试 handle，再等待。
+    // wait 成功只表示 pending==0，仍须断言 documentCount()==before；超时就让测试失败，禁止回退期望值。
+    ASSERT_TRUE(steplens::model::waitForDocumentRelease(std::chrono::seconds(30)));
+    EXPECT_EQ(documentCount(), before);
 }
 
 opencascade::handle<TDocStd_Document> newDocument() {
@@ -297,7 +305,7 @@ TEST(Tessellator, SamePrototypeIsTriangulatedOnce) {
     EXPECT_LE(sink.fraction(), 1.f);
     EXPECT_EQ(sink.phase(), steplens::ProgressPhase::Presenting);
     model.reset();
-    EXPECT_EQ(documentCount(), before);
+    expectDocumentsReleased(before);
 }
 
 TEST(Tessellator, DistinctPrototypesOverlapAndStayExclusive) {
@@ -347,7 +355,7 @@ TEST(Tessellator, DistinctPrototypesOverlapAndStayExclusive) {
     EXPECT_NEAR(sink.fraction(), 1.f, 1.0e-5f);
     EXPECT_EQ(sink.phase(), steplens::ProgressPhase::Presenting);
     model.reset();
-    EXPECT_EQ(documentCount(), before);
+    expectDocumentsReleased(before);
 }
 
 TEST(Tessellator, SchedulesHeavierPrototypesFirstAndSerializesLargeOnes) {
@@ -393,7 +401,7 @@ TEST(Tessellator, SchedulesHeavierPrototypesFirstAndSerializesLargeOnes) {
     EXPECT_TRUE(probe.monotonic);
     EXPECT_TRUE(probe.clamped);
     model.reset();
-    EXPECT_EQ(documentCount(), before);
+    expectDocumentsReleased(before);
 }
 
 TEST(Tessellator, CancelStopsLaterPrototypes) {
@@ -430,7 +438,7 @@ TEST(Tessellator, CancelStopsLaterPrototypes) {
     EXPECT_GE(sink.fraction(), 0.f);
     EXPECT_LE(sink.fraction(), 1.f);
     model.reset();
-    EXPECT_EQ(documentCount(), before);
+    expectDocumentsReleased(before);
 }
 
 TEST(Tessellator, CancelBeforeRunDeliversNothing) {
@@ -459,7 +467,7 @@ TEST(Tessellator, CancelBeforeRunDeliversNothing) {
     EXPECT_GE(sink.fraction(), 0.f);
     EXPECT_LE(sink.fraction(), 1.f);
     model.reset();
-    EXPECT_EQ(documentCount(), before);
+    expectDocumentsReleased(before);
 }
 
 TEST(Tessellator, ColorGroupsBecomeSeparateArrays) {
@@ -506,7 +514,7 @@ TEST(Tessellator, ColorGroupsBecomeSeparateArrays) {
     EXPECT_EQ(colored, 2);
     EXPECT_GT(batches[0].triangleCount, 0u);
     model.reset();
-    EXPECT_EQ(documentCount(), before);
+    expectDocumentsReleased(before);
 }
 
 TEST(Tessellator, SharedFacePrototypesDoNotMeshTogether) {
@@ -565,7 +573,7 @@ TEST(Tessellator, SharedFacePrototypesDoNotMeshTogether) {
     EXPECT_EQ(probe.violations, 0);
     EXPECT_EQ(probe.maxDepth, 1);
     model.reset();
-    EXPECT_EQ(documentCount(), before);
+    expectDocumentsReleased(before);
 }
 
 TEST(Tessellator, GiantPrototypeIsMeshedInFaceChunks) {
@@ -608,7 +616,7 @@ TEST(Tessellator, GiantPrototypeIsMeshedInFaceChunks) {
     EXPECT_GT(batches[0].groups[0].triangles->VertexNumber(), 0);
     EXPECT_TRUE(shapeKeepsSlimMeshNear(model->prototype(0).shape, 0.0, 0.25));
     model.reset();
-    EXPECT_EQ(documentCount(), before);
+    expectDocumentsReleased(before);
 }
 
 TEST(Tessellator, X02InstanceTrianglesStayWithinBudget) {
@@ -650,7 +658,7 @@ TEST(Tessellator, X02InstanceTrianglesStayWithinBudget) {
     EXPECT_GE(sink.fraction(), 0.f);
     EXPECT_LE(sink.fraction(), 1.f);
     model.reset();
-    EXPECT_EQ(documentCount(), before);
+    expectDocumentsReleased(before);
 }
 
 TEST(Tessellator, ManySmallPrototypesDeliverBatchesFromSeveralWorkers) {
@@ -688,5 +696,5 @@ TEST(Tessellator, ManySmallPrototypesDeliverBatchesFromSeveralWorkers) {
     EXPECT_EQ(result.value().prototypesMeshed, static_cast<std::uint32_t>(kBoxes));
     EXPECT_GE(workers.size(), 2u);
     model.reset();
-    EXPECT_EQ(documentCount(), before);
+    expectDocumentsReleased(before);
 }

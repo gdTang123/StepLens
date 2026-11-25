@@ -1,0 +1,49 @@
+这是版本和官方来源记录，不是许可证正文，也不是法律审查结论。
+许可证正文是下面列出的上游文件的逐字副本。仓库根上的 LICENSE 没有改。
+
+Qt 6.12.0（CI 用 aqt 安装 windows desktop 6.12.0 win64_msvc2022_64）
+  许可证文件来自 qtbase 标签 v6.12.0 的 LICENSES/LGPL-3.0-only.txt 与 LICENSES/GPL-3.0-only.txt
+  https://github.com/qt/qtbase/blob/v6.12.0/LICENSES/LGPL-3.0-only.txt
+  https://github.com/qt/qtbase/blob/v6.12.0/LICENSES/GPL-3.0-only.txt
+  LGPL-3.0 正文写明它并入 GPL-3.0 的条款，所以两份一起放。这不表示 StepLens 改用 GPL 发行。
+  源码包：https://download.qt.io/official_releases/qt/6.12/6.12.0/single/qt-everywhere-src-6.12.0.tar.xz
+  本仓库副本：Qt-6.12.0-LGPL-3.0-only.txt、Qt-6.12.0-GPL-3.0-only.txt
+
+Open CASCADE Technology 7.9.3
+  产品清单 vcpkg-configs/occt-7.9.3/vcpkg.json 锁 opencascade 7.9.3#1。
+  该端口 git-tree 是 9a763d6711b422dea8fd72603ef8f89ff2386983（vcpkg 基线 9eec002df1cd109f8f104cd966a763daf9751489 的 versions/o-/opencascade.json）。
+  许可证正文来自上游标签 V7_9_3：
+  https://github.com/Open-Cascade-SAS/OCCT/blob/V7_9_3/LICENSE_LGPL_21.txt
+  https://github.com/Open-Cascade-SAS/OCCT/blob/V7_9_3/OCCT_LGPL_EXCEPTION.txt
+  源码标签：https://github.com/Open-Cascade-SAS/OCCT/releases/tag/V7_9_3
+  端口 portfile.cmake 的 PATCHES 没有平台条件，五个补丁在 Windows 上也会打入。仓库 cmake/vcpkg-ports 里没有另加补丁。
+  端口文件和补丁的副本在 occt-7.9.3-vcpkg-port/。
+  本仓库副本：OCCT-7.9.3-LICENSE_LGPL_21.txt、OCCT-7.9.3-OCCT_LGPL_EXCEPTION.txt
+
+FreeType 2.14.3
+  vcpkg 基线 9eec002df1cd109f8f104cd966a763daf9751489 的 versions/baseline.json 写 freetype baseline 2.14.3、port-version 0。
+  许可证正文来自标签 VER-2-14-3 的 docs/FTL.TXT：
+  https://github.com/freetype/freetype/blob/VER-2-14-3/docs/FTL.TXT
+  端口用 GitLab 标签 VER-2-14-3。
+  产品清单把 opencascade 的 default-features 关掉，只打开 freetype。该特性依赖 freetype 时写了 default-features false（见 occt-7.9.3-vcpkg-port/vcpkg.json）。因此 freetype 端口自己的默认特性 brotli、bzip2、png、zlib 不在这条锁定依赖里。subpixel-rendering 也没有打开。
+  portfile 的 PATCHES 无条件列入 0003-Fix-UWP.patch、brotli-static.patch、bzip2.patch、fix-exports.patch。这些补丁会打进 FreeType，包括 Windows。0003-Fix-UWP.patch 的名字是 UWP，portfile 没有把它限制在 UWP。subpixel-rendering.patch 只在该 feature 打开时打入，当前不打。副本在 freetype-2.14.3-vcpkg-port/。
+  本仓库副本：FreeType-2.14.3-FTL.TXT
+  FreeType 许可证建议的二进制致谢句子里，年份取标签 VER-2-14-3 的 tagger 日期 2026-03-22。正文仍以 FTL.TXT 为准：
+  Portions of this software are copyright © 2026 The FreeType Project (https://freetype.org). All rights reserved.
+
+静态依赖里没有的库
+  oneTBB 不是当前依赖。根 vcpkg.json 和 vcpkg-configs/occt-7.9.3/vcpkg.json 的 dependencies 没有打开 tbb。tbb 只存在于可选 feature。OCCT 端口的 tbb feature 也是可选，default-features 里没有它。因此不放 Apache-2.0 正文。
+  gtest 在清单里，但是测试目标用的。产品可执行文件的 CMake 不链接它，不把它算成绿色版运行库。
+  zlib 1.3.2、bzip2 1.0.8、libpng 1.6.59、brotli 1.2.0 的许可证和端口副本仍在本目录，只因为上一轮按 freetype 端口的默认特性收过。上面已写明产品这条依赖把 freetype 的默认特性关掉了，所以它们不在锁定图里。若以后 dumpbin 真的列出这些 DLL，副本可以对照；这不是已经证明 exe 链接了它们。
+  这些端口的补丁条件：zlib 的 0001-no-version-script-on-ohos.patch、brotli 的 install.patch 与 pkgconfig.patch、bzip2 的 fix-import-export-macros.patch 都写在各自 portfile 的 PATCHES 里，没有 Windows 条件。libpng 的 cmake.patch 同样无条件；apng 补丁只在 feature apng 打开时下载，当前没有这个 feature。
+
+MSVC 2022（v143）
+  仓库不猜测 Visual Studio 补丁号。打包时从实际使用的 dumpbin 路径读取 VC\\Tools\\MSVC\\<版本>，再从同一套 Visual Studio 的 VC\\Redist\\MSVC 读取官方目录。
+  出处：
+    https://learn.microsoft.com/en-us/cpp/windows/determining-which-dlls-to-redistribute?view=msvc-170
+    其中写明：再发行包的主版本必须与工具集相同，次版本相同或更高；2015、2017、2019、2022 的工具集版本号兼容，可以使用更新的再发行文件，不支持使用更旧的。应用本地部署是把这些目录里的库放到 exe 旁边。只能再分发 Redist.txt 或在线 REDIST list 点名的文件，不能再分发调试版。
+    https://learn.microsoft.com/en-us/cpp/windows/redistributing-visual-cpp-files?view=msvc-170
+    其中写明：再分发限于有 Visual Studio 许可的用户，并受微软软件许可条款约束。VS 2022 的 REDIST list 见该页指向的 Distributable code files for Microsoft Visual Studio 2022。应用目录部署是允许的做法，微软同时说明从维护角度不推荐。2015 至 2022 的最新再发行文件二进制兼容。VS 2022 的再发行文件位于 %VCINSTALLDIR%Redist\\MSVC\\v143，单个 DLL 位于 %VCToolsRedistDir%\\[architecture]\\Microsoft.[toolset].[library]。
+  脚本不要求再发行目录的补丁号与工具集补丁号相同。点分版本目录选不旧于工具集的最新一个；只有 v143 这类没有点分版本的官方目录时，使用该目录并记下名字，不把它编成补丁号。
+  没有 Redist.txt、读不到工具集版本、或目录都更旧时失败。不从 System32 复制，也不下载 DLL。
+  在线 REDIST list 的全文没有收进仓库。没有本地 Redist.txt 就不能逐项核对允许的文件名，因此不把材料说成已经齐备。

@@ -21,6 +21,9 @@
 #include "scene/SelectionMap.h"
 
 #include <AIS_InteractiveContext.hxx>
+#include <TopoDS_Shape.hxx>
+#include <gp_Pnt.hxx>
+#include <gp_Trsf.hxx>
 
 #include <chrono>
 #include <cstdint>
@@ -55,11 +58,28 @@ public:
     void pump();
 
     void setNodeVisible(model::NodeId id, bool visible);
+    void setDisplayMode(PrototypePrs::Mode mode);
     void highlightNode(model::NodeId id);
+    [[nodiscard]] std::optional<model::NodeId> selectedNode();
+    // 打开后实例只激活顶点选择。关掉后恢复整体选择。
+    void setVertexPicking(bool enabled);
+    void setAnglePicking(bool enabled);
+    [[nodiscard]] std::optional<gp_Pnt> pickedVertex() const;
+    struct PickedElement {
+        TopoDS_Shape shape;
+        gp_Trsf transform;
+    };
+    // 顶点优先于边，边优先于面，避免同一次点选把点到点改成面。
+    [[nodiscard]] std::optional<PickedElement> pickedElement() const;
+
+    [[nodiscard]] std::shared_ptr<const model::DocumentModel> document() const {
+        return m_model;
+    }
 
     [[nodiscard]] std::optional<model::NodeId>
     nodeOf(const opencascade::handle<AIS_InteractiveObject>& object) const;
     [[nodiscard]] opencascade::handle<AIS_InteractiveObject> objectOf(model::NodeId id) const;
+    [[nodiscard]] std::vector<opencascade::handle<AIS_InteractiveObject>> objectsOf(model::NodeId id) const;
     [[nodiscard]] const SelectionMap& selectionMap() const {
         return m_map;
     }
@@ -126,6 +146,8 @@ private:
     std::chrono::microseconds m_maxPump{0};
     std::size_t m_finished = 0;
     bool m_firstNotified = false;
+    bool m_vertexPicking = false;
+    bool m_anglePicking = false;
     bool m_failed = false;
     std::string m_lastError;
 };

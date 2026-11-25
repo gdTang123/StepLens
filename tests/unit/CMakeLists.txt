@@ -1,5 +1,16 @@
 # 无头契约测试单独成可执行文件，带 occt-contract 标签。完整 MSVC 构建仍把同一份源码编进 steplens_tests。
 
+# 非 MSVC 宿主：给 OcctBoundary.h 的 _WIN32 声明做全局 struct 标签兼容编译。
+# 不是 <eh.h> / MSVC ABI 证明，见 SehTranslatorGlobalTagCheck.cpp 文件头的受控边界。
+if(NOT MSVC AND TARGET steplens_occtboundary)
+    add_library(steplens_seh_translator_global_tag_check OBJECT occt/SehTranslatorGlobalTagCheck.cpp)
+    target_include_directories(steplens_seh_translator_global_tag_check PRIVATE "${CMAKE_SOURCE_DIR}/src")
+    target_compile_definitions(steplens_seh_translator_global_tag_check PRIVATE _WIN32)
+    target_compile_features(steplens_seh_translator_global_tag_check PRIVATE cxx_std_20)
+    steplens_apply_warnings(steplens_seh_translator_global_tag_check)
+    set_target_properties(steplens_seh_translator_global_tag_check PROPERTIES FOLDER "tests")
+endif()
+
 # steplens-bench 的 CLI 合同。可执行文件在 tools/bench，这里只跑它。
 # gtest_discover_tests 由调用方在 include(GoogleTest) 之后执行。
 function(steplens_add_bench_cli_test)
@@ -24,6 +35,16 @@ inline constexpr char kSteplensBenchExe[] = R\"bench($<TARGET_FILE:steplens_benc
 inline constexpr char kSteplensSourceDir[] = R\"bench(${CMAKE_SOURCE_DIR})bench\";
 ")
 endfunction()
+
+# 最小快退子进程与合同/产品测试共用模型库。CORE_ONLY 没有 steplens::model，不能无条件加入。
+if(NOT STEPLENS_CORE_ONLY)
+    add_executable(steplens_release_quick_exit model/ReleaseQuickExitMain.cpp)
+    target_include_directories(steplens_release_quick_exit PRIVATE "${CMAKE_SOURCE_DIR}/src")
+    target_link_libraries(steplens_release_quick_exit PRIVATE steplens::model)
+    steplens_apply_warnings(steplens_release_quick_exit)
+    steplens_apply_exceptions(steplens_release_quick_exit OFF)
+    set_target_properties(steplens_release_quick_exit PROPERTIES FOLDER "tests")
+endif()
 
 if(STEPLENS_OCCT_CONTRACT)
     add_executable(steplens_occt_contract occt/OcctKernelContractTest.cpp)
@@ -66,11 +87,14 @@ if(STEPLENS_OCCT_CONTRACT)
             ENVIRONMENT "ASAN_OPTIONS=halt_on_error=1:detect_leaks=0")
 
     # T06 DocumentModel。和加载器同一个无头作业。OCCT 静态分配仍关掉泄漏检查。
-    add_executable(steplens_model_tests model/DocumentModelTest.cpp)
+    add_executable(steplens_model_tests model/DocumentModelTest.cpp model/DocumentReleaseTest.cpp)
+    add_dependencies(steplens_model_tests steplens_release_quick_exit)
     target_include_directories(steplens_model_tests PRIVATE "${CMAKE_SOURCE_DIR}/src")
     target_link_libraries(steplens_model_tests PRIVATE steplens::model GTest::gtest_main)
     target_compile_definitions(steplens_model_tests PRIVATE
         "STEPLENS_EXPECTED_OCCT=\"${STEPLENS_EXPECTED_OCCT}\"")
+    target_compile_definitions(steplens_model_tests PRIVATE
+        "STEPLENS_RELEASE_QUICK_EXIT_EXE=\"$<TARGET_FILE:steplens_release_quick_exit>\"")
     steplens_apply_warnings(steplens_model_tests)
     steplens_apply_exceptions(steplens_model_tests OFF)
     set_target_properties(steplens_model_tests PROPERTIES FOLDER "tests")
@@ -127,7 +151,9 @@ if(STEPLENS_OCCT_CONTRACT)
     target_include_directories(steplens_pipeline_tests PRIVATE "${CMAKE_SOURCE_DIR}/src")
     target_link_libraries(steplens_pipeline_tests PRIVATE steplens::pipeline GTest::gtest_main)
     target_compile_definitions(steplens_pipeline_tests PRIVATE
-        "STEPLENS_EXPECTED_OCCT=\"${STEPLENS_EXPECTED_OCCT}\"")
+        "STEPLENS_EXPECTED_OCCT=\"${STEPLENS_EXPECTED_OCCT}\""
+        "STEPLENS_GIT_SHA=\"${STEPLENS_GIT_SHA}\""
+        "STEPLENS_BUILD_IDENTITY_FILE=\"${CMAKE_BINARY_DIR}/steplens-build-identity.txt\"")
     steplens_apply_warnings(steplens_pipeline_tests)
     steplens_apply_exceptions(steplens_pipeline_tests OFF)
     set_target_properties(steplens_pipeline_tests PROPERTIES FOLDER "tests")
@@ -137,6 +163,40 @@ if(STEPLENS_OCCT_CONTRACT)
             TIMEOUT 120
             LABELS "unit;occt-contract"
             ENVIRONMENT "ASAN_OPTIONS=halt_on_error=1:detect_leaks=0")
+
+    # QApplication 首入验证。Windows MSVC x64 上核完整 MXCSR/SEH；本机无 MSVC 时由目标 CI 跑。
+    find_package(Qt6 QUIET COMPONENTS Widgets)
+    if(TARGET Qt6::Widgets)
+        add_executable(steplens_gui_first_entry_tests model/DocumentReleaseGuiFirstEntryTest.cpp)
+        target_include_directories(steplens_gui_first_entry_tests PRIVATE "${CMAKE_SOURCE_DIR}/src")
+        target_link_libraries(steplens_gui_first_entry_tests PRIVATE
+            steplens::model
+            Qt6::Widgets
+            GTest::gtest_main)
+        steplens_apply_warnings(steplens_gui_first_entry_tests)
+        steplens_apply_exceptions(steplens_gui_first_entry_tests OFF)
+        set_target_properties(steplens_gui_first_entry_tests PROPERTIES FOLDER "tests")
+        gtest_discover_tests(steplens_gui_first_entry_tests
+            DISCOVERY_MODE PRE_TEST
+            PROPERTIES
+                LABELS "unit;gui-first-entry"
+                ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    endif()
+
+    # QA 测量入口：只建 steplens_measure_tests，链接现有 steplens::measure。
+    # 不把该源码并进 steplens_tests，也不使用 tests/harness/t12-measure。
+    add_executable(steplens_measure_tests measure/MeasureComputeTest.cpp)
+    target_include_directories(steplens_measure_tests PRIVATE "${CMAKE_SOURCE_DIR}/src")
+    target_link_libraries(steplens_measure_tests PRIVATE steplens::measure GTest::gtest_main)
+    steplens_apply_warnings(steplens_measure_tests)
+    steplens_apply_exceptions(steplens_measure_tests OFF)
+    set_target_properties(steplens_measure_tests PROPERTIES FOLDER "tests")
+    gtest_discover_tests(steplens_measure_tests
+        DISCOVERY_MODE PRE_TEST
+        PROPERTIES
+            LABELS "unit;occt-contract"
+            ENVIRONMENT "ASAN_OPTIONS=halt_on_error=1:detect_leaks=0")
+
     return()
 endif()
 
@@ -146,6 +206,7 @@ add_executable(steplens_tests
     core/CancelTest.cpp
     core/LoadCoordinatorTest.cpp
     viewer/GlCleanupTest.cpp
+    viewer/ClickGestureTest.cpp
     viewer/SceneHostBindingTest.cpp
     core/ProgressSinkTest.cpp
     core/ProgressSinkRaceTest.cpp
@@ -157,6 +218,16 @@ target_sources(steplens_tests PRIVATE core/MemoryMonitorTest.cpp)
 target_link_libraries(steplens_tests PRIVATE steplens::core GTest::gtest_main)
 target_include_directories(steplens_tests PRIVATE "${CMAKE_SOURCE_DIR}/src")
 if(NOT STEPLENS_CORE_ONLY)
+    add_executable(steplens_ui_tests
+        ui/AssemblyTreeModelTest.cpp
+        ui/AssemblyTreeReleaseTest.cpp
+        model/DocumentReleaseGuiFirstEntryTest.cpp)
+    target_include_directories(steplens_ui_tests PRIVATE "${CMAKE_SOURCE_DIR}/src")
+    target_link_libraries(steplens_ui_tests PRIVATE steplens::ui steplens::model Qt6::Widgets Qt6::Test GTest::gtest_main)
+    steplens_apply_warnings(steplens_ui_tests)
+    steplens_apply_exceptions(steplens_ui_tests OFF)
+    set_target_properties(steplens_ui_tests PROPERTIES FOLDER "tests")
+
     target_sources(steplens_tests PRIVATE
         app/SettingsTest.cpp
         ${CMAKE_SOURCE_DIR}/src/app/settings/Settings.cpp
@@ -165,6 +236,7 @@ if(NOT STEPLENS_CORE_ONLY)
         occt/OcctBoundaryTest.cpp
         io/CadLoaderTest.cpp
         model/DocumentModelTest.cpp
+        model/DocumentReleaseTest.cpp
         mesh/TessellatorTest.cpp
         mesh/StepHeapReproTest.cpp
         mesh/MemoryReleaseTest.cpp)
@@ -172,7 +244,10 @@ if(NOT STEPLENS_CORE_ONLY)
     # mesh 公开链 TKV3d（FillTriangles），不链 vis，所以 TKOpenGl 仍然进不来。
     target_link_libraries(steplens_tests PRIVATE steplens::occtsupport steplens::mesh)
     target_link_libraries(steplens_tests PRIVATE Qt6::Core)
-    target_compile_definitions(steplens_tests PRIVATE "STEPLENS_EXPECTED_OCCT=\"${STEPLENS_EXPECTED_OCCT}\"")
+    add_dependencies(steplens_tests steplens_release_quick_exit)
+    target_compile_definitions(steplens_tests PRIVATE
+        "STEPLENS_EXPECTED_OCCT=\"${STEPLENS_EXPECTED_OCCT}\""
+        "STEPLENS_RELEASE_QUICK_EXIT_EXE=\"$<TARGET_FILE:steplens_release_quick_exit>\"")
 
     # StatusNotice uses Qt Widgets, so keep it outside steplens_tests, which links only Qt Core.
     add_executable(steplens_status_notice_tests
@@ -206,7 +281,9 @@ if(NOT STEPLENS_CORE_ONLY)
     target_include_directories(steplens_pipeline_tests PRIVATE "${CMAKE_SOURCE_DIR}/src")
     target_link_libraries(steplens_pipeline_tests PRIVATE steplens::pipeline GTest::gtest_main)
     target_compile_definitions(steplens_pipeline_tests PRIVATE
-        "STEPLENS_EXPECTED_OCCT=\"${STEPLENS_EXPECTED_OCCT}\"")
+        "STEPLENS_EXPECTED_OCCT=\"${STEPLENS_EXPECTED_OCCT}\""
+        "STEPLENS_GIT_SHA=\"${STEPLENS_GIT_SHA}\""
+        "STEPLENS_BUILD_IDENTITY_FILE=\"${CMAKE_BINARY_DIR}/steplens-build-identity.txt\"")
     if(TARGET StepLens)
         file(GENERATE
             OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/app_exit/$<CONFIG>/steplens_app_exe.h"
@@ -220,6 +297,13 @@ inline constexpr char kStepLensExe[] = R\"exe($<TARGET_FILE:StepLens>)exe\";
     steplens_apply_warnings(steplens_pipeline_tests)
     steplens_apply_exceptions(steplens_pipeline_tests OFF)
     set_target_properties(steplens_pipeline_tests PROPERTIES FOLDER "tests")
+
+    # 不进 ctest。QA 冒烟用它写出 10×20×30 盒子，避免默认套件多一个 skip。
+    add_executable(steplens_write_box_step pipeline/WriteBoxStepMain.cpp)
+    target_link_libraries(steplens_write_box_step PRIVATE steplens::io)
+    steplens_apply_warnings(steplens_write_box_step)
+    steplens_apply_exceptions(steplens_write_box_step OFF)
+    set_target_properties(steplens_write_box_step PROPERTIES FOLDER "tests")
 endif()
 steplens_apply_warnings(steplens_tests)
 steplens_apply_exceptions(steplens_tests OFF)
@@ -230,6 +314,9 @@ gtest_discover_tests(steplens_tests
     DISCOVERY_MODE PRE_TEST
     PROPERTIES LABELS unit)
 if(NOT STEPLENS_CORE_ONLY)
+    gtest_discover_tests(steplens_ui_tests
+        DISCOVERY_MODE PRE_TEST
+        PROPERTIES LABELS "unit;ui")
     # include(GoogleTest) 在上面。提前调用 gtest_discover_tests 时 MSVC 配置会报未知命令。
     gtest_discover_tests(steplens_status_notice_tests
         DISCOVERY_MODE PRE_TEST
@@ -247,7 +334,15 @@ if(NOT STEPLENS_CORE_ONLY)
             ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1")
     gtest_discover_tests(steplens_pipeline_tests
         DISCOVERY_MODE PRE_TEST
+        TEST_FILTER "-AppExit.*"
         PROPERTIES
             TIMEOUT 120
             LABELS unit)
+    # AppExit 不进默认 unit 预设，避免无环境时 SKIP 被当成成功。由产品冒烟步骤显式拉起。
+    gtest_discover_tests(steplens_pipeline_tests
+        DISCOVERY_MODE PRE_TEST
+        TEST_FILTER "AppExit.*"
+        PROPERTIES
+            TIMEOUT 90
+            LABELS app_exit)
 endif()
