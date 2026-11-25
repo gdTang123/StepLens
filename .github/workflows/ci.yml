@@ -361,7 +361,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: StepLens-qa-package-observe
-          path: build/msvc/package-dependency-observe.txt
+          path: |
+            build/msvc/package-dependency-observe.txt
+            build/msvc/windows-module-evidence.txt
           retention-days: 7
           if-no-files-found: ignore
 

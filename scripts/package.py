@@ -22,6 +22,7 @@ from pathlib import Path
 SYSTEM_DLLS = frozenset(
     {
         "advapi32.dll",
+        "authz.dll",
         "bcrypt.dll",
         "bcryptprimitives.dll",
         "cabinet.dll",
@@ -33,6 +34,7 @@ SYSTEM_DLLS = frozenset(
         "cryptbase.dll",
         "d3d11.dll",
         "d3d12.dll",
+        "d3d9.dll",
         "d3dcompiler_47.dll",
         "dbghelp.dll",
         "dhcpcsvc.dll",
@@ -50,6 +52,7 @@ SYSTEM_DLLS = frozenset(
         "kernel32.dll",
         "kernelbase.dll",
         "mpr.dll",
+        "mscms.dll",
         "msimg32.dll",
         "msvcrt.dll",
         "mswsock.dll",
@@ -77,6 +80,7 @@ SYSTEM_DLLS = frozenset(
         "urlmon.dll",
         "user32.dll",
         "userenv.dll",
+        "uiautomationcore.dll",
         "uxtheme.dll",
         "version.dll",
         "webio.dll",
@@ -157,6 +161,149 @@ def is_vc_runtime(name: str) -> bool:
 def license_ready(name: str) -> bool:
     lowered = name.lower()
     return lowered.startswith(LICENSED_PREFIXES)
+
+
+# 清单唯一归属，且仓库已有同版本许可正文。不按 DLL 文件名猜端口。
+MANIFEST_LICENSE_FILES = {
+    ("zlib", "1.3.2"): "zlib-1.3.2-LICENSE.txt",
+}
+
+# 1809 SDK icuuc.lib 的 20 个无后缀入口。链接承诺，不是运行时亲验。
+ICUUC_SHA256 = "39175459c4837c8cc0f709a637fb6eadb25d696785109c8393559ec876f02703"
+ICUUC_ENTRIES = frozenset(
+    {
+        "ucnv_open",
+        "ucnv_close",
+        "UCNV_FROM_U_CALLBACK_SUBSTITUTE",
+        "UCNV_TO_U_CALLBACK_SUBSTITUTE",
+        "ucnv_reset",
+        "ucnv_getMaxCharSize",
+        "ucnv_getName",
+        "ucnv_getToUCallBack",
+        "ucnv_getFromUCallBack",
+        "ucnv_setToUCallBack",
+        "ucnv_setFromUCallBack",
+        "ucnv_cbToUWriteUChars",
+        "ucnv_toUnicode",
+        "ucnv_cbFromUWriteUChars",
+        "ucnv_toUCountPending",
+        "ucnv_fromUCountPending",
+        "ucnv_getStandardName",
+        "ucnv_getAvailableName",
+        "ucnv_countAvailable",
+        "ucnv_fromUnicode",
+    }
+)
+
+
+def manifest_hits(vcpkg_bin: Path, dll_name: str) -> list[tuple[str, str, str]]:
+    info = vcpkg_bin.parent.parent / "vcpkg" / "info"
+    if not info.is_dir():
+        return []
+    triplet = vcpkg_bin.parent.name
+    triplet_dir = vcpkg_bin.parent
+    target = dll_name.lower()
+    found: list[tuple[str, str, str]] = []
+    for list_file in sorted(info.glob("*.list")):
+        try:
+            content = list_file.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        hit = False
+        for raw in content.splitlines():
+            normalized = raw.strip().replace("\\", "/")
+            if normalized and Path(normalized).name.lower() == target:
+                hit = True
+                break
+        if not hit:
+            continue
+        identity = parse_list_identity(list_file.stem, triplet)
+        if identity is None:
+            found.append(("未能解析", "未能解析", str(list_file)))
+            continue
+        port, version = identity
+        found.append((port, version, license_paths(triplet_dir, port)))
+    return found
+
+
+def manifest_license_ok(vcpkg_bin: Path, dll_name: str) -> bool:
+    hits = manifest_hits(vcpkg_bin, dll_name)
+    if len(hits) != 1:
+        return False
+    port, version, lic = hits[0]
+    repo_name = MANIFEST_LICENSE_FILES.get((port, version))
+    if repo_name is None:
+        return False
+    repo_file = Path(__file__).resolve().parents[1] / "packaging" / "licenses" / repo_name
+    if not repo_file.is_file():
+        return False
+    parts = [Path(part) for part in lic.split(";") if part]
+    if not parts or any("未找到" in part.name or "不存在" in str(part) for part in parts):
+        return False
+    return all(part.is_file() for part in parts)
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def parse_dumpbin_imports(text: str) -> list[tuple[str, str, int]]:
+    rows: list[tuple[str, str, int]] = []
+    delay = 0
+    current = ""
+    for raw in text.splitlines():
+        line = raw.strip()
+        lowered = line.lower()
+        if "delay load imports" in lowered:
+            delay = 1
+            current = ""
+            continue
+        if "following imports" in lowered:
+            delay = 0
+            current = ""
+            continue
+        if line.lower().endswith(".dll") and " " not in line:
+            current = line
+            continue
+        if not current:
+            continue
+        parts = line.split()
+        if len(parts) != 2 or any(ch not in "0123456789abcdefABCDEF" for ch in parts[0]):
+            continue
+        symbol = parts[1]
+        if symbol.startswith(("__", ".")) or not symbol[:1].isalpha():
+            continue
+        if any(not (ch.isalnum() or ch == "_") for ch in symbol):
+            continue
+        rows.append((current, symbol, delay))
+    return rows
+
+
+def icu_rows(rows: list[tuple[str, str, int]]) -> list[tuple[str, str, int]]:
+    return [row for row in rows if "icu" in row[0].lower()]
+
+
+def icuuc_system_basis(sha256: str, rows: list[tuple[str, str, int]]) -> tuple[bool, str]:
+    if sha256 == ICUUC_SHA256:
+        return True, "Qt6Core.dll sha256 等于已登记的发行哈希，精确名 icuuc.dll 按系统 DLL 不复制"
+    selected = icu_rows(rows)
+    dlls = {name.lower() for name, _symbol, _delay in selected}
+    if dlls != {"icuuc.dll"}:
+        return False, "ICU 导入不是仅有 icuuc.dll，不放行"
+    if any(delay != 0 for _name, _symbol, delay in selected):
+        return False, "icuuc.dll 不是 delay 0，不放行"
+    symbols = {symbol for _name, symbol, _delay in selected}
+    if symbols != ICUUC_ENTRIES:
+        return False, "ICU 入口不是已证的 20 个无后缀集合，不放行"
+    return True, "ICU 导入仅为 icuuc.dll、delay 0，且入口集合等于 1809 导入库的 20 个无后缀符号"
+
+
+def module_evidence_path(vcpkg_bin: Path) -> Path:
+    return vcpkg_bin.parent.parent.parent / "windows-module-evidence.txt"
 
 
 def run_text(command: list[str]) -> subprocess.CompletedProcess[str]:
@@ -499,6 +646,47 @@ def collect_dependencies(app_dir: Path, vcpkg_bin: Path, dumpbin: Path) -> set[s
     refused: list[str] = []
     dumpbin_failed: list[Path] = []
     entries: list[str] = []
+    qtcore = app_dir / "Qt6Core.dll"
+    if not qtcore.is_file():
+        found_qt = sorted(path for path in app_dir.rglob("Qt6Core.dll") if path.is_file())
+        qtcore = found_qt[0] if found_qt else qtcore
+    qt_sha = file_sha256(qtcore) if qtcore.is_file() else ""
+    qt_import_text = ""
+    if qtcore.is_file():
+        imported = run_text([str(dumpbin), "/nologo", "/imports", str(qtcore)])
+        qt_import_text = imported.stdout if imported.returncode == 0 else imported.stderr
+    qt_rows = parse_dumpbin_imports(qt_import_text)
+    icu_decision = icuuc_system_basis(qt_sha, qt_rows)
+    tkopengl = next(app_dir.rglob("TKOpenGl.dll"), None)
+    if tkopengl is None:
+        candidate = vcpkg_bin / "TKOpenGl.dll"
+        tkopengl = candidate if candidate.is_file() else None
+    tk_text = ""
+    if tkopengl is not None and tkopengl.is_file():
+        tk_run = run_text([str(dumpbin), "/nologo", "/imports", str(tkopengl)])
+        tk_text = tk_run.stdout if tk_run.returncode == 0 else tk_run.stderr
+    tk_rows = parse_dumpbin_imports(tk_text)
+    evidence = [
+        "qt6core_path=" + (str(qtcore) if qtcore.is_file() else ""),
+        "qt6core_sha256=" + qt_sha,
+        "qt6core_import_dlls=" + ";".join(sorted({dll for dll, _symbol, _delay in qt_rows})),
+        "qt6core_icu_imports="
+        + ";".join(f"{dll}|{symbol}|delay={delay}" for dll, symbol, delay in icu_rows(qt_rows)),
+        "tkopengl_path=" + (str(tkopengl) if tkopengl is not None else ""),
+        "tkopengl_sha256=" + (file_sha256(tkopengl) if tkopengl is not None and tkopengl.is_file() else ""),
+        "tkopengl_imports=" + ";".join(sorted({dll for dll, _symbol, _delay in tk_rows})),
+        "----- qt6core dumpbin /imports -----",
+        qt_import_text,
+        "----- tkopengl dumpbin /imports -----",
+        tk_text,
+    ]
+    try:
+        evidence_path = module_evidence_path(vcpkg_bin)
+        evidence_path.parent.mkdir(parents=True, exist_ok=True)
+        evidence_path.write_text("\n".join(evidence) + "\n", encoding="utf-8")
+    except OSError as exc:
+        entries.append("kind=module-evidence | basis=证据文件没有写成：" + str(exc))
+    entries.extend("kind=module-evidence | " + line for line in evidence if not line.startswith("-----") and line not in {qt_import_text, tk_text})
     while queue:
         binary = queue.pop()
         resolved = binary.resolve()
@@ -536,6 +724,33 @@ def collect_dependencies(app_dir: Path, vcpkg_bin: Path, dumpbin: Path) -> set[s
                     + " | resolved=未在 vcpkg bin 解析 | resolved_exists=not-checked | basis=VC 运行库前缀，本步不复制，留给 Redist"
                 )
                 continue
+            if name.lower() == "icuuc.dll":
+                allowed, icu_basis = icu_decision
+                source = vcpkg_bin / name
+                if allowed:
+                    entries.append(
+                        "kind=system-not-copied | dll="
+                        + name
+                        + " | importer="
+                        + importer
+                        + " | resolved=未在磁盘解析 | resolved_exists=not-checked | basis="
+                        + icu_basis
+                    )
+                    continue
+                missing.append(name)
+                entries.append(
+                    "kind=missing | dll="
+                    + name
+                    + " | importer="
+                    + importer
+                    + " | resolved="
+                    + str(source)
+                    + " | resolved_exists="
+                    + ("true" if source.is_file() else "false")
+                    + " | basis="
+                    + icu_basis
+                )
+                continue
             destination = app_dir / name
             if destination.is_file():
                 queue.append(destination)
@@ -554,7 +769,7 @@ def collect_dependencies(app_dir: Path, vcpkg_bin: Path, dumpbin: Path) -> set[s
                     + " | resolved_exists=false | basis=不是系统名单、不是 API set 前缀、不是 VC 运行库前缀；vcpkg bin 无此文件"
                 )
                 continue
-            if not license_ready(name):
+            if not license_ready(name) and not manifest_license_ok(vcpkg_bin, name):
                 refused.append(name)
                 entries.append(
                     "kind=refused | dll="

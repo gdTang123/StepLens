@@ -1,6 +1,6 @@
 # StepLens
 
-内部使用的 STEP/IGES 轻量查看器。技术栈是 C++20、Qt 6.12、Open CASCADE Technology、CMake。平台是 Windows 10/11 x64，发布形式是绿色版 zip。
+内部使用的 STEP/IGES 轻量查看器。技术栈是 C++20、Qt 6.12、Open CASCADE Technology、CMake。平台是 Windows 10 1809 及以上与 Windows 11 x64，发布形式是绿色版 zip。
 
 主窗口可以打开 STEP/IGES：菜单、拖放或命令行 `StepLens.exe 文件路径`。加载时有阶段、进度和取消。读文件、建模型和三角化在后台；`SceneBuilder::pump()` 每 16 ms 在界面线程跑一截。模型显示之后可以旋转、平移、缩放。加载还没完成时取消：新模型若已经显示，回到空闲方块；还没显示则视图不动。加载完成后按 Esc 不清除模型。文档的 `Close` 在后台线程做完。还没做的是装配树（T10）、测量（T12）、截图（T13）和内存预检（T14）。
 
