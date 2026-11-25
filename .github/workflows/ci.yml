@@ -22,6 +22,15 @@ on:
       - '**.md'
       - '**/*.md'
   workflow_dispatch:
+    inputs:
+      mode:
+        description: default 跑现有 CI。只有精确值 redist-probe 才做只读采件，不编译产品。
+        required: false
+        default: default
+        type: choice
+        options:
+          - default
+          - redist-probe
 
 permissions:
   contents: read
@@ -37,6 +46,7 @@ jobs:
   # Linux 托管 runner 比 Windows 便宜。只编 core，不下载 Qt、不编 OCCT。
   core:
     name: core-tests-tsan
+    if: github.event_name != 'workflow_dispatch' || github.event.inputs.mode != 'redist-probe'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -72,6 +82,7 @@ jobs:
 
   windows:
     name: windows-build
+    if: github.event_name != 'workflow_dispatch' || github.event.inputs.mode != 'redist-probe'
     runs-on: windows-2022
     timeout-minutes: 240
     env:
@@ -709,3 +720,37 @@ jobs:
             --extra-arg=/w `
             @cpp
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  redist-probe:
+    name: redist-probe
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'redist-probe'
+    runs-on: windows-2022
+    timeout-minutes: 20
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: utf-8
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout probe script
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: MSVC x64 environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Read-only Redist probe
+        run: python scripts/redist_probe.py --output build/redist-probe.txt
+
+      - name: Upload Redist probe text
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: StepLens-redist-probe
+          path: build/redist-probe.txt
+          retention-days: 7
+          if-no-files-found: error
