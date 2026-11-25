@@ -10,6 +10,7 @@ Qt 运行时仍用 windeployqt。OCCT、FreeType 以及 dumpbin 列出的 DLL �
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import shutil
 import subprocess
@@ -115,6 +116,14 @@ def parse_args() -> argparse.Namespace:
         help="Microsoft.VC143.CRT 目录。不传则在本机 VC\\Redist 中选不旧于工具集的官方目录",
     )
     parser.add_argument("--output", type=Path, required=True, help="输出 zip 路径")
+    parser.add_argument("--checkout-sha", help="当前 checkout 的 40 位 SHA。QA 核验必填，不猜测")
+    parser.add_argument("--checkout-tree", help="当前 checkout 的 40 位 tree。QA 核验必填，不猜测")
+    parser.add_argument("--pr-head-sha", help="pull_request.head.sha。给出时必须是 40 位十六进制")
+    parser.add_argument(
+        "--require-redist",
+        action="store_true",
+        help="zip 内必须有 Redist.txt、来源说明，以及来源说明点名的 DLL",
+    )
     return parser.parse_args()
 
 
@@ -433,11 +442,103 @@ def copy_license_tree(app_dir: Path) -> None:
     shutil.copytree(source, destination, dirs_exist_ok=True)
 
 
+def hex40(label: str, value: str | None) -> str | None:
+    if value is None:
+        return None
+    text = value.strip().lower()
+    if len(text) != 40 or any(char not in "0123456789abcdef" for char in text):
+        raise ValueError(f"{label} 必须是 40 位十六进制，不猜测。这次是 {value!r}")
+    return text
+
+
+def identity_text(checkout_sha: str, checkout_tree: str, pr_head_sha: str | None) -> str:
+    lines = [f"sha={checkout_sha}", f"tree={checkout_tree}"]
+    if pr_head_sha is not None:
+        lines.append(f"pr_head_sha={pr_head_sha}")
+    return "\n".join(lines) + "\n"
+
+
+def redist_dlls_in_zip(archive: zipfile.ZipFile) -> list[str]:
+    names = set(archive.namelist())
+    redist_name = "StepLens/licenses/MSVC-Redist.txt"
+    note_name = "StepLens/licenses/MSVC-Redist-来源.txt"
+    if redist_name not in names:
+        raise ValueError(f"zip 缺少 {redist_name}")
+    if not archive.read(redist_name).strip():
+        raise ValueError(f"{redist_name} 是空的")
+    if note_name not in names:
+        raise ValueError(f"zip 缺少 {note_name}")
+    copied: list[str] = []
+    for line in archive.read(note_name).decode("utf-8", errors="replace").splitlines():
+        if line.startswith("复制的文件:"):
+            copied = [part.strip() for part in line.split(":", 1)[1].split(",") if part.strip()]
+            break
+    if not copied:
+        raise ValueError("来源说明没有「复制的文件」名单，缺 Redist 不能当成通过")
+    for name in copied:
+        if is_system_dll(name):
+            raise ValueError(f"名单里出现系统 DLL {name}，拒绝")
+        member = f"StepLens/{name}"
+        if member not in names:
+            raise ValueError(f"zip 缺少再发行文件 {member}")
+    return copied
+
+
+def write_package_manifest(
+    output: Path,
+    checkout_sha: str,
+    checkout_tree: str,
+    pr_head_sha: str | None,
+    require_redist: bool,
+) -> None:
+    expected = identity_text(checkout_sha, checkout_tree, pr_head_sha)
+    dlls: list[str] = []
+    member_lines: list[str] = []
+    with zipfile.ZipFile(output) as archive:
+        identity_name = "StepLens/package-identity.txt"
+        if identity_name not in archive.namelist():
+            raise ValueError(f"zip 缺少 {identity_name}")
+        actual = archive.read(identity_name).decode("utf-8")
+        if actual != expected:
+            raise ValueError("zip 内 package-identity.txt 与 checkout SHA/tree 不一致")
+        if require_redist:
+            dlls = redist_dlls_in_zip(archive)
+        for info in archive.infolist():
+            if info.is_dir():
+                continue
+            digest = hashlib.sha256(archive.read(info.filename)).hexdigest()
+            member_lines.append(f"{info.filename}\t{digest}")
+    zip_digest = hashlib.sha256(output.read_bytes()).hexdigest()
+    header = [
+        f"checkout_sha={checkout_sha}",
+        f"checkout_tree={checkout_tree}",
+    ]
+    if pr_head_sha is not None:
+        header.append(f"pr_head_sha={pr_head_sha}")
+    header.append(f"zip_sha256={zip_digest}")
+    if require_redist:
+        header.append("redist_dlls=" + ",".join(dlls))
+    manifest = output.parent / f"{output.name}.manifest.txt"
+    manifest.write_text("\n".join(header + member_lines) + "\n", encoding="utf-8", newline="\n")
+    print(f"已写入 {manifest}")
+    print(f"zip_sha256={zip_digest}")
+
+
 def main() -> int:
     _configure_stdio()
     if sys.platform != "win32":
         return fail("绿色版打包只在 Windows 上收集 DLL。这次没有执行收集。")
     args = parse_args()
+    try:
+        checkout_sha = hex40("--checkout-sha", args.checkout_sha)
+        checkout_tree = hex40("--checkout-tree", args.checkout_tree)
+        pr_head_sha = hex40("--pr-head-sha", args.pr_head_sha)
+    except ValueError as exc:
+        return fail(str(exc))
+    if (checkout_sha is None) != (checkout_tree is None):
+        return fail("--checkout-sha 和 --checkout-tree 必须同时给出，不猜测")
+    if args.require_redist and checkout_sha is None:
+        return fail("QA 核验必须同时给出 --checkout-sha 和 --checkout-tree，不猜测")
     app_dir = args.prefix / "StepLens"
     exe = app_dir / "StepLens.exe"
     if not exe.is_file():
@@ -473,6 +574,12 @@ def main() -> int:
     if not copy_vc_runtime(app_dir, needed_vc, args.vc_redist, dumpbin):
         return 1
     copy_license_tree(app_dir)
+    if checkout_sha is not None and checkout_tree is not None:
+        (app_dir / "package-identity.txt").write_text(
+            identity_text(checkout_sha, checkout_tree, pr_head_sha),
+            encoding="utf-8",
+            newline="\n",
+        )
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     if args.output.exists():
@@ -482,6 +589,11 @@ def main() -> int:
             if path.is_file():
                 archive.write(path, path.relative_to(args.prefix).as_posix())
     print(f"已写入 {args.output}")
+    if checkout_sha is not None and checkout_tree is not None:
+        try:
+            write_package_manifest(args.output, checkout_sha, checkout_tree, pr_head_sha, args.require_redist)
+        except ValueError as exc:
+            return fail(str(exc))
     return 0
 
 

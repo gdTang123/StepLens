@@ -325,6 +325,37 @@ jobs:
           path: dist/StepLens-0.1.0-windows-x64.zip
           retention-days: 7
 
+      # 非发布 QA 包。qa/ PR 不能代替本次构建成功门；unit 失败不跳过，取消不跑。
+      - name: QA package verification
+        id: qa-package
+        if: github.event_name == 'pull_request' && startsWith(github.head_ref, 'qa/') && steps.product-build.outcome == 'success' && !cancelled()
+        env:
+          QA_PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          $stamp = Join-Path (Get-Location) "build\msvc\this-build-succeeded.txt"
+          if (-not (Test-Path -LiteralPath $stamp)) { throw "本次构建未成功，拒绝使用已有产物做 QA 打包" }
+          $sha = (git rev-parse HEAD).Trim()
+          $tree = (git rev-parse "HEAD^{tree}").Trim()
+          if ($sha -notmatch '^[0-9a-f]{40}$' -or $tree -notmatch '^[0-9a-f]{40}$') {
+            throw "checkout SHA/tree 不是 40 位十六进制"
+          }
+          if ($env:QA_PR_HEAD -notmatch '^[0-9a-f]{40}$') {
+            throw "pull_request.head.sha 不是 40 位十六进制，不猜测"
+          }
+          cmake --install build/msvc --config RelWithDebInfo --prefix "$pwd\dist-stage"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          python scripts/package.py `
+            --prefix "$pwd\dist-stage" `
+            --qt-dir "$env:QTDIR" `
+            --vcpkg-bin "$pwd\build\msvc\vcpkg_installed\x64-windows\bin" `
+            --output "$pwd\dist\StepLens-0.1.0-windows-x64.zip" `
+            --checkout-sha $sha `
+            --checkout-tree $tree `
+            --pr-head-sha $env:QA_PR_HEAD `
+            --require-redist
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Prepare Qt software OpenGL
         id: software-gl
         if: steps.product-build.outcome == 'success' && !cancelled()
@@ -551,6 +582,69 @@ jobs:
           if ($busyText -notmatch "event=viewer-created" -or $busyText -notmatch "event=mainwindow-closeEvent-busy") { throw "Viewer busy-close 缺少事件" }
           $normalText = Get-Content -LiteralPath $normalFile.FullName -Raw
           if ($normalText -notmatch "event=main-normal-return" -or $normalText -notmatch "event=retirer-end") { throw "Viewer 正常 return 缺少 retirer-end" }
+
+      # 真实 Viewer 帧。不设置 offscreen。无图、空图、整幅单色都失败。
+      # 本次构建和 software 准备都成功且未取消才启动。qa/ 不能代替这两道门。
+      - name: QA view framebuffer
+        id: qa-view
+        if: github.event_name == 'pull_request' && startsWith(github.head_ref, 'qa/') && steps.product-build.outcome == 'success' && steps.software-gl.outcome == 'success' && !cancelled()
+        run: |
+          $stamp = Join-Path (Get-Location) "build\msvc\this-build-succeeded.txt"
+          if (-not (Test-Path -LiteralPath $stamp)) { throw "本次构建未成功，拒绝使用已有的 StepLens.exe 做帧验收" }
+          $swDest = "${{ steps.software-gl.outputs.dll }}"
+          if ([string]::IsNullOrWhiteSpace($swDest) -or -not (Test-Path -LiteralPath $swDest)) {
+            throw "本次 software DLL 未准备好: $swDest"
+          }
+          # 仅本 step。帧验收进程继承 software、Qt 插件和 OCCT DLL；不写 GITHUB_ENV。
+          $env:QT_PLUGIN_PATH = Join-Path $env:QTDIR "plugins"
+          $vcpkgBin = Join-Path (Get-Location) "build\msvc\vcpkg_installed\x64-windows\bin"
+          $env:PATH = "$vcpkgBin;$(Join-Path $env:QTDIR 'bin');$env:PATH"
+          $env:QT_OPENGL = "software"
+          Write-Host "QT_OPENGL=$env:QT_OPENGL"
+          Write-Host "software_dll=$swDest"
+          if (Test-Path Env:QT_QPA_PLATFORM) { Remove-Item Env:QT_QPA_PLATFORM }
+          $sha = (git rev-parse HEAD).Trim()
+          $tree = (git rev-parse "HEAD^{tree}").Trim()
+          $bin = Join-Path (Get-Location) "build\msvc\RelWithDebInfo"
+          $dump = Join-Path (Get-Location) "dist\view-shot"
+          & ./.github/scripts/Assert-SteplensViewShot.ps1 `
+            -Exe (Join-Path $bin "StepLens.exe") `
+            -Writer (Join-Path $bin "steplens_write_box_step.exe") `
+            -DumpDir $dump `
+            -IdentityFile (Join-Path (Get-Location) "build\msvc\steplens-build-identity.txt") `
+            -CheckoutSha $sha `
+            -CheckoutTree $tree
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # 成功验收包只在打包和帧都成功后上传。退出码 0 或已有 zip 不是像素通过。
+      - name: Upload QA package verification
+        if: steps.qa-package.outcome == 'success' && steps.qa-view.outcome == 'success' && !cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: StepLens-qa-windows-x64
+          path: |
+            dist/StepLens-0.1.0-windows-x64.zip
+            dist/StepLens-0.1.0-windows-x64.zip.manifest.txt
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Upload QA view framebuffer
+        if: steps.qa-view.outcome == 'success' && !cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: StepLens-qa-view-shot
+          path: dist/view-shot/**
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Upload QA view failure evidence
+        if: steps.qa-view.outcome == 'failure' && !cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: StepLens-qa-view-shot-failure
+          path: dist/view-shot/**
+          retention-days: 7
+          if-no-files-found: ignore
 
       - name: Upload viewer crash dumps
         if: failure()

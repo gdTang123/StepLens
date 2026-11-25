@@ -28,6 +28,7 @@
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QEvent>
+#include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
@@ -833,7 +834,23 @@ void MainWindow::saveModelShots() {
     }
     QDir().mkpath(m_dumpDir);
     const QImage view = m_viewer->grabView();
-    view.save(QDir(m_dumpDir).filePath(QStringLiteral("model.png")));
+    if (view.isNull() || !view.save(QDir(m_dumpDir).filePath(QStringLiteral("model.png")))) {
+        QFile modelError(QDir(m_dumpDir).filePath(QStringLiteral("model-error.txt")));
+        if (modelError.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            modelError.write(view.isNull() ? "grabView empty" : "model.png not saved");
+        }
+    }
+    const ViewerWidget::ViewDump frame = m_viewer->renderOffscreen(1, false);
+    const QString framePath = QDir(m_dumpDir).filePath(QStringLiteral("framebuffer.png"));
+    QString frameNote = QStringLiteral("ok");
+    if (!frame.error.isEmpty() || frame.image.isNull() || frame.image.width() < 2 ||
+        frame.image.height() < 2 || !frame.image.save(framePath)) {
+        frameNote = frame.error.isEmpty() ? QStringLiteral("framebuffer empty or not saved") : frame.error;
+    }
+    QFile note(QDir(m_dumpDir).filePath(QStringLiteral("framebuffer.txt")));
+    if (note.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        note.write(frameNote.toUtf8());
+    }
     const QImage window = grab().toImage();
     window.save(QDir(m_dumpDir).filePath(QStringLiteral("window.png")));
     QTimer::singleShot(0, qApp, &QCoreApplication::quit);

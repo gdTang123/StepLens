@@ -297,6 +297,13 @@ inline constexpr char kStepLensExe[] = R\"exe($<TARGET_FILE:StepLens>)exe\";
     steplens_apply_warnings(steplens_pipeline_tests)
     steplens_apply_exceptions(steplens_pipeline_tests OFF)
     set_target_properties(steplens_pipeline_tests PROPERTIES FOLDER "tests")
+
+    # 不进 ctest。QA 冒烟用它写出 10×20×30 盒子，避免默认套件多一个 skip。
+    add_executable(steplens_write_box_step pipeline/WriteBoxStepMain.cpp)
+    target_link_libraries(steplens_write_box_step PRIVATE steplens::io)
+    steplens_apply_warnings(steplens_write_box_step)
+    steplens_apply_exceptions(steplens_write_box_step OFF)
+    set_target_properties(steplens_write_box_step PROPERTIES FOLDER "tests")
 endif()
 steplens_apply_warnings(steplens_tests)
 steplens_apply_exceptions(steplens_tests OFF)
