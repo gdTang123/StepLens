@@ -2,7 +2,10 @@
 
 #include <QCoreApplication>
 #include <QLabel>
+#include <QListView>
 #include <QPointer>
+#include <QVBoxLayout>
+#include <QWidget>
 
 #include <BRepGProp.hxx>
 #include <BRep_Tool.hxx>
@@ -93,12 +96,27 @@ void computeMass(const TopoDS_Shape& shape, double lengthUnitToMm, QString* volu
 
 } // namespace
 
-PropertyPanel::PropertyPanel(QWidget* parent) : QDockWidget(tr("属性"), parent) {
-    m_body = new QLabel(tr("未选择零件"), this);
+PropertyPanel::PropertyPanel(QWidget* parent) : QDockWidget(tr("属性 / 测量"), parent) {
+    auto* root = new QWidget(this);
+    auto* layout = new QVBoxLayout(root);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(0);
+    m_body = new QLabel(tr("未选择零件"), root);
     m_body->setWordWrap(true);
     m_body->setAlignment(Qt::AlignTop | Qt::AlignLeft);
     m_body->setMargin(8);
-    setWidget(m_body);
+    layout->addWidget(m_body);
+    auto* measureTitle = new QLabel(tr("测量结果"), root);
+    measureTitle->setMargin(8);
+    layout->addWidget(measureTitle);
+    m_measures = new MeasureResultModel(root);
+    m_measureView = new QListView(root);
+    m_measureView->setObjectName(QStringLiteral("measureResultList"));
+    m_measureView->setModel(m_measures);
+    m_measureView->setAccessibleName(tr("测量结果列表"));
+    m_measureView->setUniformItemSizes(true);
+    layout->addWidget(m_measureView, 1);
+    setWidget(root);
     setObjectName(QStringLiteral("propertyPanel"));
 }
 
@@ -118,6 +136,27 @@ void PropertyPanel::finishMass(std::uint64_t generation, const QString& volume, 
 void PropertyPanel::clearNode() {
     ++m_generation;
     m_body->setText(tr("未选择零件"));
+}
+
+void PropertyPanel::setDisplayLengthUnit(double fromMillimeters, const QString& label) {
+    m_fromMillimeters = (fromMillimeters > 0.0 && std::isfinite(fromMillimeters)) ? fromMillimeters : 1.0;
+    m_lengthLabel = label.trimmed().isEmpty() ? QStringLiteral("mm") : label;
+}
+
+void PropertyPanel::addDistanceResult(double millimeters) {
+    m_measures->addDistanceMillimeters(millimeters, m_fromMillimeters, m_lengthLabel);
+    show();
+    raise();
+}
+
+void PropertyPanel::addAngleResult(double degrees) {
+    m_measures->addAngleDegrees(degrees);
+    show();
+    raise();
+}
+
+void PropertyPanel::clearMeasurements() {
+    m_measures->clearResults();
 }
 
 void PropertyPanel::showNode(const model::DocumentModel& document, model::NodeId id, const QString& name) {

@@ -103,6 +103,23 @@ MemorySettings Settings::memory() const {
     return {soft, hard};
 }
 
+LengthUnitSettings Settings::lengthUnit() const {
+    LengthUnitSettings unit;
+    unit.label = m_ini->value(QStringLiteral("units/lengthLabel"), QStringLiteral("mm")).toString();
+    if (unit.label.trimmed().isEmpty()) {
+        unit.label = QStringLiteral("mm");
+    }
+    bool scaleOk = false;
+    const double scale =
+        m_ini->value(QStringLiteral("units/fromMillimeters"), 1.0).toDouble(&scaleOk);
+    if (!scaleOk || !std::isfinite(scale) || !(scale > 0.0)) {
+        Log::warn("长度显示单位换算非法，已回落到默认 mm / 1.0");
+        return {};
+    }
+    unit.fromMillimeters = scale;
+    return unit;
+}
+
 QStringList Settings::recentFiles() const {
     return m_ini->value("recentFiles").toStringList();
 }

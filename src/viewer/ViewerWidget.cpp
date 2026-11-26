@@ -6,6 +6,7 @@
 #include "pipeline/SceneHost.h"
 #include "scene/SceneBuilder.h"
 #include "viewer/GlCleanup.h"
+#include "viewer/MeasureTextLabel.h"
 #include "viewer/SceneHostBinding.h"
 
 #include <QCoreApplication>
@@ -407,6 +408,7 @@ public:
 
     void reset(std::shared_ptr<const model::DocumentModel> model) override {
         m_widget.discardDistanceGraphics();
+        emit m_widget.measurementsCleared();
         m_widget.suspendIdlePresentation();
         builder().reset(std::move(model));
         if (m_widget.pointDistanceActive()) {
@@ -427,6 +429,7 @@ public:
 
     void clear() override {
         m_widget.discardDistanceGraphics();
+        emit m_widget.measurementsCleared();
         releaseBuilder();
         m_widget.restoreIdlePresentation();
     }
@@ -1507,6 +1510,7 @@ void ViewerWidget::clearDistanceMeasurements() {
     const QString message = m_state->anglePick       ? tr("测量已清除。请选择第一条直线边或平面")
                             : m_state->pointDistance ? tr("测量已清除。请选择第一个顶点、边或面")
                                                      : tr("测量已清除");
+    emit measurementsCleared();
     emit measureMessage(message);
     update();
 }
@@ -1592,7 +1596,8 @@ void ViewerWidget::acceptAngleClick() {
         update();
         return;
     }
-    const QString text = QString::number(result.value().degrees, 'f', 2) + QStringLiteral("°");
+    const double degrees = result.value().degrees;
+    const QString text = QString::number(degrees, 'f', 2) + QStringLiteral("°");
     // 放在两次所选形状的包围盒中心，沿用距离标注的文字样式。这个点不是角度顶点，也不画弧。
     Bnd_Box box;
     BRepBndLib::Add(first.shape.Moved(TopLoc_Location(first.transform), Standard_True), box);
@@ -1611,22 +1616,12 @@ void ViewerWidget::acceptAngleClick() {
     label->SetText(TCollection_ExtendedString(utf8.constData(), Standard_True));
     label->SetPosition(at);
     label->SetColor(measureColor());
-    label->SetZoomable(Standard_True);
-    double height = 1.0;
-    if (const auto document = this->document()) {
-        const Bnd_Box& world = document->worldBox();
-        if (!world.IsVoid()) {
-            const double diagonal = world.CornerMin().Distance(world.CornerMax());
-            if (std::isfinite(diagonal) && diagonal > 0.0) {
-                height = diagonal * 0.02;
-            }
-        }
-    }
-    label->SetHeight(height);
+    configureMeasureTextLabel(label);
     State::DistanceMark mark;
     mark.label = label;
     showMeasureObject(m_state->context, mark.label);
     m_state->marks.push_back(std::move(mark));
+    emit angleMeasured(degrees);
     emit measureMessage(text);
     update();
 }
@@ -1740,21 +1735,11 @@ void ViewerWidget::showDistanceMark(double millimeters, double ax, double ay, do
     label->SetPosition(
         gp_Pnt((from.X() + to.X()) * 0.5, (from.Y() + to.Y()) * 0.5, (from.Z() + to.Z()) * 0.5));
     label->SetColor(measureColor());
-    label->SetZoomable(Standard_True);
-    double height = 1.0;
-    if (const auto document = this->document()) {
-        const Bnd_Box& box = document->worldBox();
-        if (!box.IsVoid()) {
-            const double diagonal = box.CornerMin().Distance(box.CornerMax());
-            if (std::isfinite(diagonal) && diagonal > 0.0) {
-                height = diagonal * 0.02;
-            }
-        }
-    }
-    label->SetHeight(height);
+    configureMeasureTextLabel(label);
     mark.label = label;
     showMeasureObject(m_state->context, mark.label);
     m_state->marks.push_back(std::move(mark));
+    emit distanceMeasured(millimeters);
     emit measureMessage(text);
     update();
 }

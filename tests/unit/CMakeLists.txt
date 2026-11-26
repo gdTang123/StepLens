@@ -220,13 +220,34 @@ target_include_directories(steplens_tests PRIVATE "${CMAKE_SOURCE_DIR}/src")
 if(NOT STEPLENS_CORE_ONLY)
     add_executable(steplens_ui_tests
         ui/AssemblyTreeModelTest.cpp
+        ui/AssemblyTreeFilterProxyTest.cpp
         ui/AssemblyTreeReleaseTest.cpp
+        ui/MeasureResultModelTest.cpp
+        ui/MeasureUiPolicyTest.cpp
         model/DocumentReleaseGuiFirstEntryTest.cpp)
     target_include_directories(steplens_ui_tests PRIVATE "${CMAKE_SOURCE_DIR}/src")
     target_link_libraries(steplens_ui_tests PRIVATE steplens::ui steplens::model Qt6::Widgets Qt6::Test GTest::gtest_main)
     steplens_apply_warnings(steplens_ui_tests)
     steplens_apply_exceptions(steplens_ui_tests OFF)
     set_target_properties(steplens_ui_tests PROPERTIES FOLDER "tests")
+
+    # 钉 ViewerSceneHost::reset/clear → measurementsCleared；测距标签/阶段提示无头钉。
+    # 链 TKOpenGl，独立可执行文件，不并进 steplens_ui_tests / steplens_tests。
+    add_executable(steplens_viewer_host_tests
+        viewer/ViewerSceneHostMeasureClearTest.cpp
+        viewer/MeasureTextLabelTest.cpp
+        viewer/ViewerMeasurePromptTest.cpp)
+    target_include_directories(steplens_viewer_host_tests PRIVATE "${CMAKE_SOURCE_DIR}/src")
+    target_link_libraries(steplens_viewer_host_tests PRIVATE
+        steplens::viewer
+        steplens::ui
+        steplens::occt_vis
+        Qt6::Widgets
+        Qt6::Test
+        GTest::gtest_main)
+    steplens_apply_warnings(steplens_viewer_host_tests)
+    steplens_apply_exceptions(steplens_viewer_host_tests OFF)
+    set_target_properties(steplens_viewer_host_tests PROPERTIES FOLDER "tests")
 
     target_sources(steplens_tests PRIVATE
         app/SettingsTest.cpp
@@ -317,6 +338,11 @@ if(NOT STEPLENS_CORE_ONLY)
     gtest_discover_tests(steplens_ui_tests
         DISCOVERY_MODE PRE_TEST
         PROPERTIES LABELS "unit;ui")
+    gtest_discover_tests(steplens_viewer_host_tests
+        DISCOVERY_MODE PRE_TEST
+        PROPERTIES
+            LABELS "unit;viewer-host"
+            ENVIRONMENT "QT_QPA_PLATFORM=offscreen;LIBGL_ALWAYS_SOFTWARE=1")
     # include(GoogleTest) 在上面。提前调用 gtest_discover_tests 时 MSVC 配置会报未知命令。
     gtest_discover_tests(steplens_status_notice_tests
         DISCOVERY_MODE PRE_TEST

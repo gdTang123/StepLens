@@ -4,9 +4,12 @@
 
 #include <QDockWidget>
 
+class QLineEdit;
 class QTreeView;
 
 namespace steplens::ui {
+
+class AssemblyTreeFilterProxy;
 
 class AssemblyTreePanel final : public QDockWidget {
     Q_OBJECT
@@ -17,6 +20,8 @@ public:
     [[nodiscard]] AssemblyTreeModel* treeModel() const {
         return m_model;
     }
+    void setNameFilter(const QString& text);
+    [[nodiscard]] QString nameFilter() const;
 
 signals:
     void nodeActivated(steplens::model::NodeId id);
@@ -24,8 +29,12 @@ signals:
     void visibilityChanged(steplens::model::NodeId id, bool visible);
 
 private:
+    [[nodiscard]] model::NodeId nodeIdOf(const QModelIndex& proxyIndex) const;
+
+    QLineEdit* m_search = nullptr;
     QTreeView* m_view = nullptr;
     AssemblyTreeModel* m_model = nullptr;
+    AssemblyTreeFilterProxy* m_proxy = nullptr;
 };
 
 } // namespace steplens::ui

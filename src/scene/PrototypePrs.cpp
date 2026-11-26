@@ -53,6 +53,10 @@ bool PrototypePrs::AcceptDisplayMode(const int theMode) const {
     return theMode == Shaded || theMode == ShadedWithEdges || theMode == Wireframe;
 }
 
+Standard_Boolean PrototypePrs::AcceptShapeDecomposition() const {
+    return Standard_True;
+}
+
 void PrototypePrs::Compute(const opencascade::handle<PrsMgr_PresentationManager>&,
                            const opencascade::handle<Prs3d_Presentation>& thePrs, const int theMode) {
     const bool shaded = theMode == Shaded || theMode == ShadedWithEdges;

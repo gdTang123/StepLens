@@ -624,35 +624,41 @@ TEST(LoadPipeline, CancelMidLoadReturnsToIdleCube) {
     const int baseline = documentCount();
 
     RecordingHost host(std::this_thread::get_id());
-    host.holdDisplay();
     steplens::LoadPipeline pipeline(host);
+    std::atomic<bool> probeEntered{false};
+    std::atomic<bool> releaseProbe{false};
+    pipeline.setBeforePublishForTest([&](const steplens::CancelToken& token) {
+        probeEntered.store(true, std::memory_order_release);
+        while (!releaseProbe.load(std::memory_order_acquire) && !token.isCancelled()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    });
     pipeline.open(file);
-    ASSERT_TRUE(driveUntil(
-        pipeline,
-        [&](const steplens::LoadPipeline::Snapshot& shot) {
-            return shot.activity == steplens::LoadActivity::Loading && host.resets() >= 1;
-        },
-        std::chrono::seconds(60)));
-    EXPECT_TRUE(host.holdsModel());
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+    while (!probeEntered.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    ASSERT_TRUE(probeEntered.load(std::memory_order_acquire));
+    EXPECT_EQ(host.resets(), 0);
 
     std::thread::id releaseThread;
     ReleaseProbeGuard probeGuard;
     steplens::model::setDocumentReleaseProbe([&](std::thread::id id) { releaseThread = id; });
-    // 先关上门再取消。后台线程减 pending 之前会停在门上，断言不靠析构跑多快。
     ReleaseGateGuard gateGuard;
     pipeline.cancel();
+    releaseProbe.store(true, std::memory_order_release);
     pipeline.tick();
     EXPECT_EQ(pipeline.snapshot().activity, steplens::LoadActivity::Releasing);
-    EXPECT_GE(host.clears(), 1);
+    EXPECT_EQ(host.clears(), 0);
     EXPECT_FALSE(host.holdsModel());
-    EXPECT_GT(steplens::model::documentsPendingRelease(), 0);
     releaseGateOpen.store(true, std::memory_order_release);
     ASSERT_TRUE(pipeline.waitUntilSettled(std::chrono::seconds(30)));
     pipeline.tick();
     EXPECT_EQ(pipeline.snapshot().activity, steplens::LoadActivity::Idle);
-    EXPECT_NE(releaseThread, std::this_thread::get_id());
+    EXPECT_EQ(host.resets(), 0);
     EXPECT_EQ(documentCount(), baseline);
     static_cast<void>(probeGuard);
+    static_cast<void>(releaseThread);
 }
 
 TEST(LoadPipeline, RetiredDocumentWaitsForExternalStrongReference) {
@@ -770,7 +776,7 @@ TEST(LoadPipeline, CurrentModelMailboxIsNotAdoptedDisplay) {
     EXPECT_EQ(host.document(), displayedA);
 }
 
-TEST(LoadPipeline, CancelAfterNewModelAdoptedClearsDisplay) {
+TEST(LoadPipeline, CancelOpenBAfterPublishKeepsPreviousModel) {
     steplens::test::TempDir dir;
     const std::filesystem::path fileA = dir.path() / "a.step";
     const std::filesystem::path fileB = dir.path() / "b.step";
@@ -786,26 +792,76 @@ TEST(LoadPipeline, CancelAfterNewModelAdoptedClearsDisplay) {
             return shot.activity == steplens::LoadActivity::Ready;
         },
         std::chrono::seconds(60)));
+    const auto displayedA = host.document();
+    ASSERT_NE(displayedA, nullptr);
+    const int clears = host.clears();
+    const int resets = host.resets();
 
-    host.holdDisplay();
+    std::atomic<bool> probeEntered{false};
+    std::atomic<bool> releaseProbe{false};
+    pipeline.setBeforePublishForTest([&](const steplens::CancelToken& token) {
+        probeEntered.store(true, std::memory_order_release);
+        while (!releaseProbe.load(std::memory_order_acquire) && !token.isCancelled()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    });
+    pipeline.open(fileB);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+    while (!probeEntered.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    ASSERT_TRUE(probeEntered.load(std::memory_order_acquire));
+    EXPECT_EQ(host.document(), displayedA);
+    EXPECT_EQ(host.resets(), resets);
+
+    pipeline.cancel();
+    releaseProbe.store(true, std::memory_order_release);
+    ASSERT_TRUE(pipeline.waitUntilSettled(std::chrono::seconds(30)));
+    pipeline.tick();
+    EXPECT_EQ(host.clears(), clears);
+    EXPECT_EQ(host.document(), displayedA);
+    EXPECT_EQ(host.resets(), resets);
+    EXPECT_EQ(pipeline.snapshot().activity, steplens::LoadActivity::Ready);
+}
+
+TEST(LoadPipeline, FailureOpenBKeepsPreviousModel) {
+    steplens::test::TempDir dir;
+    const std::filesystem::path fileA = dir.path() / "a.step";
+    const std::filesystem::path fileB = dir.path() / "b.step";
+    ASSERT_TRUE(writeBoxStep(fileA));
+    ASSERT_TRUE(writeBoxStep(fileB));
+
+    RecordingHost host(std::this_thread::get_id());
+    steplens::LoadPipeline pipeline(host);
+    pipeline.open(fileA);
+    ASSERT_TRUE(driveUntil(
+        pipeline,
+        [](const steplens::LoadPipeline::Snapshot& shot) {
+            return shot.activity == steplens::LoadActivity::Ready;
+        },
+        std::chrono::seconds(60)));
+    const auto displayedA = host.document();
+    ASSERT_NE(displayedA, nullptr);
+    const int clears = host.clears();
+    const int resets = host.resets();
+
+    pipeline.setFailAfterPublishForTest(true);
     pipeline.open(fileB);
     ASSERT_TRUE(driveUntil(
         pipeline,
-        [&](const steplens::LoadPipeline::Snapshot& shot) {
-            return shot.activity == steplens::LoadActivity::Loading && host.resets() >= 2;
+        [](const steplens::LoadPipeline::Snapshot& shot) {
+            return shot.activity != steplens::LoadActivity::Loading &&
+                   shot.activity != steplens::LoadActivity::Releasing;
         },
         std::chrono::seconds(60)));
-    auto displayedB = host.document();
-    ASSERT_NE(displayedB, nullptr);
-    const int clears = host.clears();
-
-    pipeline.cancel();
-    EXPECT_EQ(host.clears(), clears + 1);
-    EXPECT_FALSE(host.holdsModel());
-    EXPECT_NE(host.document(), displayedB);
-    displayedB.reset();
-    ASSERT_TRUE(pipeline.waitUntilSettled(std::chrono::seconds(30)));
-    ASSERT_TRUE(steplens::model::waitForDocumentRelease(std::chrono::seconds(30)));
+    const auto failure = pipeline.takeFailure();
+    ASSERT_TRUE(failure.has_value());
+    EXPECT_EQ(failure->code, steplens::ErrorCode::MeshFailed);
+    EXPECT_EQ(host.clears(), clears);
+    EXPECT_EQ(host.document(), displayedA);
+    EXPECT_EQ(host.resets(), resets);
+    EXPECT_EQ(pipeline.snapshot().activity, steplens::LoadActivity::Ready);
+    pipeline.setFailAfterPublishForTest(false);
 }
 
 TEST(LoadPipeline, EscapeAfterReadyKeepsModel) {
@@ -837,12 +893,14 @@ TEST(LoadPipeline, EscapeAfterReadyKeepsModel) {
 }
 
 TEST(LoadPipeline, OpenWhileReleaseInProgress) {
+    // 遗留用例名保留。现行产品：成功后 host.reset 即 adopted；cancel 在
+    // adopted&&success&&done 时早退，不进 Releasing，不误销已提交模型。
     steplens::test::TempDir dir;
     const std::filesystem::path file = dir.path() / "box.step";
     ASSERT_TRUE(writeBoxStep(file));
 
     RecordingHost host(std::this_thread::get_id());
-    host.holdDisplay();
+    host.holdDisplay(); // pending()==1，提交后无法 drain 到 Ready
     steplens::LoadPipeline pipeline(host);
     pipeline.open(file);
     ASSERT_TRUE(driveUntil(
@@ -851,32 +909,28 @@ TEST(LoadPipeline, OpenWhileReleaseInProgress) {
             return shot.activity == steplens::LoadActivity::Loading && host.resets() >= 1;
         },
         std::chrono::seconds(60)));
+    EXPECT_TRUE(host.holdsModel());
+    const auto committed = host.document();
+    ASSERT_NE(committed, nullptr);
+    const int clears = host.clears();
+    const int resets = host.resets();
 
-    std::atomic<bool> hold{true};
-    std::thread::id releaseThread;
-    ReleaseProbeGuard probeGuard;
-    steplens::model::setDocumentReleaseProbe([&](std::thread::id id) {
-        releaseThread = id;
-        while (hold.load(std::memory_order_acquire)) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        }
-    });
     pipeline.cancel();
     pipeline.tick();
-    ASSERT_EQ(pipeline.snapshot().activity, steplens::LoadActivity::Releasing);
+    EXPECT_EQ(pipeline.snapshot().activity, steplens::LoadActivity::Loading);
+    EXPECT_EQ(host.clears(), clears);
+    EXPECT_EQ(host.resets(), resets);
+    EXPECT_EQ(host.document(), committed);
+
     host.releaseDisplay();
-    pipeline.open(file);
-    hold.store(false, std::memory_order_release);
     ASSERT_TRUE(driveUntil(
         pipeline,
         [](const steplens::LoadPipeline::Snapshot& shot) {
             return shot.activity == steplens::LoadActivity::Ready;
         },
         std::chrono::seconds(60)));
-    ASSERT_TRUE(pipeline.waitUntilSettled(std::chrono::seconds(30)));
-    EXPECT_NE(releaseThread, std::this_thread::get_id());
-    EXPECT_GE(host.resets(), 2);
-    static_cast<void>(probeGuard);
+    EXPECT_EQ(host.document(), committed);
+    EXPECT_EQ(host.clears(), clears);
 }
 
 TEST(LoadPipeline, FailureReleasesOffGuiThreadAndCanReopen) {

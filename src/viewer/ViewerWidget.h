@@ -86,6 +86,9 @@ signals:
     void pointDistanceChanged(bool active);
     void angleChanged(bool active);
     void measureMessage(const QString& text);
+    void distanceMeasured(double millimeters);
+    void angleMeasured(double degrees);
+    void measurementsCleared();
 
 protected:
     void mousePressEvent(QMouseEvent* event) override;

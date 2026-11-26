@@ -1,6 +1,7 @@
 #include "app/MainWindow.h"
 
 #include "app/FileAssociation.h"
+#include "app/MeasureUiPolicy.h"
 #include "app/settings/Settings.h"
 #include "core/LifecycleTrace.h"
 #include "core/Log.h"
@@ -13,6 +14,7 @@
 #include "ui/AssemblyTreePanel.h"
 #include "ui/LoadingOverlay.h"
 #include "ui/PropertyPanel.h"
+#include "ui/ToolbarIcons.h"
 #include "viewer/ViewerWidget.h"
 
 #include <QAction>
@@ -32,8 +34,10 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
+#include <QIcon>
 #include <QKeySequence>
 #include <QLabel>
+#include <QSize>
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
@@ -239,7 +243,8 @@ void MainWindow::buildShell() {
     m_unitLabel = new QLabel(this);
     m_unitLabel->setObjectName(QStringLiteral("unitLabel"));
     m_fileLabel = new QLabel(tr("尚未打开文件"), this);
-    statusBar()->addPermanentWidget(m_selectionLabel, 1);
+    // 不要给永久区 stretch：stretch>0 会撑满状态栏，挤掉 showMessage 的测距提示。
+    statusBar()->addPermanentWidget(m_selectionLabel);
     statusBar()->addPermanentWidget(m_unitLabel);
     statusBar()->addPermanentWidget(m_fileLabel);
     statusBar()->showMessage(tr("拖拽 STEP/IGES 文件到这里，或使用文件 - 打开"));
@@ -300,9 +305,24 @@ void MainWindow::buildShell() {
 }
 
 void MainWindow::buildMenus() {
+    auto decorate = [](QAction* action, const QString& tip, const QString& accessible, const QIcon& icon,
+                       const QKeySequence& shortcut = {}) {
+        action->setToolTip(tip);
+        action->setStatusTip(tip);
+        action->setIcon(icon);
+        action->setIconText(action->text());
+        if (!accessible.isEmpty()) {
+            action->setObjectName(accessible);
+        }
+        if (!shortcut.isEmpty()) {
+            action->setShortcut(shortcut);
+        }
+    };
+
     auto* fileMenu = menuBar()->addMenu(tr("文件"));
     auto* openAction = fileMenu->addAction(tr("打开..."));
-    openAction->setShortcut(QKeySequence::Open);
+    decorate(openAction, tr("打开 STEP/IGES 文件"), QStringLiteral("actionOpen"),
+             ui::toolbarIcon(ui::ToolbarGlyph::Open), QKeySequence::Open);
     connect(openAction, &QAction::triggered, this, [this] {
         const QString path = QFileDialog::getOpenFileName(
             this, tr("打开"), QString(),
@@ -337,7 +357,8 @@ void MainWindow::buildMenus() {
     });
     auto* shot = fileMenu->addAction(tr("导出截图"));
     shot->setEnabled(m_viewer != nullptr);
-    shot->setToolTip(tr("把当前三维视图存成 PNG 或 JPG"));
+    decorate(shot, tr("把当前三维视图存成 PNG 或 JPG"), QStringLiteral("actionScreenshot"),
+             ui::toolbarIcon(ui::ToolbarGlyph::Screenshot), QKeySequence(Qt::CTRL | Qt::Key_P));
     if (m_viewer != nullptr) {
         connect(shot, &QAction::triggered, this, &MainWindow::exportScreenshot);
     }
@@ -348,15 +369,26 @@ void MainWindow::buildMenus() {
 
     auto* viewMenu = menuBar()->addMenu(tr("视图"));
     auto* standards = viewMenu->addMenu(tr("标准视图"));
-    const StandardView views[] = {StandardView::Front,    StandardView::Back, StandardView::Left,
-                                  StandardView::Right,    StandardView::Top,  StandardView::Bottom,
-                                  StandardView::Isometric};
+    const struct ViewChoice {
+        StandardView view;
+        ui::ToolbarGlyph glyph;
+        const char* accessible;
+    } views[] = {{StandardView::Front, ui::ToolbarGlyph::ViewFront, "actionViewFront"},
+                 {StandardView::Back, ui::ToolbarGlyph::ViewBack, "actionViewBack"},
+                 {StandardView::Left, ui::ToolbarGlyph::ViewLeft, "actionViewLeft"},
+                 {StandardView::Right, ui::ToolbarGlyph::ViewRight, "actionViewRight"},
+                 {StandardView::Top, ui::ToolbarGlyph::ViewTop, "actionViewTop"},
+                 {StandardView::Bottom, ui::ToolbarGlyph::ViewBottom, "actionViewBottom"},
+                 {StandardView::Isometric, ui::ToolbarGlyph::ViewIso, "actionViewIso"}};
     auto* toolbar = addToolBar(tr("工具"));
-    toolbar->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    toolbar->setObjectName(QStringLiteral("mainToolBar"));
+    toolbar->setToolButtonStyle(Qt::ToolButtonIconOnly);
+    toolbar->setIconSize(QSize(20, 20));
+    toolbar->setMovable(false);
     toolbar->addAction(openAction);
     auto* fitAction = new QAction(tr("适应窗口"), this);
-    fitAction->setShortcut(Qt::Key_F);
-    fitAction->setToolTip(tr("适应窗口"));
+    decorate(fitAction, tr("适应窗口"), QStringLiteral("actionFit"),
+             ui::toolbarIcon(ui::ToolbarGlyph::Fit), QKeySequence(Qt::Key_F));
     fitAction->setEnabled(m_viewer != nullptr);
     connect(fitAction, &QAction::triggered, this, [this] {
         if (m_viewer != nullptr) {
@@ -365,18 +397,20 @@ void MainWindow::buildMenus() {
     });
     viewMenu->addAction(fitAction);
     toolbar->addAction(fitAction);
-    for (const StandardView view : views) {
-        const QString label = QString::fromUtf8(viewName(view));
+    toolbar->addSeparator();
+    for (const ViewChoice& choice : views) {
+        const QString label = QString::fromUtf8(viewName(choice.view));
         auto* action = standards->addAction(label);
         action->setEnabled(m_viewer != nullptr);
-        action->setToolTip(label);
-        connect(action, &QAction::triggered, this, [this, view] {
+        decorate(action, label, QString::fromUtf8(choice.accessible), ui::toolbarIcon(choice.glyph));
+        connect(action, &QAction::triggered, this, [this, view = choice.view] {
             if (m_viewer != nullptr) {
                 m_viewer->setStandardView(view);
             }
         });
         toolbar->addAction(action);
     }
+    toolbar->addSeparator();
     auto* displayModes = viewMenu->addMenu(tr("显示模式"));
     auto* displayGroup = new QActionGroup(this);
     displayGroup->setExclusive(true);
@@ -384,13 +418,18 @@ void MainWindow::buildMenus() {
         const char* label;
         int mode;
         bool checked;
-    } choices[] = {{"着色+边线", 1, true}, {"仅着色", 0, false}, {"线框", 2, false}};
+        ui::ToolbarGlyph glyph;
+        const char* accessible;
+    } choices[] = {{"着色+边线", 1, true, ui::ToolbarGlyph::ShadeWithEdges, "actionShadeEdges"},
+                   {"仅着色", 0, false, ui::ToolbarGlyph::ShadeOnly, "actionShadeOnly"},
+                   {"线框", 2, false, ui::ToolbarGlyph::Wireframe, "actionWireframe"}};
     for (const DisplayChoice& choice : choices) {
         auto* action = displayModes->addAction(tr(choice.label));
         action->setCheckable(true);
         action->setChecked(choice.checked);
         action->setEnabled(m_viewer != nullptr);
-        action->setToolTip(tr(choice.label));
+        decorate(action, tr(choice.label), QString::fromUtf8(choice.accessible),
+                 ui::toolbarIcon(choice.glyph));
         displayGroup->addAction(action);
         toolbar->addAction(action);
         const int mode = choice.mode;
@@ -412,24 +451,28 @@ void MainWindow::buildMenus() {
     }
     if (m_propertyPanel != nullptr) {
         QAction* properties = m_propertyPanel->toggleViewAction();
-        properties->setText(tr("属性"));
+        properties->setText(tr("属性 / 测量"));
         viewMenu->addAction(properties);
     }
     viewMenu->addAction(tr("仅显示此零件"), this, &MainWindow::showOnlyCurrent);
     viewMenu->addAction(tr("全部显示"), this, &MainWindow::showAllParts);
 
+    toolbar->addSeparator();
     auto* measureMenu = menuBar()->addMenu(tr("测量"));
     auto* distance = measureMenu->addAction(tr("距离"));
     distance->setCheckable(true);
     distance->setEnabled(m_viewer != nullptr);
-    distance->setToolTip(tr("点、边、面的最小距离"));
+    decorate(distance, tr("点、边、面的最小距离"), QStringLiteral("actionDistance"),
+             ui::toolbarIcon(ui::ToolbarGlyph::Distance), QKeySequence(Qt::Key_D));
     auto* angle = measureMenu->addAction(tr("角度"));
     angle->setCheckable(true);
     angle->setEnabled(m_viewer != nullptr);
-    angle->setToolTip(tr("直线边或平面的无向较小角，结果 0–90°"));
+    decorate(angle, tr("直线边或平面的无向较小角，结果 0–90°"), QStringLiteral("actionAngle"),
+             ui::toolbarIcon(ui::ToolbarGlyph::Angle), QKeySequence(Qt::Key_A));
     auto* clearMeasure = measureMenu->addAction(tr("清除测量"));
     clearMeasure->setEnabled(m_viewer != nullptr);
-    clearMeasure->setToolTip(tr("清除测量标注和未完成的选择"));
+    decorate(clearMeasure, tr("清除测量标注和结果列表"), QStringLiteral("actionClearMeasure"),
+             ui::toolbarIcon(ui::ToolbarGlyph::ClearMeasure), QKeySequence(Qt::CTRL | Qt::Key_Delete));
     if (m_viewer != nullptr) {
         connect(distance, &QAction::toggled, this, [this](bool on) {
             if (on) {
@@ -450,11 +493,27 @@ void MainWindow::buildMenus() {
         QStatusBar* const bar = statusBar();
         connect(m_viewer, &ViewerWidget::measureMessage, bar,
                 [bar](const QString& text) { bar->showMessage(text); });
+        connect(m_viewer, &ViewerWidget::distanceMeasured, this, [this](double millimeters) {
+            if (m_propertyPanel != nullptr) {
+                m_propertyPanel->addDistanceResult(millimeters);
+            }
+        });
+        connect(m_viewer, &ViewerWidget::angleMeasured, this, [this](double degrees) {
+            if (m_propertyPanel != nullptr) {
+                m_propertyPanel->addAngleResult(degrees);
+            }
+        });
+        connect(m_viewer, &ViewerWidget::measurementsCleared, this, [this] {
+            if (m_propertyPanel != nullptr) {
+                m_propertyPanel->clearMeasurements();
+            }
+        });
         connect(clearMeasure, &QAction::triggered, m_viewer, &ViewerWidget::clearDistanceMeasurements);
     }
     toolbar->addAction(distance);
     toolbar->addAction(angle);
     toolbar->addAction(clearMeasure);
+    toolbar->addSeparator();
     toolbar->addAction(shot);
 
     auto* helpMenu = menuBar()->addMenu(tr("帮助"));
@@ -463,10 +522,11 @@ void MainWindow::buildMenus() {
             this, tr("快捷键"),
             tr("打开：Ctrl+O\n"
                "适应窗口：F\n"
-               "距离：测量 - 距离，依次选择顶点、边或面\n"
-               "角度：测量 - 角度，依次选择直线边或平面；状态栏显示无向较小角，0–90°，两位小数\n"
-               "取消选择：Esc（没有在选距离或角度时，Esc 取消加载）\n"
-               "清除测量：测量 - 清除测量\n"
+               "距离：D，或测量 - 距离，依次选择顶点、边或面\n"
+               "角度：A，或测量 - 角度，依次选择直线边或平面；结果 0–90°，两位小数\n"
+               "截图：Ctrl+P\n"
+               "取消选择：Esc（没有在选距离或角度时，Esc 取消加载；加载完成后 Esc 不清除模型）\n"
+               "清除测量：Ctrl+Delete，同时清除视图标注和右侧列表\n"
                "旋转：按住左键拖动\n"
                "平移：按住中键拖动\n"
                "缩放：滚轮，以光标为中心\n"
@@ -579,12 +639,18 @@ void MainWindow::refreshUi() {
             }
             if (m_propertyPanel != nullptr) {
                 m_propertyPanel->clearNode();
+                m_propertyPanel->clearMeasurements();
             }
         }
     }
     if (const auto failure = m_pipeline->takeFailure()) {
         const QString message = QString::fromUtf8(failure->userMessage.c_str());
         showFailure(message.isEmpty() ? tr("打开文件时出错") : message);
+    }
+
+    const LengthUnitSettings lengthUnit = Settings::instance().lengthUnit();
+    if (m_propertyPanel != nullptr) {
+        m_propertyPanel->setDisplayLengthUnit(lengthUnit.fromMillimeters, lengthUnit.label);
     }
 
     const LoadPipeline::Snapshot shot = m_pipeline->snapshot();
@@ -597,7 +663,7 @@ void MainWindow::refreshUi() {
     } else {
         m_fileLabel->setText(name);
         if (m_unitLabel != nullptr) {
-            m_unitLabel->setText(tr("mm"));
+            m_unitLabel->setText(lengthUnit.label);
         }
         setWindowTitle(tr("StepLens — %1").arg(name));
     }
@@ -654,9 +720,12 @@ void MainWindow::refreshUi() {
             }
             m_recentFileRecorded = true;
         }
+        // 测量进行中保留 measureMessage 阶段/结果提示，勿每 tick 盖成「已完成」。
         if (!m_memoryNotice.message().isEmpty()) {
             statusBar()->showMessage(m_memoryNotice.message());
-        } else {
+        } else if (m_viewer == nullptr ||
+                   !measureModeBlocksReadyCompleted(m_viewer->pointDistanceActive(),
+                                                    m_viewer->angleActive())) {
             statusBar()->showMessage(tr("已完成"));
         }
         if (!m_quitWhenReadyArmed && qEnvironmentVariableIsSet("STEPLENS_QUIT_WHEN_READY")) {

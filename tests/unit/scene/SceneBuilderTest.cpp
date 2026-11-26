@@ -22,18 +22,22 @@
 #include <AIS_InteractiveContext.hxx>
 #include <Aspect_DisplayConnection.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
+#include <BRep_Tool.hxx>
 #include <IGESControl_Writer.hxx>
 #include <OpenGl_GraphicDriver.hxx>
 #include <SelectMgr_EntityOwner.hxx>
 #include <SelectMgr_Selection.hxx>
 #include <Standard_Failure.hxx>
+#include <StdSelect_BRepOwner.hxx>
 #include <TDataStd_Name.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopoDS.hxx>
 #include <V3d_Viewer.hxx>
 #include <XCAFApp_Application.hxx>
 #include <XCAFDoc_ColorTool.hxx>
 #include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
+#include <gp_Pnt.hxx>
 #include <gp_Trsf.hxx>
 #include <gp_Vec.hxx>
 
@@ -206,6 +210,82 @@ OwnerSample sampleSelection(const opencascade::handle<AIS_InteractiveObject>& ob
         break;
     }
     return sample;
+}
+
+// 与 SceneBuilder::pickedElement / pickedVertex 一致：Location 一次；Identity 时回退 object->Transformation。
+gp_Trsf resolveInstanceTransform(const opencascade::handle<StdSelect_BRepOwner>& owner,
+                                 const opencascade::handle<AIS_InteractiveObject>& object) {
+    gp_Trsf trsf;
+    if (!owner.IsNull()) {
+        trsf = owner->Location().Transformation();
+    }
+    if (trsf.Form() == gp_Identity && !object.IsNull()) {
+        trsf = object->Transformation();
+    }
+    return trsf;
+}
+
+opencascade::handle<StdSelect_BRepOwner>
+firstBRepOwner(const opencascade::handle<AIS_InteractiveObject>& object, int mode) {
+    if (object.IsNull()) {
+        return {};
+    }
+    if (!object->HasSelection(mode) || object->Selection(mode).IsNull() ||
+        object->Selection(mode)->IsEmpty()) {
+        object->RecomputePrimitives(mode);
+    }
+    if (!object->HasSelection(mode) || object->Selection(mode).IsNull()) {
+        return {};
+    }
+    for (const auto& entity : object->Selection(mode)->Entities()) {
+        if (entity.IsNull()) {
+            continue;
+        }
+        const auto sensitive = entity->BaseSensitive();
+        if (sensitive.IsNull() || sensitive->OwnerId().IsNull()) {
+            continue;
+        }
+        const opencascade::handle<StdSelect_BRepOwner> owner =
+            opencascade::handle<StdSelect_BRepOwner>::DownCast(sensitive->OwnerId());
+        if (!owner.IsNull() && !owner->Shape().IsNull()) {
+            return owner;
+        }
+    }
+    return {};
+}
+
+opencascade::handle<StdSelect_BRepOwner>
+matchingVertexOwner(const opencascade::handle<AIS_InteractiveObject>& object,
+                    const TopoDS_Shape& localVertex) {
+    if (object.IsNull() || localVertex.IsNull() || localVertex.ShapeType() != TopAbs_VERTEX) {
+        return {};
+    }
+    constexpr int kVertexMode = 1;
+    if (!object->HasSelection(kVertexMode) || object->Selection(kVertexMode).IsNull() ||
+        object->Selection(kVertexMode)->IsEmpty()) {
+        object->RecomputePrimitives(kVertexMode);
+    }
+    if (!object->HasSelection(kVertexMode) || object->Selection(kVertexMode).IsNull()) {
+        return {};
+    }
+    for (const auto& entity : object->Selection(kVertexMode)->Entities()) {
+        if (entity.IsNull()) {
+            continue;
+        }
+        const auto sensitive = entity->BaseSensitive();
+        if (sensitive.IsNull() || sensitive->OwnerId().IsNull()) {
+            continue;
+        }
+        const opencascade::handle<StdSelect_BRepOwner> owner =
+            opencascade::handle<StdSelect_BRepOwner>::DownCast(sensitive->OwnerId());
+        if (owner.IsNull() || owner->Shape().IsNull() || owner->Shape().ShapeType() != TopAbs_VERTEX) {
+            continue;
+        }
+        if (owner->Shape().IsSame(localVertex)) {
+            return owner;
+        }
+    }
+    return {};
 }
 
 } // namespace
@@ -777,4 +857,103 @@ TEST(SceneBuilder, ColorGroupsFollowMeshBatch) {
     builder.reset(nullptr);
     model.reset();
     expectDocumentsReleased(before);
+}
+
+TEST(SceneBuilder, ConnectedPrototypeVertexPickKeepsBRepOwnerAndInstanceTransform) {
+    auto context = contextOrEmpty();
+    ASSERT_FALSE(context.IsNull());
+
+    steplens::mesh::MeshBatch batch;
+    batch.id = 42;
+    const TopoDS_Shape box = boxAt(0.0, 0.0, 0.0, 10.0);
+    opencascade::handle<steplens::scene::PrototypePrs> proto =
+        new steplens::scene::PrototypePrs(batch, box);
+    ASSERT_EQ(proto->AcceptShapeDecomposition(), Standard_True);
+
+    gp_Trsf leftTrsf;
+    leftTrsf.SetTranslation(gp_Vec{0.0, 0.0, 0.0});
+    gp_Trsf rightTrsf;
+    rightTrsf.SetTranslation(gp_Vec{40.0, 0.0, 0.0});
+
+    opencascade::handle<AIS_ConnectedInteractive> left = new AIS_ConnectedInteractive();
+    opencascade::handle<AIS_ConnectedInteractive> right = new AIS_ConnectedInteractive();
+    left->Connect(proto, leftTrsf);
+    right->Connect(proto, rightTrsf);
+
+    constexpr int kVertexMode = 1;
+    constexpr int kEdgeMode = 2;
+    context->Display(left, steplens::scene::PrototypePrs::ShadedWithEdges, kVertexMode, false);
+    context->Display(right, steplens::scene::PrototypePrs::ShadedWithEdges, kVertexMode, false);
+    left->RecomputePrimitives(kVertexMode);
+    right->RecomputePrimitives(kVertexMode);
+    left->RecomputePrimitives(kEdgeMode);
+    right->RecomputePrimitives(kEdgeMode);
+
+    ASSERT_FALSE(firstBRepOwner(left, kVertexMode).IsNull());
+    ASSERT_FALSE(firstBRepOwner(right, kVertexMode).IsNull());
+    ASSERT_FALSE(firstBRepOwner(left, kEdgeMode).IsNull());
+    ASSERT_FALSE(firstBRepOwner(right, kEdgeMode).IsNull());
+
+    const opencascade::handle<StdSelect_BRepOwner> leftSeed = firstBRepOwner(left, kVertexMode);
+    ASSERT_FALSE(leftSeed.IsNull());
+    ASSERT_EQ(leftSeed->Shape().ShapeType(), TopAbs_VERTEX);
+    const TopoDS_Shape localVertex = leftSeed->Shape();
+    const opencascade::handle<StdSelect_BRepOwner> rightOwner = matchingVertexOwner(right, localVertex);
+    ASSERT_FALSE(rightOwner.IsNull()) << "same prototype vertex must stay a StdSelect_BRepOwner";
+
+    const gp_Pnt local = BRep_Tool::Pnt(TopoDS::Vertex(localVertex));
+    const gp_Trsf leftResolved = resolveInstanceTransform(leftSeed, left);
+    const gp_Trsf rightResolved = resolveInstanceTransform(rightOwner, right);
+    const gp_Pnt worldLeft = local.Transformed(leftResolved);
+    const gp_Pnt worldRight = local.Transformed(rightResolved);
+    EXPECT_NEAR(worldLeft.Distance(worldRight), 40.0, 1.0e-6)
+        << "world delta must be instance translation 40, not 0 (untransformed) or 80 (double)";
+    EXPECT_NEAR(worldRight.X() - worldLeft.X(), 40.0, 1.0e-6);
+    EXPECT_NEAR(worldLeft.X(), local.X(), 1.0e-6);
+    EXPECT_NEAR(worldRight.X(), local.X() + 40.0, 1.0e-6);
+
+    steplens::scene::SceneBuilder builder(context);
+    context->ClearSelected(false);
+    context->SetSelected(leftSeed, false);
+    const auto pickedLeft = builder.pickedElement();
+    ASSERT_TRUE(pickedLeft.has_value());
+    ASSERT_EQ(pickedLeft->shape.ShapeType(), TopAbs_VERTEX);
+    const gp_Pnt viaBuilderLeft =
+        BRep_Tool::Pnt(TopoDS::Vertex(pickedLeft->shape)).Transformed(pickedLeft->transform);
+
+    context->ClearSelected(false);
+    context->SetSelected(rightOwner, false);
+    const auto pickedRight = builder.pickedElement();
+    ASSERT_TRUE(pickedRight.has_value());
+    ASSERT_EQ(pickedRight->shape.ShapeType(), TopAbs_VERTEX);
+    const gp_Pnt viaBuilderRight =
+        BRep_Tool::Pnt(TopoDS::Vertex(pickedRight->shape)).Transformed(pickedRight->transform);
+    EXPECT_NEAR(viaBuilderLeft.Distance(viaBuilderRight), 40.0, 1.0e-6);
+    EXPECT_NEAR(viaBuilderRight.X() - viaBuilderLeft.X(), 40.0, 1.0e-6);
+
+    // instanceColor 路径：独立 PrototypePrs + SetLocalTransformation，不经 ConnectedInteractive。
+    steplens::mesh::MeshBatch coloredBatch;
+    coloredBatch.id = 43;
+    opencascade::handle<steplens::scene::PrototypePrs> colored =
+        new steplens::scene::PrototypePrs(coloredBatch, box);
+    colored->SetLocalTransformation(rightTrsf);
+    context->Display(colored, steplens::scene::PrototypePrs::ShadedWithEdges, kVertexMode, false);
+    colored->RecomputePrimitives(kVertexMode);
+    const opencascade::handle<StdSelect_BRepOwner> coloredOwner = firstBRepOwner(colored, kVertexMode);
+    ASSERT_FALSE(coloredOwner.IsNull());
+    ASSERT_EQ(coloredOwner->Shape().ShapeType(), TopAbs_VERTEX);
+    const gp_Pnt coloredLocal = BRep_Tool::Pnt(TopoDS::Vertex(coloredOwner->Shape()));
+    const gp_Pnt coloredWorld =
+        coloredLocal.Transformed(resolveInstanceTransform(coloredOwner, colored));
+    EXPECT_NEAR(coloredWorld.X(), coloredLocal.X() + 40.0, 1.0e-6);
+
+    context->ClearSelected(false);
+    context->SetSelected(coloredOwner, false);
+    const auto pickedColored = builder.pickedElement();
+    ASSERT_TRUE(pickedColored.has_value());
+    const gp_Pnt viaBuilderColored =
+        BRep_Tool::Pnt(TopoDS::Vertex(pickedColored->shape)).Transformed(pickedColored->transform);
+    EXPECT_NEAR(viaBuilderColored.X(), coloredLocal.X() + 40.0, 1.0e-6);
+
+    context->RemoveAll(false);
 }

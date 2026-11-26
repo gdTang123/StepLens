@@ -313,11 +313,14 @@ void LoadPipeline::open(const std::filesystem::path& file, std::chrono::millisec
 void LoadPipeline::cancel() {
     std::shared_ptr<LoadSession> session;
     std::shared_ptr<const model::DocumentModel> dropped;
-    bool clearShown = false;
     {
         std::lock_guard lock(m_state->mutex);
-        // 只在加载过程中生效。Ready 之后按 Esc 不清除已经显示的模型。
+        // 空闲 / Ready / 失败后取消为空操作。
+        // 已成功且已提交到宿主后不再回滚；邮箱里尚未提交的 B 仍可取消丢弃。
         if (m_state->activity != LoadActivity::Loading) {
+            return;
+        }
+        if (m_state->adopted && m_state->doneGeneration == m_state->generation && m_state->success) {
             return;
         }
         ++m_state->generation;
@@ -326,22 +329,14 @@ void LoadPipeline::cancel() {
         m_state->hasModel = false;
         m_state->batches.clear();
         m_state->success = false;
-        // adopted 表示本次模型已交给 Host；haveDisplay 可能只是旧模型仍在屏幕上。
-        clearShown = m_state->adopted;
         m_state->adopted = false;
-        if (clearShown) {
-            m_state->haveDisplay = false;
-            m_state->displayedFile.clear();
-        }
+        // 宿主上仍是 A（若有）。只丢掉 B 的邮箱，不 clear，不误销 A。
         m_state->activity = LoadActivity::Releasing;
     }
     if (session) {
         session->cancel();
     }
     model::retireDocument(std::move(dropped));
-    if (clearShown) {
-        m_host.clear();
-    }
     Log::info("取消打开");
 }
 
@@ -349,7 +344,6 @@ void LoadPipeline::tick() {
     std::shared_ptr<const model::DocumentModel> model;
     std::vector<mesh::MeshBatch> batches;
     bool adopt = false;
-    bool failed = false;
     bool success = false;
     bool done = false;
     bool adopted = false;
@@ -362,43 +356,36 @@ void LoadPipeline::tick() {
         activity = m_state->activity;
         done = m_state->doneGeneration == m_state->generation;
         success = m_state->success;
-        failed = m_state->failure.has_value();
+        const bool failed = m_state->failure.has_value();
         adopted = m_state->adopted;
+        // 失败：丢弃 B 邮箱，宿主上的 A 不动。
         if (m_state->activity == LoadActivity::Loading && done && failed && !success) {
-            const bool dropPartial = m_state->adopted;
             m_state->adopted = false;
-            if (dropPartial) {
-                m_state->haveDisplay = false;
-                m_state->displayedFile.clear();
-            }
             m_state->activity = m_state->haveDisplay ? LoadActivity::Ready : LoadActivity::Idle;
             m_state->batches.clear();
             retireMailbox = std::move(m_state->model);
             m_state->hasModel = false;
-            if (dropPartial) {
-                adopted = true;
-            }
+            adopted = false;
         }
-        if (m_state->activity == LoadActivity::Loading && m_state->hasModel && !m_state->adopted) {
+        // 仅在 B 已成功算完后才提交到宿主；加载过程中 A 继续显示。
+        if (m_state->activity == LoadActivity::Loading && done && success && m_state->hasModel &&
+            !m_state->adopted) {
             model = std::move(m_state->model);
             m_state->hasModel = false;
             adopt = true;
         }
-        if (m_state->activity == LoadActivity::Loading) {
+        if (m_state->activity == LoadActivity::Loading && done && success) {
             batches.swap(m_state->batches);
         }
         activity = m_state->activity;
     }
 
     model::retireDocument(std::move(retireMailbox));
-    if (failed && done && !success && adopted && !adopt) {
-        m_host.clear();
-        return;
-    }
     if (adopt && model) {
         m_host.reset(std::move(model));
         std::lock_guard lock(m_state->mutex);
-        if (m_state->activity != LoadActivity::Loading) {
+        if (m_state->activity != LoadActivity::Loading ||
+            m_state->doneGeneration != m_state->generation || !m_state->success) {
             adopt = false;
         } else {
             m_state->adopted = true;
@@ -407,7 +394,7 @@ void LoadPipeline::tick() {
             activity = m_state->activity;
         }
     }
-    if (activity == LoadActivity::Loading) {
+    if (activity == LoadActivity::Loading && done && success) {
         for (mesh::MeshBatch& batch : batches) {
             m_host.enqueue(std::move(batch));
         }
