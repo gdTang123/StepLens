@@ -110,8 +110,7 @@ LengthUnitSettings Settings::lengthUnit() const {
         unit.label = QStringLiteral("mm");
     }
     bool scaleOk = false;
-    const double scale =
-        m_ini->value(QStringLiteral("units/fromMillimeters"), 1.0).toDouble(&scaleOk);
+    const double scale = m_ini->value(QStringLiteral("units/fromMillimeters"), 1.0).toDouble(&scaleOk);
     if (!scaleOk || !std::isfinite(scale) || !(scale > 0.0)) {
         Log::warn("长度显示单位换算非法，已回落到默认 mm / 1.0");
         return {};

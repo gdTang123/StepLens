@@ -866,8 +866,7 @@ TEST(SceneBuilder, ConnectedPrototypeVertexPickKeepsBRepOwnerAndInstanceTransfor
     steplens::mesh::MeshBatch batch;
     batch.id = 42;
     const TopoDS_Shape box = boxAt(0.0, 0.0, 0.0, 10.0);
-    opencascade::handle<steplens::scene::PrototypePrs> proto =
-        new steplens::scene::PrototypePrs(batch, box);
+    opencascade::handle<steplens::scene::PrototypePrs> proto = new steplens::scene::PrototypePrs(batch, box);
     ASSERT_EQ(proto->AcceptShapeDecomposition(), Standard_True);
 
     gp_Trsf leftTrsf;
@@ -943,8 +942,7 @@ TEST(SceneBuilder, ConnectedPrototypeVertexPickKeepsBRepOwnerAndInstanceTransfor
     ASSERT_FALSE(coloredOwner.IsNull());
     ASSERT_EQ(coloredOwner->Shape().ShapeType(), TopAbs_VERTEX);
     const gp_Pnt coloredLocal = BRep_Tool::Pnt(TopoDS::Vertex(coloredOwner->Shape()));
-    const gp_Pnt coloredWorld =
-        coloredLocal.Transformed(resolveInstanceTransform(coloredOwner, colored));
+    const gp_Pnt coloredWorld = coloredLocal.Transformed(resolveInstanceTransform(coloredOwner, colored));
     EXPECT_NEAR(coloredWorld.X(), coloredLocal.X() + 40.0, 1.0e-6);
 
     context->ClearSelected(false);

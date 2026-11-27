@@ -117,8 +117,7 @@ bool faceHinge(const TopoDS_Shape& faceA, const TopoDS_Shape& faceB, gp_Pnt& hin
                gp_Dir& outwardB) {
     gp_Pln planeA;
     gp_Pln planeB;
-    if (!tryFaceOutwardNormal(faceA, planeA, outwardA) ||
-        !tryFaceOutwardNormal(faceB, planeB, outwardB)) {
+    if (!tryFaceOutwardNormal(faceA, planeA, outwardA) || !tryFaceOutwardNormal(faceB, planeB, outwardB)) {
         return false;
     }
 
@@ -190,8 +189,8 @@ TopoDS_Shape makeArc(const gp_Pnt& hinge, const gp_Dir& fromDir, const gp_Dir& t
 }
 
 // 两真实外法向 → 面内腿，张角等于锐角 θ（angleBetween 契约），且朝向外侧。
-bool faceFaceArcLegs(const gp_Dir& outwardA, const gp_Dir& outwardB, const gp_Dir& outward,
-                     gp_Dir& arcFrom, gp_Dir& arcTo) {
+bool faceFaceArcLegs(const gp_Dir& outwardA, const gp_Dir& outwardB, const gp_Dir& outward, gp_Dir& arcFrom,
+                     gp_Dir& arcTo) {
     gp_Dir nA = outwardA;
     gp_Dir nB = outwardB;
     // 仅构弧时对齐为锐角，不改用于文字外偏的真实外法向。
@@ -219,8 +218,7 @@ bool faceFaceArcLegs(const gp_Dir& outwardA, const gp_Dir& outwardB, const gp_Di
     return true;
 }
 
-bool edgeFaceArcLegs(const gp_Dir& edgeDir, const gp_Dir& outwardNormal, gp_Dir& arcFrom,
-                     gp_Dir& arcTo) {
+bool edgeFaceArcLegs(const gp_Dir& edgeDir, const gp_Dir& outwardNormal, gp_Dir& arcFrom, gp_Dir& arcTo) {
     gp_Dir d = edgeDir;
     const double dn = d.Dot(outwardNormal);
     // θ≈0°：边平行于面，不画弧。
@@ -252,8 +250,7 @@ bool edgeFaceArcLegs(const gp_Dir& edgeDir, const gp_Dir& outwardNormal, gp_Dir&
 
 } // namespace
 
-AngleMarkPlacement computeAngleMarkPlacement(const measure::MeasureShape& a,
-                                             const measure::MeasureShape& b) {
+AngleMarkPlacement computeAngleMarkPlacement(const measure::MeasureShape& a, const measure::MeasureShape& b) {
     AngleMarkPlacement out;
     if (a.shape.IsNull() || b.shape.IsNull()) {
         return out;
@@ -291,8 +288,7 @@ AngleMarkPlacement computeAngleMarkPlacement(const measure::MeasureShape& a,
                 if (dist.IsDone() && dist.NbSolution() >= 1) {
                     const gp_Pnt pA = dist.PointOnShape1(1);
                     const gp_Pnt pB = dist.PointOnShape2(1);
-                    hinge = gp_Pnt(0.5 * (pA.X() + pB.X()), 0.5 * (pA.Y() + pB.Y()),
-                                   0.5 * (pA.Z() + pB.Z()));
+                    hinge = gp_Pnt(0.5 * (pA.X() + pB.X()), 0.5 * (pA.Y() + pB.Y()), 0.5 * (pA.Z() + pB.Z()));
                     ok = finitePnt(hinge);
                 } else {
                     hinge = gp_Pnt(0.5 * (midA.X() + midB.X()), 0.5 * (midA.Y() + midB.Y()),
@@ -328,8 +324,7 @@ AngleMarkPlacement computeAngleMarkPlacement(const measure::MeasureShape& a,
             if (dist.IsDone() && dist.NbSolution() >= 1) {
                 const gp_Pnt pA = dist.PointOnShape1(1);
                 const gp_Pnt pB = dist.PointOnShape2(1);
-                hinge = gp_Pnt(0.5 * (pA.X() + pB.X()), 0.5 * (pA.Y() + pB.Y()),
-                               0.5 * (pA.Z() + pB.Z()));
+                hinge = gp_Pnt(0.5 * (pA.X() + pB.X()), 0.5 * (pA.Y() + pB.Y()), 0.5 * (pA.Z() + pB.Z()));
                 ok = finitePnt(hinge);
             }
         }

@@ -41,7 +41,7 @@ public:
     bool AcceptDisplayMode(const int theMode) const override;
     // 必须为真：AIS_ConnectedInteractive 在 mode!=0 时才会走 computeSubShapeSelection，
     // 保留 StdSelect_BRepOwner；否则复制敏感体并换成普通 EntityOwner，顶点/边/面拾取失败。
-    Standard_Boolean AcceptShapeDecomposition() const override;
+    bool AcceptShapeDecomposition() const override;
 
     DEFINE_STANDARD_RTTI_INLINE(PrototypePrs, AIS_InteractiveObject)
 

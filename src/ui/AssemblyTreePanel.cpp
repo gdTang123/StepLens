@@ -40,9 +40,8 @@ AssemblyTreePanel::AssemblyTreePanel(QWidget* parent) : QDockWidget(tr("装配�
     m_view->setContextMenuPolicy(Qt::CustomContextMenu);
 
     connect(m_search, &QLineEdit::textChanged, this, &AssemblyTreePanel::setNameFilter);
-    connect(m_view, &QTreeView::clicked, this, [this](const QModelIndex& proxyIndex) {
-        emit nodeActivated(nodeIdOf(proxyIndex));
-    });
+    connect(m_view, &QTreeView::clicked, this,
+            [this](const QModelIndex& proxyIndex) { emit nodeActivated(nodeIdOf(proxyIndex)); });
     connect(m_view, &QWidget::customContextMenuRequested, this, [this](const QPoint& pos) {
         const QModelIndex proxyIndex = m_view->indexAt(pos);
         if (!proxyIndex.isValid()) {

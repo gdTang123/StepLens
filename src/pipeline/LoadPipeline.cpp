@@ -384,8 +384,8 @@ void LoadPipeline::tick() {
     if (adopt && model) {
         m_host.reset(std::move(model));
         std::lock_guard lock(m_state->mutex);
-        if (m_state->activity != LoadActivity::Loading ||
-            m_state->doneGeneration != m_state->generation || !m_state->success) {
+        if (m_state->activity != LoadActivity::Loading || m_state->doneGeneration != m_state->generation ||
+            !m_state->success) {
             adopt = false;
         } else {
             m_state->adopted = true;

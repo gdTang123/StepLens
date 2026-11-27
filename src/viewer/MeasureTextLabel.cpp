@@ -1,7 +1,8 @@
 #include "viewer/MeasureTextLabel.h"
 
-#include <Aspect_TypeOfDisplayText.hxx>
 #include <Quantity_Color.hxx>
+
+#include <Aspect_TypeOfDisplayText.hxx>
 
 namespace steplens {
 

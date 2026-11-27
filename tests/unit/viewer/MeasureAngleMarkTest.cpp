@@ -234,16 +234,15 @@ TEST(MeasureAngleMark, DegenerateOrEmptyShapesDoNotThrow) {
 
     steplens::AngleMarkPlacement fromDegenerate;
     EXPECT_NO_THROW({
-        fromDegenerate = steplens::computeAngleMarkPlacement(measureOf(degenerated),
-                                                             measureOf(makeFace.Face()));
+        fromDegenerate =
+            steplens::computeAngleMarkPlacement(measureOf(degenerated), measureOf(makeFace.Face()));
     });
     // 退化边无有效几何：安全返回，不抛。
     EXPECT_TRUE(!fromDegenerate.valid || fromDegenerate.arc.IsNull());
 
     steplens::measure::MeasureShape nullShape;
     steplens::AngleMarkPlacement fromNull;
-    EXPECT_NO_THROW({
-        fromNull = steplens::computeAngleMarkPlacement(nullShape, measureOf(makeFace.Face()));
-    });
+    EXPECT_NO_THROW(
+        { fromNull = steplens::computeAngleMarkPlacement(nullShape, measureOf(makeFace.Face())); });
     EXPECT_FALSE(fromNull.valid);
 }

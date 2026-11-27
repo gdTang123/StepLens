@@ -37,13 +37,13 @@
 #include <QIcon>
 #include <QKeySequence>
 #include <QLabel>
-#include <QSize>
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QMimeData>
 #include <QShortcut>
 #include <QSignalBlocker>
+#include <QSize>
 #include <QStatusBar>
 #include <QTimer>
 #include <QToolBar>
@@ -387,8 +387,8 @@ void MainWindow::buildMenus() {
     toolbar->setMovable(false);
     toolbar->addAction(openAction);
     auto* fitAction = new QAction(tr("适应窗口"), this);
-    decorate(fitAction, tr("适应窗口"), QStringLiteral("actionFit"),
-             ui::toolbarIcon(ui::ToolbarGlyph::Fit), QKeySequence(Qt::Key_F));
+    decorate(fitAction, tr("适应窗口"), QStringLiteral("actionFit"), ui::toolbarIcon(ui::ToolbarGlyph::Fit),
+             QKeySequence(Qt::Key_F));
     fitAction->setEnabled(m_viewer != nullptr);
     connect(fitAction, &QAction::triggered, this, [this] {
         if (m_viewer != nullptr) {
@@ -723,9 +723,8 @@ void MainWindow::refreshUi() {
         // 测量进行中保留 measureMessage 阶段/结果提示，勿每 tick 盖成「已完成」。
         if (!m_memoryNotice.message().isEmpty()) {
             statusBar()->showMessage(m_memoryNotice.message());
-        } else if (m_viewer == nullptr ||
-                   !measureModeBlocksReadyCompleted(m_viewer->pointDistanceActive(),
-                                                    m_viewer->angleActive())) {
+        } else if (m_viewer == nullptr || !measureModeBlocksReadyCompleted(m_viewer->pointDistanceActive(),
+                                                                           m_viewer->angleActive())) {
             statusBar()->showMessage(tr("已完成"));
         }
         if (!m_quitWhenReadyArmed && qEnvironmentVariableIsSet("STEPLENS_QUIT_WHEN_READY")) {

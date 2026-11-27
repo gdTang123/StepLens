@@ -29,9 +29,8 @@ void ensureApplication() {
     (void)application;
 }
 
-std::shared_ptr<const model::DocumentModel> buildThreeLevel(const char16_t* parentName,
-                                                            const char16_t* childName,
-                                                            const char16_t* grandName) {
+std::shared_ptr<const model::DocumentModel>
+buildThreeLevel(const char16_t* parentName, const char16_t* childName, const char16_t* grandName) {
     opencascade::handle<TDocStd_Document> document;
     XCAFApp_Application::GetApplication()->NewDocument("BinXCAF", document);
     const auto shapes = XCAFDoc_DocumentTool::ShapeTool(document->Main());
@@ -84,8 +83,8 @@ TEST(AssemblyTreeFilterProxy, ChineseParentChildGrandchildHitKeepsAncestors) {
     ASSERT_EQ(visibleRows(proxy, child), 1);
     EXPECT_EQ(proxy.data(proxy.index(0, 0, child)).toString(), QStringLiteral("零件甲"));
 
-    const QModelIndex sourceLeaf = source.indexOf(static_cast<model::NodeId>(
-        proxy.mapToSource(proxy.index(0, 0, child)).internalId()));
+    const QModelIndex sourceLeaf =
+        source.indexOf(static_cast<model::NodeId>(proxy.mapToSource(proxy.index(0, 0, child)).internalId()));
     ASSERT_TRUE(sourceLeaf.isValid());
     const QModelIndex proxyLeaf = proxy.mapFromSource(sourceLeaf);
     ASSERT_TRUE(proxyLeaf.isValid());
