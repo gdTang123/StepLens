@@ -8,6 +8,8 @@ steplens_add_module(viewer
     ViewerWidget.h
     MeasureTextLabel.cpp
     MeasureTextLabel.h
+    MeasureAngleMark.cpp
+    MeasureAngleMark.h
     GlCleanup.h)
 
 # steplens_add_module 在链接 Qt 之前套语言开关。Qt 会再注入 /utf-8、/permissive-、/Zc:__cplusplus。

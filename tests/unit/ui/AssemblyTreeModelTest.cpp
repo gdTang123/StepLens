@@ -2,6 +2,7 @@
 #include "core/ProgressSink.h"
 #include "io/ILoader.h"
 #include "model/DocumentModel.h"
+#include "model/DocumentRelease.h"
 #include "ui/AssemblyTreeModel.h"
 
 #include <QAbstractItemModelTester>
@@ -16,6 +17,7 @@
 #include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
 
+#include <chrono>
 #include <gtest/gtest.h>
 #include <memory>
 #include <vector>
@@ -118,7 +120,10 @@ TEST(AssemblyTreeModel, UnstructuredDocumentIsOneRoot) {
 
 TEST(AssemblyTreeModel, TwoThousandNodesExpandAndMapWithinBudget) {
     ensureApplication();
-    const auto document = buildModel(1999);
+    // shared_ptr 自定义 deleter 把 Close 丢进后台 retirer；若不在用例内等完，
+    // gtest 已 PASSED 后进程退出会卡在 ~Retirer / 大 XCAF Close，被 ctest 180s 杀掉。
+    ASSERT_TRUE(model::waitForDocumentRelease(std::chrono::seconds(30)));
+    auto document = buildModel(1999);
     ASSERT_TRUE(document);
     ui::AssemblyTreeModel tree;
     QAbstractItemModelTester tester(&tree, QAbstractItemModelTester::FailureReportingMode::Fatal);
@@ -133,4 +138,9 @@ TEST(AssemblyTreeModel, TwoThousandNodesExpandAndMapWithinBudget) {
         ASSERT_TRUE(tree.indexOf(id).isValid());
     const qint64 elapsed = timer.elapsed();
     EXPECT_LT(elapsed, 200) << "2000 节点展开与双向查找耗时 " << elapsed << " ms";
+
+    tree.setDocument(nullptr);
+    document.reset();
+    ASSERT_TRUE(model::waitForDocumentRelease(std::chrono::seconds(60)))
+        << "2000 节点文档必须在用例内完成后台 Close，否则进程退出挂起";
 }

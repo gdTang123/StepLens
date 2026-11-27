@@ -6,6 +6,7 @@
 #include "pipeline/SceneHost.h"
 #include "scene/SceneBuilder.h"
 #include "viewer/GlCleanup.h"
+#include "viewer/MeasureAngleMark.h"
 #include "viewer/MeasureTextLabel.h"
 #include "viewer/SceneHostBinding.h"
 
@@ -1598,18 +1599,20 @@ void ViewerWidget::acceptAngleClick() {
     }
     const double degrees = result.value().degrees;
     const QString text = QString::number(degrees, 'f', 2) + QStringLiteral("°");
-    // 放在两次所选形状的包围盒中心，沿用距离标注的文字样式。这个点不是角度顶点，也不画弧。
-    Bnd_Box box;
-    BRepBndLib::Add(first.shape.Moved(TopLoc_Location(first.transform), Standard_True), box);
-    BRepBndLib::Add(element.shape.Moved(TopLoc_Location(element.transform), Standard_True), box);
-    gp_Pnt at(0.0, 0.0, 0.0);
-    if (!box.IsVoid()) {
-        const gp_Pnt low = box.CornerMin();
-        const gp_Pnt high = box.CornerMax();
-        at = gp_Pnt((low.X() + high.X()) * 0.5, (low.Y() + high.Y()) * 0.5, (low.Z() + high.Z()) * 0.5);
-    }
+    // 锚在交线外侧（非法向 AABB 中心），并画可见弧；overlay 层避免被模型挡住。
+    const AngleMarkPlacement placement = computeAngleMarkPlacement(start, end);
+    gp_Pnt at = placement.valid ? placement.labelAnchor : gp_Pnt(0.0, 0.0, 0.0);
     if (!std::isfinite(at.X()) || !std::isfinite(at.Y()) || !std::isfinite(at.Z())) {
         at = gp_Pnt(0.0, 0.0, 0.0);
+    }
+    State::DistanceMark mark;
+    if (placement.valid && !placement.arc.IsNull()) {
+        opencascade::handle<AIS_Shape> arc = new AIS_Shape(placement.arc);
+        arc->SetColor(measureColor());
+        arc->SetWidth(2.0);
+        configureMeasureOverlayObject(arc);
+        mark.line = arc;
+        showMeasureObject(m_state->context, mark.line);
     }
     opencascade::handle<AIS_TextLabel> label = new AIS_TextLabel();
     const QByteArray utf8 = text.toUtf8();
@@ -1617,7 +1620,7 @@ void ViewerWidget::acceptAngleClick() {
     label->SetPosition(at);
     label->SetColor(measureColor());
     configureMeasureTextLabel(label);
-    State::DistanceMark mark;
+    configureMeasureOverlayObject(label);
     mark.label = label;
     showMeasureObject(m_state->context, mark.label);
     m_state->marks.push_back(std::move(mark));

@@ -236,6 +236,7 @@ if(NOT STEPLENS_CORE_ONLY)
     add_executable(steplens_viewer_host_tests
         viewer/ViewerSceneHostMeasureClearTest.cpp
         viewer/MeasureTextLabelTest.cpp
+        viewer/MeasureAngleMarkTest.cpp
         viewer/ViewerMeasurePromptTest.cpp)
     target_include_directories(steplens_viewer_host_tests PRIVATE "${CMAKE_SOURCE_DIR}/src")
     target_link_libraries(steplens_viewer_host_tests PRIVATE
