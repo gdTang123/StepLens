@@ -5,11 +5,14 @@
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
+#include <BRep_Tool.hxx>
 #include <Bnd_Box.hxx>
 #include <GC_MakeArcOfCircle.hxx>
 #include <GeomAbs_CurveType.hxx>
 #include <GeomAbs_SurfaceType.hxx>
 #include <Graphic3d_ZLayerId.hxx>
+#include <Standard_Failure.hxx>
+#include <TopAbs_Orientation.hxx>
 #include <TopAbs_ShapeEnum.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopLoc_Location.hxx>
@@ -29,8 +32,25 @@
 namespace steplens {
 namespace {
 
+constexpr double kParallelDotEps = 1.0e-7;
+constexpr double kCrossEps2 = 1.0e-14;
+
 bool finitePnt(const gp_Pnt& p) {
     return std::isfinite(p.X()) && std::isfinite(p.Y()) && std::isfinite(p.Z());
+}
+
+gp_Dir stablePerpendicularTo(const gp_Dir& axis) {
+    const gp_Vec ref = (std::abs(axis.X()) < 0.9) ? gp_Vec(1.0, 0.0, 0.0) : gp_Vec(0.0, 1.0, 0.0);
+    return gp_Dir(ref.Crossed(gp_Vec(axis)));
+}
+
+// 单位方向之和为外角平分线；近乎相反时无稳定垂直方向，不留不可达的叉积分支。
+gp_Dir outwardBisector(const gp_Dir& a, const gp_Dir& b) {
+    const gp_Vec sum(a.XYZ() + b.XYZ());
+    if (sum.SquareMagnitude() < 1.0e-12) {
+        return stablePerpendicularTo(a);
+    }
+    return gp_Dir(sum);
 }
 
 bool tryPlane(const TopoDS_Shape& world, gp_Pln& plane) {
@@ -45,11 +65,27 @@ bool tryPlane(const TopoDS_Shape& world, gp_Pln& plane) {
     return true;
 }
 
+// 平面几何方向 + Face Orientation → 真实外法向。
+bool tryFaceOutwardNormal(const TopoDS_Shape& world, gp_Pln& plane, gp_Dir& outwardNormal) {
+    if (!tryPlane(world, plane)) {
+        return false;
+    }
+    outwardNormal = plane.Axis().Direction();
+    if (TopoDS::Face(world).Orientation() == TopAbs_REVERSED) {
+        outwardNormal.Reverse();
+    }
+    return true;
+}
+
 bool tryLine(const TopoDS_Shape& world, gp_Lin& line, gp_Pnt& mid) {
     if (world.IsNull() || world.ShapeType() != TopAbs_EDGE) {
         return false;
     }
-    BRepAdaptor_Curve curve(TopoDS::Edge(world));
+    const TopoDS_Edge edge = TopoDS::Edge(world);
+    if (BRep_Tool::Degenerated(edge)) {
+        return false;
+    }
+    BRepAdaptor_Curve curve(edge);
     if (curve.GetType() != GeomAbs_Line) {
         return false;
     }
@@ -77,33 +113,25 @@ double shapeSizeHint(const TopoDS_Shape& a, const TopoDS_Shape& b) {
     return std::max(1.0, diagonal * 0.08);
 }
 
-gp_Dir outwardBisector(const gp_Dir& a, const gp_Dir& b) {
-    gp_Vec sum(a.XYZ() + b.XYZ());
-    if (sum.SquareMagnitude() < 1.0e-12) {
-        gp_Vec cross = gp_Vec(a).Crossed(gp_Vec(b));
-        if (cross.SquareMagnitude() < 1.0e-12) {
-            return a;
-        }
-        return gp_Dir(cross);
-    }
-    return gp_Dir(sum);
-}
-
-bool faceHinge(const TopoDS_Shape& faceA, const TopoDS_Shape& faceB, gp_Pnt& hinge, gp_Dir& normalA,
-               gp_Dir& normalB) {
+bool faceHinge(const TopoDS_Shape& faceA, const TopoDS_Shape& faceB, gp_Pnt& hinge, gp_Dir& outwardA,
+               gp_Dir& outwardB) {
     gp_Pln planeA;
     gp_Pln planeB;
-    if (!tryPlane(faceA, planeA) || !tryPlane(faceB, planeB)) {
+    if (!tryFaceOutwardNormal(faceA, planeA, outwardA) ||
+        !tryFaceOutwardNormal(faceB, planeB, outwardB)) {
         return false;
     }
-    normalA = planeA.Axis().Direction();
-    normalB = planeB.Axis().Direction();
 
-    // 优先：落在两面边界上的共享边中点。
     for (TopExp_Explorer edgesA(faceA, TopAbs_EDGE); edgesA.More(); edgesA.Next()) {
         const TopoDS_Edge edge = TopoDS::Edge(edgesA.Current());
+        if (BRep_Tool::Degenerated(edge)) {
+            continue;
+        }
         for (TopExp_Explorer edgesB(faceB, TopAbs_EDGE); edgesB.More(); edgesB.Next()) {
             if (!edge.IsSame(TopoDS::Edge(edgesB.Current()))) {
+                continue;
+            }
+            if (BRep_Tool::Degenerated(TopoDS::Edge(edgesB.Current()))) {
                 continue;
             }
             BRepAdaptor_Curve curve(edge);
@@ -119,7 +147,6 @@ bool faceHinge(const TopoDS_Shape& faceA, const TopoDS_Shape& faceB, gp_Pnt& hin
         }
     }
 
-    // 退路：两面最近点中点（正交长方体相邻面也会落到交线附近）。
     BRepExtrema_DistShapeShape dist(faceA, faceB);
     if (!dist.IsDone() || dist.NbSolution() < 1) {
         return false;
@@ -133,17 +160,14 @@ bool faceHinge(const TopoDS_Shape& faceA, const TopoDS_Shape& faceB, gp_Pnt& hin
     return finitePnt(hinge);
 }
 
+// 平行（夹角约 0°）不画弧，返回空 shape。
 TopoDS_Shape makeArc(const gp_Pnt& hinge, const gp_Dir& fromDir, const gp_Dir& toDir, double radius) {
     if (!(radius > 0.0) || !std::isfinite(radius)) {
         return {};
     }
-    gp_Vec cross = gp_Vec(fromDir).Crossed(gp_Vec(toDir));
-    if (cross.SquareMagnitude() < 1.0e-14) {
-        // 平行：画一小段折线代替弧。
-        const gp_Pnt a = hinge.Translated(gp_Vec(fromDir) * radius);
-        const gp_Pnt b = hinge.Translated(gp_Vec(toDir) * radius);
-        BRepBuilderAPI_MakeEdge edge(a, b);
-        return edge.IsDone() ? edge.Shape() : TopoDS_Shape{};
+    const gp_Vec cross = gp_Vec(fromDir).Crossed(gp_Vec(toDir));
+    if (cross.SquareMagnitude() < kCrossEps2) {
+        return {};
     }
     const gp_Dir planeNormal(cross);
     const gp_Pnt pFrom = hinge.Translated(gp_Vec(fromDir) * radius);
@@ -152,7 +176,6 @@ TopoDS_Shape makeArc(const gp_Pnt& hinge, const gp_Dir& fromDir, const gp_Dir& t
     const gp_Pnt pMid = hinge.Translated(gp_Vec(midDir) * radius);
     GC_MakeArcOfCircle maker(pFrom, pMid, pTo);
     if (!maker.IsDone()) {
-        // 三点弧失败时用圆参数弧。
         gp_Ax2 axes(hinge, planeNormal, fromDir);
         gp_Circ circ(axes, radius);
         const double angle = gp_Vec(fromDir).Angle(gp_Vec(toDir));
@@ -166,6 +189,67 @@ TopoDS_Shape makeArc(const gp_Pnt& hinge, const gp_Dir& fromDir, const gp_Dir& t
     return edge.IsDone() ? edge.Shape() : TopoDS_Shape{};
 }
 
+// 两真实外法向 → 面内腿，张角等于锐角 θ（angleBetween 契约），且朝向外侧。
+bool faceFaceArcLegs(const gp_Dir& outwardA, const gp_Dir& outwardB, const gp_Dir& outward,
+                     gp_Dir& arcFrom, gp_Dir& arcTo) {
+    gp_Dir nA = outwardA;
+    gp_Dir nB = outwardB;
+    // 仅构弧时对齐为锐角，不改用于文字外偏的真实外法向。
+    if (nA.Dot(nB) < 0.0) {
+        nB.Reverse();
+    }
+    gp_Vec edgeApprox = gp_Vec(nA).Crossed(gp_Vec(nB));
+    if (edgeApprox.SquareMagnitude() < kCrossEps2) {
+        return false;
+    }
+    const gp_Dir edgeDir(edgeApprox);
+    // 同序叉积：inA·inB = cosθ，张角为 θ，而不是 π-θ。
+    gp_Vec inA = gp_Vec(edgeDir).Crossed(gp_Vec(nA));
+    gp_Vec inB = gp_Vec(edgeDir).Crossed(gp_Vec(nB));
+    if (inA.SquareMagnitude() < kCrossEps2 || inB.SquareMagnitude() < kCrossEps2) {
+        return false;
+    }
+    arcFrom = gp_Dir(inA);
+    arcTo = gp_Dir(inB);
+    // 一对翻转保持张角 θ，使角平分线与真实外侧同向。
+    if (outwardBisector(arcFrom, arcTo).Dot(outward) < 0.0) {
+        arcFrom.Reverse();
+        arcTo.Reverse();
+    }
+    return true;
+}
+
+bool edgeFaceArcLegs(const gp_Dir& edgeDir, const gp_Dir& outwardNormal, gp_Dir& arcFrom,
+                     gp_Dir& arcTo) {
+    gp_Dir d = edgeDir;
+    const double dn = d.Dot(outwardNormal);
+    // θ≈0°：边平行于面，不画弧。
+    if (std::abs(dn) <= kParallelDotEps) {
+        return false;
+    }
+    if (dn < 0.0) {
+        d.Reverse();
+    }
+    const gp_Vec dParaVec = gp_Vec(d) - gp_Vec(outwardNormal) * d.Dot(outwardNormal);
+    const double paraMag2 = dParaVec.SquareMagnitude();
+    if (paraMag2 <= kCrossEps2) {
+        // θ=90°：边垂直于面，取稳定面内基向量。
+        arcFrom = d;
+        arcTo = stablePerpendicularTo(outwardNormal);
+        if (outwardBisector(arcFrom, arcTo).Dot(outwardNormal) < 0.0) {
+            arcTo.Reverse();
+        }
+        return true;
+    }
+    gp_Dir dPara(dParaVec);
+    if (d.Dot(dPara) < 0.0) {
+        dPara.Reverse();
+    }
+    arcFrom = d;
+    arcTo = dPara;
+    return true;
+}
+
 } // namespace
 
 AngleMarkPlacement computeAngleMarkPlacement(const measure::MeasureShape& a,
@@ -174,28 +258,72 @@ AngleMarkPlacement computeAngleMarkPlacement(const measure::MeasureShape& a,
     if (a.shape.IsNull() || b.shape.IsNull()) {
         return out;
     }
-    const TopoDS_Shape worldA = a.shape.Moved(TopLoc_Location(a.transform), true);
-    const TopoDS_Shape worldB = b.shape.Moved(TopLoc_Location(b.transform), true);
-    if (worldA.IsNull() || worldB.IsNull()) {
-        return out;
-    }
+    try {
+        const TopoDS_Shape worldA = a.shape.Moved(TopLoc_Location(a.transform), true);
+        const TopoDS_Shape worldB = b.shape.Moved(TopLoc_Location(b.transform), true);
+        if (worldA.IsNull() || worldB.IsNull()) {
+            return out;
+        }
 
-    const double offset = shapeSizeHint(worldA, worldB);
-    gp_Pnt hinge;
-    gp_Dir dirA(1.0, 0.0, 0.0);
-    gp_Dir dirB(0.0, 1.0, 0.0);
-    bool ok = false;
+        const double offset = shapeSizeHint(worldA, worldB);
+        gp_Pnt hinge;
+        gp_Dir dirA(1.0, 0.0, 0.0);
+        gp_Dir dirB(0.0, 1.0, 0.0);
+        bool ok = false;
+        enum class PairKind { FaceFace, EdgeEdge, EdgeFace, Unknown };
+        PairKind kind = PairKind::Unknown;
 
-    if (worldA.ShapeType() == TopAbs_FACE && worldB.ShapeType() == TopAbs_FACE) {
-        ok = faceHinge(worldA, worldB, hinge, dirA, dirB);
-    } else if (worldA.ShapeType() == TopAbs_EDGE && worldB.ShapeType() == TopAbs_EDGE) {
-        gp_Lin lineA;
-        gp_Lin lineB;
-        gp_Pnt midA;
-        gp_Pnt midB;
-        if (tryLine(worldA, lineA, midA) && tryLine(worldB, lineB, midB)) {
-            dirA = lineA.Direction();
-            dirB = lineB.Direction();
+        if (worldA.ShapeType() == TopAbs_FACE && worldB.ShapeType() == TopAbs_FACE) {
+            ok = faceHinge(worldA, worldB, hinge, dirA, dirB);
+            kind = PairKind::FaceFace;
+        } else if (worldA.ShapeType() == TopAbs_EDGE && worldB.ShapeType() == TopAbs_EDGE) {
+            gp_Lin lineA;
+            gp_Lin lineB;
+            gp_Pnt midA;
+            gp_Pnt midB;
+            if (tryLine(worldA, lineA, midA) && tryLine(worldB, lineB, midB)) {
+                dirA = lineA.Direction();
+                dirB = lineB.Direction();
+                if (dirA.Dot(dirB) < 0.0) {
+                    dirB.Reverse();
+                }
+                BRepExtrema_DistShapeShape dist(worldA, worldB);
+                if (dist.IsDone() && dist.NbSolution() >= 1) {
+                    const gp_Pnt pA = dist.PointOnShape1(1);
+                    const gp_Pnt pB = dist.PointOnShape2(1);
+                    hinge = gp_Pnt(0.5 * (pA.X() + pB.X()), 0.5 * (pA.Y() + pB.Y()),
+                                   0.5 * (pA.Z() + pB.Z()));
+                    ok = finitePnt(hinge);
+                } else {
+                    hinge = gp_Pnt(0.5 * (midA.X() + midB.X()), 0.5 * (midA.Y() + midB.Y()),
+                                   0.5 * (midA.Z() + midB.Z()));
+                    ok = finitePnt(hinge);
+                }
+                kind = PairKind::EdgeEdge;
+            }
+        } else if ((worldA.ShapeType() == TopAbs_EDGE && worldB.ShapeType() == TopAbs_FACE) ||
+                   (worldA.ShapeType() == TopAbs_FACE && worldB.ShapeType() == TopAbs_EDGE)) {
+            const TopoDS_Shape& edgeShape = worldA.ShapeType() == TopAbs_EDGE ? worldA : worldB;
+            const TopoDS_Shape& faceShape = worldA.ShapeType() == TopAbs_FACE ? worldA : worldB;
+            gp_Lin line;
+            gp_Pnt mid;
+            gp_Pln plane;
+            gp_Dir outwardNormal;
+            if (tryLine(edgeShape, line, mid) && tryFaceOutwardNormal(faceShape, plane, outwardNormal)) {
+                BRepExtrema_DistShapeShape dist(edgeShape, faceShape);
+                if (dist.IsDone() && dist.NbSolution() >= 1) {
+                    hinge = dist.PointOnShape1(1);
+                } else {
+                    hinge = mid;
+                }
+                dirA = line.Direction();
+                dirB = outwardNormal;
+                ok = finitePnt(hinge);
+                kind = PairKind::EdgeFace;
+            }
+        }
+
+        if (!ok) {
             BRepExtrema_DistShapeShape dist(worldA, worldB);
             if (dist.IsDone() && dist.NbSolution() >= 1) {
                 const gp_Pnt pA = dist.PointOnShape1(1);
@@ -203,80 +331,44 @@ AngleMarkPlacement computeAngleMarkPlacement(const measure::MeasureShape& a,
                 hinge = gp_Pnt(0.5 * (pA.X() + pB.X()), 0.5 * (pA.Y() + pB.Y()),
                                0.5 * (pA.Z() + pB.Z()));
                 ok = finitePnt(hinge);
-            } else {
-                hinge = gp_Pnt(0.5 * (midA.X() + midB.X()), 0.5 * (midA.Y() + midB.Y()),
-                               0.5 * (midA.Z() + midB.Z()));
-                ok = finitePnt(hinge);
             }
         }
-    } else {
-        // 边-面：铰点取最近点，方向用边切向与面法向的正交分解。
-        const TopoDS_Shape& edgeShape = worldA.ShapeType() == TopAbs_EDGE ? worldA : worldB;
-        const TopoDS_Shape& faceShape = worldA.ShapeType() == TopAbs_FACE ? worldA : worldB;
-        gp_Lin line;
-        gp_Pnt mid;
-        gp_Pln plane;
-        if (tryLine(edgeShape, line, mid) && tryPlane(faceShape, plane)) {
-            BRepExtrema_DistShapeShape dist(edgeShape, faceShape);
-            if (dist.IsDone() && dist.NbSolution() >= 1) {
-                hinge = dist.PointOnShape1(1);
-            } else {
-                hinge = mid;
-            }
-            dirA = line.Direction();
-            dirB = plane.Axis().Direction();
-            ok = finitePnt(hinge);
+        if (!ok) {
+            return out;
         }
-    }
 
-    if (!ok) {
-        BRepExtrema_DistShapeShape dist(worldA, worldB);
-        if (dist.IsDone() && dist.NbSolution() >= 1) {
-            const gp_Pnt pA = dist.PointOnShape1(1);
-            const gp_Pnt pB = dist.PointOnShape2(1);
-            hinge = gp_Pnt(0.5 * (pA.X() + pB.X()), 0.5 * (pA.Y() + pB.Y()),
-                           0.5 * (pA.Z() + pB.Z()));
-            ok = finitePnt(hinge);
+        gp_Dir outward = outwardBisector(dirA, dirB);
+        if (kind == PairKind::EdgeFace) {
+            // 文字外偏：沿面外法向（dirB）一侧。
+            outward = dirB;
         }
-    }
-    if (!ok) {
+        out.hinge = hinge;
+        out.labelAnchor = hinge.Translated(gp_Vec(outward) * offset);
+        if (!finitePnt(out.labelAnchor)) {
+            return out;
+        }
+
+        const double radius = std::max(0.5, offset * 0.65);
+        gp_Dir arcFrom = dirA;
+        gp_Dir arcTo = dirB;
+        bool drawArc = false;
+        if (kind == PairKind::FaceFace) {
+            drawArc = faceFaceArcLegs(dirA, dirB, outward, arcFrom, arcTo);
+        } else if (kind == PairKind::EdgeFace) {
+            drawArc = edgeFaceArcLegs(dirA, dirB, arcFrom, arcTo);
+        } else {
+            // EdgeEdge / Unknown：dirB 已按锐角对齐；近平行则不画弧。
+            drawArc = gp_Vec(dirA).Crossed(gp_Vec(dirB)).SquareMagnitude() >= kCrossEps2;
+        }
+
+        if (drawArc) {
+            out.arc = makeArc(hinge, arcFrom, arcTo, radius);
+        }
+        out.valid = true;
         return out;
+    } catch (const Standard_Failure&) {
+        return AngleMarkPlacement{};
     }
-
-    const gp_Dir outward = outwardBisector(dirA, dirB);
-    out.hinge = hinge;
-    out.labelAnchor = hinge.Translated(gp_Vec(outward) * offset);
-    if (!finitePnt(out.labelAnchor)) {
-        return out;
-    }
-
-    // 弧落在两方向张成的平面上，半径略小于文字偏移，便于看到。
-    const double radius = std::max(0.5, offset * 0.65);
-    // 面法向角：弧端点沿面内、垂直于交线的方向更直观。
-    gp_Dir arcFrom = dirA;
-    gp_Dir arcTo = dirB;
-    if (worldA.ShapeType() == TopAbs_FACE && worldB.ShapeType() == TopAbs_FACE) {
-        gp_Vec edgeApprox = gp_Vec(dirA).Crossed(gp_Vec(dirB));
-        if (edgeApprox.SquareMagnitude() > 1.0e-14) {
-            const gp_Dir edgeDir(edgeApprox);
-            gp_Vec inA = gp_Vec(edgeDir).Crossed(gp_Vec(dirA));
-            gp_Vec inB = gp_Vec(dirB).Crossed(gp_Vec(edgeDir));
-            if (inA.SquareMagnitude() > 1.0e-14 && inB.SquareMagnitude() > 1.0e-14) {
-                // 取朝向外侧（与 outward 同侧）的面内方向。
-                if (inA.Dot(gp_Vec(outward)) < 0.0) {
-                    inA.Reverse();
-                }
-                if (inB.Dot(gp_Vec(outward)) < 0.0) {
-                    inB.Reverse();
-                }
-                arcFrom = gp_Dir(inA);
-                arcTo = gp_Dir(inB);
-            }
-        }
-    }
-    out.arc = makeArc(hinge, arcFrom, arcTo, radius);
-    out.valid = true;
-    return out;
 }
 
 void configureMeasureOverlayObject(const opencascade::handle<AIS_InteractiveObject>& object) {
