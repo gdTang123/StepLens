@@ -2,6 +2,7 @@
 
 // T06：把 io::LoadedDocument 收成不可变的装配树和原型表。
 // 在加载线程调用 build，返回 shared_ptr<const> 之后任意线程只读。
+// 生产 Close 在 Retirer 尚未返回时完成：join 前在工作线程，join 后在析构线程的 drain。
 // 三角化写网格（T07）、场景 AIS（T08）、装配树界面和测量都不在这里。
 // IGES 顶层实体超过 kIgesVirtualPrototypeBudget 时，按颜色加 kIgesSpatialDivisions³
 // 空间网格收成虚拟原型，数量不超过该上限；装配树只留一个根（PRD P0-6）。
@@ -25,6 +26,7 @@
 #include <TopoDS_Compound.hxx>
 #include <TopoDS_Shape.hxx>
 
+#include <atomic>
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -112,6 +114,11 @@ private:
     std::vector<std::vector<NodeId>> m_leaves;
     Bnd_Box m_worldBox;
     double m_lengthUnitToMm = 1.0;
+    mutable std::atomic<bool> m_retired{false};
+    mutable DocumentModel* m_releaseNext = nullptr;
+    friend void destroyDocumentModel(const DocumentModel*) noexcept;
+    friend void retireDocument(std::shared_ptr<const DocumentModel>);
+    friend class Retirer;
 };
 
 } // namespace steplens::model

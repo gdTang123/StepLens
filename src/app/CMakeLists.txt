@@ -4,6 +4,8 @@ qt_add_executable(StepLens
     settings/Settings.cpp
     MainWindow.h
     MainWindow.cpp
+    FileAssociation.h
+    FileAssociation.cpp
     StatusNotice.h
     StatusNotice.cpp)
 

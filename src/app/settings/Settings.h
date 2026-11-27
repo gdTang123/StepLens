@@ -25,6 +25,11 @@ struct MemorySettings {
     double hardLimitRatio = 0.80;
     bool configInvalid = false;
 };
+// 用户当前长度显示单位。距离毫米值 × fromMillimeters = 显示值；默认 mm（1.0）。
+struct LengthUnitSettings {
+    QString label = QStringLiteral("mm");
+    double fromMillimeters = 1.0;
+};
 
 // IniFormat only. Defaults to executable-dir/StepLens.ini; fallback is %APPDATA%/StepLens
 // on Windows and XDG_CONFIG_HOME/StepLens or ~/.config/StepLens on Linux.
@@ -36,8 +41,14 @@ public:
     [[nodiscard]] ViewerSettings viewer() const;
     [[nodiscard]] MeshSettings mesh() const;
     [[nodiscard]] MemorySettings memory() const;
+    [[nodiscard]] LengthUnitSettings lengthUnit() const;
     [[nodiscard]] QStringList recentFiles() const;
     [[nodiscard]] bool addRecentFile(const QString& path);
+    [[nodiscard]] bool removeRecentFile(const QString& path);
+    [[nodiscard]] bool associationChosen() const;
+    [[nodiscard]] bool setAssociationChosen(bool on);
+    [[nodiscard]] QStringList savedAssociations() const;
+    [[nodiscard]] bool setSavedAssociations(const QStringList& values);
     [[nodiscard]] QString fileName() const;
     [[nodiscard]] QSettings::Format format() const;
     static Settings& instance();

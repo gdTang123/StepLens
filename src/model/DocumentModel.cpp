@@ -24,6 +24,8 @@
 #include <gp_Pnt.hxx>
 
 #include <algorithm>
+#include <atomic>
+#include <cstdio>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -34,6 +36,24 @@
 
 namespace steplens::model {
 namespace {
+
+std::atomic<bool> g_failNextControlBlock{false};
+std::atomic<bool> g_controlBlockAllocatorFailed{false};
+
+std::atomic<bool> g_failNextClose{false};
+std::atomic<bool> g_lastCloseFailed{false};
+std::atomic<std::uint64_t> g_closeFailureCount{0};
+
+template <class T> struct FailingControlBlockAllocator {
+    using value_type = T;
+    FailingControlBlockAllocator() noexcept = default;
+    template <class U> FailingControlBlockAllocator(const FailingControlBlockAllocator<U>&) noexcept {}
+    T* allocate(std::size_t) {
+        g_controlBlockAllocatorFailed.store(true, std::memory_order_release);
+        throw std::bad_alloc{};
+    }
+    void deallocate(T*, std::size_t) noexcept {}
+};
 
 // 8.0 弃用了 TDF_LabelSequence 这个名字。7.9.3 里它就是这个序列。
 using LabelSequence = NCollection_Sequence<TDF_Label>;
@@ -106,9 +126,42 @@ void closeDocument(opencascade::handle<TDocStd_Document>& doc) noexcept {
     try {
         std::lock_guard lock(xcafDocumentMutex());
         if (!doc.IsNull()) {
+            if (g_failNextClose.exchange(false, std::memory_order_acq_rel)) {
+                throw std::runtime_error("测试注入：XCAF Close 失败");
+            }
             XCAFApp_Application::GetApplication()->Close(doc);
+            g_lastCloseFailed.store(false, std::memory_order_release);
+        }
+    } catch (const std::exception& error) {
+        // OCCT V7_8_1 TDocStd_Application::Close 先清 Owner、BeforeClose，再经
+        // CDF_Application::Close 执行 myDirectory->Remove 和 aDocument->Close()。
+        // 若异常发生在真正 Close 前，文档仍登记在 myDirectory（NbDocuments 是其 Length）。
+        // Nullify 只丢本地 handle，Application 仍持有会话登记：这是进程内泄漏，同一
+        // Application 的其它文档仍共用它；只在进程退出（或 quick_exit 放弃析构）时
+        // 由 OS/静态 Handle 回收。本轮不二次 Close，因 OCCT Close 异常安全性未知。
+        g_closeFailureCount.fetch_add(1, std::memory_order_acq_rel);
+        g_lastCloseFailed.store(true, std::memory_order_release);
+        try {
+            const std::string message = std::string("XCAF document Close failed: ") + error.what();
+            Log::error(message);
+            if (!Log::ready()) {
+                std::fprintf(stderr, "%s\n", message.c_str());
+            }
+        } catch (...) {
+            std::fputs("XCAF document Close failed (diagnostic unavailable)\n", stderr);
         }
     } catch (...) {
+        g_closeFailureCount.fetch_add(1, std::memory_order_acq_rel);
+        g_lastCloseFailed.store(true, std::memory_order_release);
+        try {
+            constexpr char message[] = "XCAF document Close failed (unknown exception)";
+            Log::error(message);
+            if (!Log::ready()) {
+                std::fputs("XCAF document Close failed (unknown exception)\n", stderr);
+            }
+        } catch (...) {
+            std::fputs("XCAF document Close failed (diagnostic unavailable)\n", stderr);
+        }
     }
     doc.Nullify();
 }
@@ -756,8 +809,33 @@ void collectEntities(const TopoDS_Shape& shape, const TDF_Label& label,
 
 } // namespace
 
+void failNextDocumentCloseForTesting(bool fail) noexcept {
+    g_failNextClose.store(fail, std::memory_order_release);
+}
+
+bool lastDocumentCloseFailed() noexcept {
+    return g_lastCloseFailed.load(std::memory_order_acquire);
+}
+
+std::uint64_t documentCloseFailureCount() noexcept {
+    return g_closeFailureCount.load(std::memory_order_acquire);
+}
+
+void failNextDocumentControlBlockForTesting(bool fail) noexcept {
+    if (fail) {
+        g_controlBlockAllocatorFailed.store(false, std::memory_order_release);
+    }
+    g_failNextControlBlock.store(fail, std::memory_order_release);
+}
+
+bool lastDocumentControlBlockAllocatorFailed() noexcept {
+    return g_controlBlockAllocatorFailed.load(std::memory_order_acquire);
+}
+
 DocumentModel::DocumentModel(BuildKey, opencascade::handle<TDocStd_Document> doc, double lengthUnitToMm)
-    : m_doc(std::move(doc)), m_lengthUnitToMm(sanitizeUnit(lengthUnitToMm)) {}
+    : m_doc(std::move(doc)), m_lengthUnitToMm(sanitizeUnit(lengthUnitToMm)) {
+    noteDocumentConstructed();
+}
 
 DocumentModel::~DocumentModel() {
     // 探针看到的就是这次 Close 所在的线程。GUI 不直接析构文档，最后一份引用在后台 retirer 上丢掉。
@@ -783,13 +861,22 @@ DocumentModel::build(io::LoadedDocument document, ProgressSink& progress, const 
             if (built.nodes.empty()) {
                 return makeFailure(ErrorCode::Internal, "empty model", "文件里没有可显示的形状");
             }
-            auto model = std::make_shared<DocumentModel>(BuildKey{}, owner.get(), unit);
+            auto* raw = new DocumentModel(BuildKey{}, owner.get(), unit);
             owner.detach();
-            model->m_nodes = std::move(built.nodes);
-            model->m_prototypes = std::move(built.prototypes);
-            model->m_leaves = std::move(built.leaves);
-            model->m_worldBox = std::move(built.worldBox);
-            return std::shared_ptr<const DocumentModel>{std::move(model)};
+            const auto deleter = [](const DocumentModel* p) noexcept { destroyDocumentModel(p); };
+            std::shared_ptr<const DocumentModel> model = [&] {
+                if (g_failNextControlBlock.exchange(false, std::memory_order_acq_rel)) {
+                    return std::shared_ptr<const DocumentModel>(
+                        raw, deleter, FailingControlBlockAllocator<const DocumentModel>{});
+                }
+                return std::shared_ptr<const DocumentModel>(raw, deleter);
+            }();
+            auto* mutableModel = const_cast<DocumentModel*>(model.get());
+            mutableModel->m_nodes = std::move(built.nodes);
+            mutableModel->m_prototypes = std::move(built.prototypes);
+            mutableModel->m_leaves = std::move(built.leaves);
+            mutableModel->m_worldBox = std::move(built.worldBox);
+            return model;
         },
         ErrorCode::Internal, "建立模型时出错");
     if (result.ok() || !cancel.isCancelled()) {

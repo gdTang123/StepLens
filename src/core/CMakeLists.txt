@@ -9,6 +9,7 @@ steplens_add_module(core
     OcctLoadContract.cpp
     TaskScheduler.cpp
     Log.cpp
+    LifecycleTrace.cpp
     CrashDump.cpp
     Version.h
     Result.h
@@ -19,6 +20,7 @@ steplens_add_module(core
     OcctLoadContract.h
     TaskScheduler.h
     Log.h
+    LifecycleTrace.h
     CrashDump.h
     AppPaths.h
     MemoryMonitor.h)
@@ -26,3 +28,6 @@ steplens_add_module(core
 if(WIN32)
     target_link_libraries(steplens_core PRIVATE dbghelp shell32 ole32 psapi)
 endif()
+
+target_compile_definitions(steplens_core PRIVATE
+    "STEPLENS_GIT_SHA=\"${STEPLENS_GIT_SHA}\"")

@@ -1,200 +1,434 @@
-#if defined(_WIN32)
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
-#endif
-
-#include "io/HeapRelease.h"
-#include "model/DocumentModel.h"
 #include "model/DocumentRelease.h"
+
+#include "core/LifecycleTrace.h"
+#include "core/Log.h"
+#include "core/OcctLoadContract.h"
+#include "io/HeapRelease.h"
+#include "io/XcafLifetime.h"
+#include "model/DocumentModel.h"
 #include "occtsupport/OcctBoundary.h"
+
+#include <XCAFApp_Application.hxx>
 
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <cstdlib>
+#include <exception>
 #include <mutex>
-#include <utility>
-#include <vector>
+#include <string>
+#include <thread>
+
+#if defined(_WIN32)
+#include <Windows.h>
+#endif
 
 namespace steplens::model {
 namespace {
 
-// 只给退出测试用。后台线程在 reset 之前睡一会儿，main 才能看到 documentsPendingRelease() > 0。
-// 生产环境不设这个变量。
-int releaseDelayMs() {
-#if defined(_WIN32)
-    char buffer[16] = {};
-    const DWORD count = GetEnvironmentVariableA("STEPLENS_RELEASE_DELAY_MS", buffer, sizeof(buffer));
-    if (count == 0 || count >= sizeof(buffer)) {
-        return 0;
+std::atomic<void (*)()> g_afterJoinHook{nullptr};
+std::atomic<DocumentReleaseGate> g_documentReleaseGate{nullptr};
+std::atomic<DocumentReleaseDependencyHook> g_beforeDependencyLockHook{nullptr};
+std::atomic<DocumentReleaseDependencyHook> g_afterDependencyLockHook{nullptr};
+
+void ensureReleaseDependencies() {
+    // 在实际 GetApplication 线程上短暂满足 OcctBoundary，返回前恢复调用者 FP/SEH。
+    // 再用生产路径共用的锁保护单例检查与赋值。
+    // 首次 instance() 不得已持这把非递归锁：ctor/dtor 簿记与 Close 返回后才进 instance。
+    occt::OcctBoundary::ScopedThreadSignal primed;
+    auto& xcafMutex = steplens::xcafDocumentMutex();
+    if (auto hook = g_beforeDependencyLockHook.load(std::memory_order_acquire)) {
+        hook();
     }
-    const char* text = buffer;
-#else
-    const char* text = std::getenv("STEPLENS_RELEASE_DELAY_MS");
-    if (text == nullptr || text[0] == '\0') {
-        return 0;
-    }
-#endif
-    int value = 0;
-    for (const char* cursor = text; *cursor != '\0'; ++cursor) {
-        if (*cursor < '0' || *cursor > '9') {
-            return 0;
+    {
+        std::lock_guard lock(xcafMutex);
+        if (auto hook = g_afterDependencyLockHook.load(std::memory_order_acquire)) {
+            hook();
         }
-        value = value * 10 + (*cursor - '0');
-        if (value > 5000) {
-            return 5000;
-        }
+        static_cast<void>(XCAFApp_Application::GetApplication());
+        steplens::io::noteXcafApplicationAccessed();
     }
-    return value;
+    // Log 自有同步；不得在 xcaf 锁内构造。
+    static_cast<void>(steplens::Log::ready()); // 只构造 LogState，不要求日志文件打开。
 }
 
-class DocumentRetirer {
+thread_local bool initializingRetirer = false;
+
+class Lock {
 public:
-    DocumentRetirer() : m_thread([this] { run(); }) {}
-
-    ~DocumentRetirer() {
-        {
-            std::lock_guard lock(m_mutex);
-            m_stop = true;
-        }
-        m_cv.notify_all();
-        if (m_thread.joinable()) {
-            m_thread.join();
-        }
-    }
-
-    DocumentRetirer(const DocumentRetirer&) = delete;
-    DocumentRetirer& operator=(const DocumentRetirer&) = delete;
-
-    void enqueue(std::shared_ptr<const DocumentModel> model) {
-        if (!model) {
-            return;
-        }
-        m_pending.fetch_add(1, std::memory_order_acq_rel);
-        {
-            std::lock_guard lock(m_mutex);
-            m_queue.push_back(std::move(model));
-        }
-        m_cv.notify_one();
-    }
-
-    void setProbe(std::function<void(std::thread::id)> probe) {
-        std::lock_guard lock(m_mutex);
-        m_probe = std::move(probe);
-    }
-
-    void setGate(DocumentReleaseGate gate) noexcept {
-        m_gate.store(gate, std::memory_order_release);
-    }
-
-    void invokeProbe() {
-        std::function<void(std::thread::id)> probe;
-        {
-            std::lock_guard lock(m_mutex);
-            probe = m_probe;
-        }
-        if (!probe) {
-            return;
-        }
-        try {
-            probe(std::this_thread::get_id());
-        } catch (...) {
-        }
-    }
-
-    [[nodiscard]] int pending() const noexcept {
-        return m_pending.load(std::memory_order_acquire);
-    }
+    explicit Lock(std::mutex& mutex) : m_lock(mutex) {}
+    Lock(const Lock&) = delete;
+    Lock& operator=(const Lock&) = delete;
 
 private:
-    void run() {
-        occt::OcctBoundary::armWorkerThread();
-        for (;;) {
-            std::shared_ptr<const DocumentModel> model;
-            {
-                std::unique_lock lock(m_mutex);
-                m_cv.wait(lock, [this] { return m_stop || !m_queue.empty(); });
-                if (m_stop && m_queue.empty()) {
-                    return;
-                }
-                model = std::move(m_queue.back());
-                m_queue.pop_back();
-            }
-            const int delayMs = releaseDelayMs();
-            if (delayMs > 0) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
-            }
-            if (DocumentReleaseGate gate = m_gate.load(std::memory_order_acquire)) {
-                gate();
-            }
-            model.reset();
-            m_pending.fetch_sub(1, std::memory_order_acq_rel);
-            m_cv.notify_all();
-        }
-    }
-
-    std::mutex m_mutex;
-    std::condition_variable m_cv;
-    std::vector<std::shared_ptr<const DocumentModel>> m_queue;
-    std::function<void(std::thread::id)> m_probe;
-    std::atomic<DocumentReleaseGate> m_gate{nullptr};
-    std::atomic<int> m_pending{0};
-    bool m_stop = false;
-    std::thread m_thread;
+    std::unique_lock<std::mutex> m_lock;
 };
 
-DocumentRetirer& retirer();
-
-int pendingForHeapRelease() noexcept {
-    return retirer().pending();
-}
-
-DocumentRetirer& retirer() {
-    static DocumentRetirer instance;
-    static const int registered = [] {
-        io::setHeapReleasePendingProbe(&pendingForHeapRelease);
+unsigned releaseDelayMs() noexcept {
+    const char* value = nullptr;
+#if defined(_WIN32)
+    char buffer[32]{};
+    const DWORD size = GetEnvironmentVariableA("STEPLENS_RELEASE_DELAY_MS", buffer, sizeof(buffer));
+    if (size == 0 || size >= sizeof(buffer)) {
         return 0;
-    }();
-    static_cast<void>(registered);
-    return instance;
+    }
+    value = buffer;
+#else
+    value = std::getenv("STEPLENS_RELEASE_DELAY_MS");
+#endif
+    if (!value || *value == '\0') {
+        return 0;
+    }
+    char* end = nullptr;
+    const unsigned long parsed = std::strtoul(value, &end, 10);
+    if (end == value || *end != '\0') {
+        return 0;
+    }
+    return static_cast<unsigned>(parsed > 5000 ? 5000 : parsed);
 }
 
 } // namespace
 
-void retireDocument(std::shared_ptr<const DocumentModel> model) {
-    retirer().enqueue(std::move(model));
-}
+class Retirer {
+public:
+    Retirer() : m_thread([this] { run(); }) {}
 
-int documentsPendingRelease() noexcept {
-    return retirer().pending();
-}
-
-bool waitForDocumentRelease(std::chrono::milliseconds timeout) {
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
-    while (documentsPendingRelease() != 0) {
-        if (std::chrono::steady_clock::now() >= deadline) {
-            return false;
+    ~Retirer() {
+        lifecycleTrace("retirer-stop",
+                       "pending=" + std::to_string(count()) +
+                           " live=" + std::to_string(m_live.load(std::memory_order_acquire)) +
+                           " inflight=" + std::to_string(m_inFlight.load(std::memory_order_acquire)));
+        {
+            Lock lock(m_mutex);
+            m_stopping = true;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        m_condition.notify_all();
+        if (m_thread.joinable()) {
+            m_thread.join();
+        }
+        lifecycleTrace("retirer-join-end");
+        if (auto hook = g_afterJoinHook.load(std::memory_order_acquire)) {
+            hook();
+        }
+        // 工作线程已退出。drain 在析构返回前接收尾投递，直到已构造模型都 Close。
+        drainAdmittedQueueAfterJoin();
+        io::setHeapReleasePendingProbe(nullptr);
+        lifecycleTrace("retirer-end",
+                       "pending=" + std::to_string(count()) +
+                           " live=" + std::to_string(m_live.load(std::memory_order_acquire)) +
+                           " inflight=" + std::to_string(m_inFlight.load(std::memory_order_acquire)));
     }
-    return true;
+
+    void retire(std::shared_ptr<const DocumentModel> model) {
+        if (!model) {
+            return;
+        }
+        InFlight active(*this);
+        {
+            Lock lock(m_mutex);
+            markRetiredLocked(const_cast<DocumentModel*>(model.get()));
+        }
+        model.reset();
+    }
+
+    void handoff(std::shared_ptr<const DocumentModel> model) noexcept {
+        model.reset();
+    }
+
+    void destroy(const DocumentModel* model) noexcept {
+        if (!model) {
+            return;
+        }
+        InFlight active(*this);
+        auto* mutableModel = const_cast<DocumentModel*>(model);
+        if (std::this_thread::get_id() == m_thread.get_id()) {
+            {
+                Lock lock(m_mutex);
+                markRetiredLocked(mutableModel);
+            }
+            finish(model);
+            return;
+        }
+        DocumentReleaseEnqueueGate gate = nullptr;
+        {
+            Lock lock(m_mutex);
+            markRetiredLocked(mutableModel);
+            mutableModel->m_releaseNext = nullptr;
+            if (m_tail) {
+                m_tail->m_releaseNext = mutableModel;
+            } else {
+                m_head = mutableModel;
+            }
+            m_tail = mutableModel;
+            gate = m_enqueueGate.load(std::memory_order_acquire);
+        }
+        lifecycleTrace("document-enqueue", std::to_string(reinterpret_cast<std::uintptr_t>(model)));
+        // 测试门和通知都在锁外；InFlight 覆盖回调与 notify 返回。
+        if (gate) {
+            try {
+                gate();
+            } catch (...) {
+            }
+        }
+        lifecycleTrace("producer-notify");
+        m_condition.notify_one();
+        lifecycleTrace("producer-notify-returned");
+    }
+
+    int count() const noexcept {
+        return m_pending.load(std::memory_order_acquire);
+    }
+
+    bool wait(std::chrono::milliseconds timeout) {
+        // pending 的线性化点是 markRetiredLocked / finish 持有的同一把队列锁。
+        std::unique_lock lock(m_mutex);
+        return m_condition.wait_for(lock, timeout, [this] { return count() == 0; });
+    }
+
+    void setProbe(std::function<void(std::thread::id)> probe) {
+        std::function<void(std::thread::id)> old;
+        {
+            Lock lock(m_mutex);
+            old = std::move(m_probe);
+            m_probe = std::move(probe);
+        }
+    }
+
+    void setEnqueueGate(DocumentReleaseEnqueueGate gate) noexcept {
+        m_enqueueGate.store(gate, std::memory_order_release);
+    }
+
+    void noteDestructorThread() {
+        std::function<void(std::thread::id)> probe;
+        {
+            Lock lock(m_mutex);
+            probe = m_probe;
+        }
+        if (probe) {
+            try {
+                probe(std::this_thread::get_id());
+            } catch (...) {
+            }
+        }
+    }
+
+    void constructed() noexcept {
+        m_live.fetch_add(1, std::memory_order_release);
+    }
+
+    std::thread::id workerThread() const noexcept {
+        return m_thread.get_id();
+    }
+
+private:
+    class InFlight {
+    public:
+        explicit InFlight(Retirer& owner) : m_owner(owner) {
+            // 必须先于 producer 的首次 mutex/cv 访问登记；停机锁失败或对象不可恢复时
+            // destroy() 为 noexcept，标准策略是终止进程，不在 GUI 线程兜底删除模型。
+            m_owner.m_inFlight.fetch_add(1, std::memory_order_acq_rel);
+        }
+        ~InFlight() {
+            // 最后一次 service 访问是 notify；必须在 notify 返回之后才撤销准入。
+            // 归零后不再碰 cv，避免与 ~Retirer 拆成员竞态。
+            m_owner.m_condition.notify_all();
+            lifecycleTrace("producer-inflight-release");
+            m_owner.m_inFlight.fetch_sub(1, std::memory_order_acq_rel);
+        }
+        InFlight(const InFlight&) = delete;
+        InFlight& operator=(const InFlight&) = delete;
+
+    private:
+        Retirer& m_owner;
+    };
+
+    void markRetiredLocked(DocumentModel* model) noexcept {
+        // 同一把队列锁内首次退役才记一票；先加票再标记，避免无锁观察看到 retired 已发布而 pending 仍为 0。
+        if (!model->m_retired.load(std::memory_order_relaxed)) {
+            m_pending.fetch_add(1, std::memory_order_release);
+            model->m_retired.store(true, std::memory_order_release);
+        }
+    }
+
+    // join 与 afterJoinHook 之后调用。退出只在持锁观察到 inflight、队列、live 同时为 0。
+    // 20ms 只重检「notify 早于 inflight 减票」，超时不放弃 Close。
+    // ~Retirer 已返回之后的调用不在此列。停机期间再构造模型属于既有契约外。
+    void drainAdmittedQueueAfterJoin() {
+        for (;;) {
+            DocumentModel* batch = nullptr;
+            {
+                std::unique_lock lock(m_mutex);
+                while (m_inFlight.load(std::memory_order_acquire) != 0) {
+                    m_condition.wait_for(lock, std::chrono::milliseconds(20),
+                                         [this] { return m_inFlight.load(std::memory_order_acquire) == 0; });
+                }
+                if (m_head != nullptr) {
+                    batch = m_head;
+                    m_head = nullptr;
+                    m_tail = nullptr;
+                } else if (m_live.load(std::memory_order_acquire) == 0) {
+                    return;
+                } else {
+                    m_condition.wait_for(lock, std::chrono::milliseconds(20), [this] {
+                        return m_head != nullptr || m_live.load(std::memory_order_acquire) == 0 ||
+                               m_inFlight.load(std::memory_order_acquire) != 0;
+                    });
+                    continue;
+                }
+            }
+            while (batch) {
+                DocumentModel* next = batch->m_releaseNext;
+                batch->m_releaseNext = nullptr;
+                lifecycleTrace("retirer-drain-finish",
+                               std::to_string(reinterpret_cast<std::uintptr_t>(batch)));
+                finish(batch);
+                batch = next;
+            }
+        }
+    }
+
+    void finish(const DocumentModel* model) noexcept {
+        const unsigned delay = releaseDelayMs();
+        if (delay != 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+        }
+        if (auto gate = g_documentReleaseGate.load(std::memory_order_acquire)) {
+            try {
+                gate();
+            } catch (...) {
+            }
+        }
+        delete model;
+        {
+            Lock lock(m_mutex);
+            m_pending.fetch_sub(1, std::memory_order_acq_rel);
+            m_live.fetch_sub(1, std::memory_order_acq_rel);
+        }
+        m_condition.notify_all();
+    }
+
+    void run() noexcept {
+        occt::OcctBoundary::armWorkerThread();
+        for (;;) {
+            DocumentModel* batch = nullptr;
+            {
+                std::unique_lock lock(m_mutex);
+                m_condition.wait(lock, [this] { return m_head != nullptr || m_stopping; });
+                // producer 还停在 notify 之前时不能 Close：Windows 上 delete 会卡在那个
+                // deleter 里，join 不再返回（retirer-stop 后 WAIT_TIMEOUT）。
+                // inflight 已经归零时必须把队列 Close 掉，否则进程退不出
+                // （TwoThousandNodes 测试体 OK 之后 ctest 超时 1500s）。
+                if (m_stopping && (m_head == nullptr || m_inFlight.load(std::memory_order_acquire) != 0)) {
+                    return;
+                }
+                batch = m_head;
+                m_head = nullptr;
+                m_tail = nullptr;
+            }
+            while (batch) {
+                DocumentModel* next = batch->m_releaseNext;
+                batch->m_releaseNext = nullptr;
+                finish(batch);
+                batch = next;
+            }
+        }
+    }
+
+    std::mutex m_mutex;
+    std::condition_variable m_condition;
+    DocumentModel* m_head = nullptr;
+    DocumentModel* m_tail = nullptr;
+    std::atomic<int> m_inFlight{0};
+    std::function<void(std::thread::id)> m_probe;
+    std::atomic<DocumentReleaseEnqueueGate> m_enqueueGate{nullptr};
+    std::atomic<int> m_pending{0};
+    std::atomic<int> m_live{0};
+    bool m_stopping = false;
+    std::thread m_thread;
+};
+
+namespace {
+// 先建立 mutex、locApp 和 LogState，再构造 Retirer。静态析构按已完成构造的反序执行，
+// 因而 Retirer stop/join 先于 mutex/App/LogState 拆除。正常 return 且 live/pending 已归零时，
+// Retirer 只回收空闲线程，不应再 Close；pending>0 时 main.cpp 用 quick_exit/TerminateProcess 跳过
+// 静态析构。若外部存在 companion，它也只是 locApp 的寿命上界；本段不依赖它代替 ASan。
+// 真实 MainWindow 成员/子树析构顺序由 STEPLENS_LIFECYCLE_LOG 取证；QObject
+// 仿真树和 ReleaseQuickExitMain 不覆盖主窗退出。~Retirer 时也不应 new 模型，若发生属于契约外。
+Retirer& instance() {
+    if (initializingRetirer) {
+        std::terminate();
+    }
+    struct InitGuard {
+        InitGuard() {
+            initializingRetirer = true;
+        }
+        ~InitGuard() {
+            initializingRetirer = false;
+        }
+    } guard;
+    static const bool dependenciesReady = [] {
+        ensureReleaseDependencies();
+        lifecycleTrace("release-deps-ready");
+        return true;
+    }();
+    static_cast<void>(dependenciesReady);
+    static Retirer retirer;
+    return retirer;
 }
 
+int heapPending() noexcept {
+    return instance().count();
+}
+struct RegisterHeapProbe {
+    RegisterHeapProbe() {
+        io::setHeapReleasePendingProbe(heapPending);
+    }
+} registerHeapProbe; // 与 instance() 同 TU：动态初始化先于 Retirer，析构晚于 Retirer。
+
+} // namespace
+
+void retireDocument(std::shared_ptr<const DocumentModel> model) {
+    instance().retire(std::move(model));
+}
+void handoffDocument(std::shared_ptr<const DocumentModel> model) noexcept {
+    instance().handoff(std::move(model));
+}
+void destroyDocumentModel(const DocumentModel* model) noexcept {
+    instance().destroy(model);
+}
+void noteDocumentConstructed() noexcept {
+    instance().constructed();
+}
+int documentsPendingRelease() noexcept {
+    return instance().count();
+}
+bool waitForDocumentRelease(std::chrono::milliseconds timeout) {
+    return instance().wait(timeout);
+}
 void setDocumentReleaseProbe(std::function<void(std::thread::id)> probe) {
-    retirer().setProbe(std::move(probe));
+    instance().setProbe(std::move(probe));
 }
-
 void setDocumentReleaseGate(DocumentReleaseGate gate) noexcept {
-    retirer().setGate(gate);
+    g_documentReleaseGate.store(gate, std::memory_order_release);
+}
+void setDocumentReleaseEnqueueGate(DocumentReleaseEnqueueGate gate) noexcept {
+    instance().setEnqueueGate(gate);
 }
 
+void setDocumentReleaseDependencyHooksForTesting(DocumentReleaseDependencyHook beforeLock,
+                                                 DocumentReleaseDependencyHook afterLock) noexcept {
+    g_beforeDependencyLockHook.store(beforeLock, std::memory_order_release);
+    g_afterDependencyLockHook.store(afterLock, std::memory_order_release);
+}
+void setDocumentReleaseAfterJoinHookForTesting(void (*hook)()) noexcept {
+    g_afterJoinHook.store(hook, std::memory_order_release);
+}
 void noteDocumentDestructorThread() {
-    retirer().invokeProbe();
+    instance().noteDestructorThread();
+}
+std::thread::id documentReleaseWorkerThread() {
+    return instance().workerThread();
 }
 
 } // namespace steplens::model

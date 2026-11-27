@@ -3,12 +3,14 @@
 // 把 T05 读取、T06 DocumentModel、T07 Tessellator 串起来，再把网格交给 SceneHost。
 // open / cancel / tick 只在 GUI 线程调用。tick 里才会 pump，工作线程碰不到 SceneBuilder。
 // 软取消只在 Loading 时生效：请求停止并冻住进度，不等待后台。
-// 加载还没结束、新模型已经显示时，取消回到空闲方块。Ready 之后取消不清除模型。
-// 后台释放完之前，下一次 open 在 LoadCoordinator 里排队。
+// 打开 B 时 A 仍留在宿主上；B 仅在成功完成后再提交。取消或失败丢弃 B，不误销 A。
+// 接受 A+B 暂留造成的额外峰值内存；A 在 B 成功提交后随 host.reset 进入后台 Close。
+// Ready 之后取消不清除模型。空闲时取消为空操作。
 
 #include "core/CancelToken.h"
 #include "core/ProgressSink.h"
 #include "core/Result.h"
+#include "model/DocumentModel.h"
 #include "pipeline/SceneHost.h"
 
 #include <chrono>
@@ -48,6 +50,7 @@ public:
     void tick();
 
     [[nodiscard]] Snapshot snapshot() const;
+    [[nodiscard]] std::shared_ptr<const model::DocumentModel> currentModel() const;
     // 失败对话框只弹一次。没有新的失败就返回空。
     [[nodiscard]] std::optional<Error> takeFailure();
     [[nodiscard]] bool isSettled() const noexcept;

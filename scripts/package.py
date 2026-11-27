@@ -1,29 +1,142 @@
 #!/usr/bin/env python3
-"""把 cmake --install 的结果打成 zip。
+"""把 cmake --install 的结果打成绿色版 zip。
 
-T01 只调用 windeployqt 收集 Qt 运行时。OCCT、FreeType 的 DLL 和 VC++ 运行库在 T17 收集。
+Qt 运行时仍用 windeployqt。OCCT、FreeType 以及 dumpbin 列出的 DLL 只从
+--vcpkg-bin 复制。VC++ 运行库只从本机 Visual Studio 的官方再发行目录复制，
+目录版本可以新于工具集，但不能更旧；文件还必须出现在该目录的 Redist.txt 里。
+不从 System32 复制，也不从网络下载 DLL。缺目录或 Redist.txt 时失败。
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
+import os
+import shutil
 import subprocess
 import sys
 import zipfile
 from pathlib import Path
 
 
+SYSTEM_DLLS = frozenset(
+    {
+        "advapi32.dll",
+        "authz.dll",
+        "bcrypt.dll",
+        "bcryptprimitives.dll",
+        "cabinet.dll",
+        "cfgmgr32.dll",
+        "combase.dll",
+        "comctl32.dll",
+        "comdlg32.dll",
+        "crypt32.dll",
+        "cryptbase.dll",
+        "d3d11.dll",
+        "d3d12.dll",
+        "d3d9.dll",
+        "d3dcompiler_47.dll",
+        "dbghelp.dll",
+        "dhcpcsvc.dll",
+        "dnsapi.dll",
+        "dwmapi.dll",
+        "dwrite.dll",
+        "dxgi.dll",
+        "gdi32.dll",
+        "gdiplus.dll",
+        "glu32.dll",
+        "hid.dll",
+        "imagehlp.dll",
+        "imm32.dll",
+        "iphlpapi.dll",
+        "kernel32.dll",
+        "kernelbase.dll",
+        "mpr.dll",
+        "mscms.dll",
+        "msimg32.dll",
+        "msvcrt.dll",
+        "mswsock.dll",
+        "ncrypt.dll",
+        "netapi32.dll",
+        "normaliz.dll",
+        "nsi.dll",
+        "ntdll.dll",
+        "ole32.dll",
+        "oleacc.dll",
+        "oleaut32.dll",
+        "opengl32.dll",
+        "powrprof.dll",
+        "profapi.dll",
+        "propsys.dll",
+        "psapi.dll",
+        "rpcrt4.dll",
+        "sechost.dll",
+        "secur32.dll",
+        "setupapi.dll",
+        "shcore.dll",
+        "shell32.dll",
+        "shlwapi.dll",
+        "ucrtbase.dll",
+        "urlmon.dll",
+        "user32.dll",
+        "userenv.dll",
+        "uiautomationcore.dll",
+        "uxtheme.dll",
+        "version.dll",
+        "webio.dll",
+        "winhttp.dll",
+        "wininet.dll",
+        "winmm.dll",
+        "winspool.drv",
+        "wintrust.dll",
+        "wldp.dll",
+        "ws2_32.dll",
+        "wsock32.dll",
+        "wtsapi32.dll",
+    }
+)
+
+# 这些前缀在 packaging/licenses 里有对应正文。名单以外的 vcpkg DLL 使打包失败。
+LICENSED_PREFIXES = (
+    "tk",
+    "freetype",
+    "brotli",
+    "bz2",
+    "libbz2",
+    "libpng",
+    "zlib",
+    "qt6",
+)
+
+
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="打包 StepLens 绿色版目录（T01 最小实现）")
+    parser = argparse.ArgumentParser(description="打包 StepLens 绿色版目录")
     parser.add_argument("--prefix", type=Path, required=True, help="cmake --install 的前缀，下面应有 StepLens/")
     parser.add_argument("--qt-dir", type=Path, required=True, help="QTDIR，例如 C:/Qt/6.12.0/msvc2022_64")
+    parser.add_argument("--vcpkg-bin", type=Path, required=True, help="vcpkg_installed/x64-windows/bin")
+    parser.add_argument(
+        "--vc-redist",
+        type=Path,
+        help="Microsoft.VC143.CRT 目录。不传则在本机 VC\\Redist 中选不旧于工具集的官方目录",
+    )
     parser.add_argument("--output", type=Path, required=True, help="输出 zip 路径")
+    parser.add_argument("--checkout-sha", help="当前 checkout 的 40 位 SHA。QA 核验必填，不猜测")
+    parser.add_argument("--checkout-tree", help="当前 checkout 的 40 位 tree。QA 核验必填，不猜测")
+    parser.add_argument("--pr-head-sha", help="pull_request.head.sha。给出时必须是 40 位十六进制")
+    parser.add_argument(
+        "--require-redist",
+        action="store_true",
+        help="zip 内必须有 Redist.txt、来源说明，以及来源说明点名的 DLL",
+    )
     return parser.parse_args()
 
 
+def fail(message: str) -> int:
+    print(message, file=sys.stderr)
+    return 1
+
+
 def _configure_stdio() -> None:
-    # Windows 的 CI 控制台是 cp1252。中文 print 在默认编码下会抛 UnicodeEncodeError，
-    # 而这时 zip 已经写好了，任务却被记成失败，后面的缓存保存也会被跳过。
     for stream in (sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is None:
@@ -31,19 +144,810 @@ def _configure_stdio() -> None:
         reconfigure(encoding="utf-8", errors="backslashreplace")
 
 
+def is_system_dll(name: str) -> bool:
+    lowered = name.lower()
+    if lowered in SYSTEM_DLLS:
+        return True
+    return lowered.startswith("api-ms-win-") or lowered.startswith("ext-ms-")
+
+
+def is_vc_runtime(name: str) -> bool:
+    lowered = name.lower()
+    return lowered.endswith(".dll") and lowered.startswith(
+        ("vcruntime140", "msvcp140", "concrt140", "vccorlib140")
+    )
+
+
+def license_ready(name: str) -> bool:
+    lowered = name.lower()
+    return lowered.startswith(LICENSED_PREFIXES)
+
+
+# 清单唯一归属，且仓库已有同版本许可正文。不按 DLL 文件名猜端口。
+MANIFEST_LICENSE_FILES = {
+    ("zlib", "1.3.2"): "zlib-1.3.2-LICENSE.txt",
+}
+
+# 1809 SDK icuuc.lib 的 20 个无后缀入口。链接承诺，不是运行时亲验。
+ICUUC_SHA256 = "39175459c4837c8cc0f709a637fb6eadb25d696785109c8393559ec876f02703"
+ICUUC_ENTRIES = frozenset(
+    {
+        "ucnv_open",
+        "ucnv_close",
+        "UCNV_FROM_U_CALLBACK_SUBSTITUTE",
+        "UCNV_TO_U_CALLBACK_SUBSTITUTE",
+        "ucnv_reset",
+        "ucnv_getMaxCharSize",
+        "ucnv_getName",
+        "ucnv_getToUCallBack",
+        "ucnv_getFromUCallBack",
+        "ucnv_setToUCallBack",
+        "ucnv_setFromUCallBack",
+        "ucnv_cbToUWriteUChars",
+        "ucnv_toUnicode",
+        "ucnv_cbFromUWriteUChars",
+        "ucnv_toUCountPending",
+        "ucnv_fromUCountPending",
+        "ucnv_getStandardName",
+        "ucnv_getAvailableName",
+        "ucnv_countAvailable",
+        "ucnv_fromUnicode",
+    }
+)
+
+
+def manifest_hits(vcpkg_bin: Path, dll_name: str) -> list[tuple[str, str, str]]:
+    info = vcpkg_bin.parent.parent / "vcpkg" / "info"
+    if not info.is_dir():
+        return []
+    triplet = vcpkg_bin.parent.name
+    triplet_dir = vcpkg_bin.parent
+    target = dll_name.lower()
+    found: list[tuple[str, str, str]] = []
+    for list_file in sorted(info.glob("*.list")):
+        try:
+            content = list_file.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        hit = False
+        for raw in content.splitlines():
+            normalized = raw.strip().replace("\\", "/")
+            if normalized and Path(normalized).name.lower() == target:
+                hit = True
+                break
+        if not hit:
+            continue
+        identity = parse_list_identity(list_file.stem, triplet)
+        if identity is None:
+            found.append(("未能解析", "未能解析", str(list_file)))
+            continue
+        port, version = identity
+        found.append((port, version, license_paths(triplet_dir, port)))
+    return found
+
+
+def manifest_license_ok(vcpkg_bin: Path, dll_name: str) -> bool:
+    hits = manifest_hits(vcpkg_bin, dll_name)
+    if len(hits) != 1:
+        return False
+    port, version, lic = hits[0]
+    repo_name = MANIFEST_LICENSE_FILES.get((port, version))
+    if repo_name is None:
+        return False
+    repo_file = Path(__file__).resolve().parents[1] / "packaging" / "licenses" / repo_name
+    if not repo_file.is_file():
+        return False
+    parts = [Path(part) for part in lic.split(";") if part]
+    if not parts or any("未找到" in part.name or "不存在" in str(part) for part in parts):
+        return False
+    return all(part.is_file() for part in parts)
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def parse_dumpbin_imports(text: str) -> list[tuple[str, str, int]]:
+    rows: list[tuple[str, str, int]] = []
+    delay = 0
+    current = ""
+    for raw in text.splitlines():
+        line = raw.strip()
+        lowered = line.lower()
+        if "delay load imports" in lowered:
+            delay = 1
+            current = ""
+            continue
+        if "following imports" in lowered:
+            delay = 0
+            current = ""
+            continue
+        if line.lower().endswith(".dll") and " " not in line:
+            current = line
+            continue
+        if not current:
+            continue
+        parts = line.split()
+        if len(parts) != 2 or any(ch not in "0123456789abcdefABCDEF" for ch in parts[0]):
+            continue
+        symbol = parts[1]
+        if symbol.startswith(("__", ".")) or not symbol[:1].isalpha():
+            continue
+        if any(not (ch.isalnum() or ch == "_") for ch in symbol):
+            continue
+        rows.append((current, symbol, delay))
+    return rows
+
+
+def icu_rows(rows: list[tuple[str, str, int]]) -> list[tuple[str, str, int]]:
+    return [row for row in rows if "icu" in row[0].lower()]
+
+
+def icuuc_system_basis(sha256: str, rows: list[tuple[str, str, int]]) -> tuple[bool, str]:
+    if sha256 == ICUUC_SHA256:
+        return True, "Qt6Core.dll sha256 等于已登记的发行哈希，精确名 icuuc.dll 按系统 DLL 不复制"
+    selected = icu_rows(rows)
+    dlls = {name.lower() for name, _symbol, _delay in selected}
+    if dlls != {"icuuc.dll"}:
+        return False, "ICU 导入不是仅有 icuuc.dll，不放行"
+    if any(delay != 0 for _name, _symbol, delay in selected):
+        return False, "icuuc.dll 不是 delay 0，不放行"
+    symbols = {symbol for _name, symbol, _delay in selected}
+    if symbols != ICUUC_ENTRIES:
+        return False, "ICU 入口不是已证的 20 个无后缀集合，不放行"
+    return True, "ICU 导入仅为 icuuc.dll、delay 0，且入口集合等于 1809 导入库的 20 个无后缀符号"
+
+
+def module_evidence_path(vcpkg_bin: Path) -> Path:
+    return vcpkg_bin.parent.parent.parent / "windows-module-evidence.txt"
+
+
+def run_text(command: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(command, check=False, capture_output=True, text=True, encoding="utf-8", errors="replace")
+
+
+def vswhere_exe() -> Path | None:
+    program_files = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
+    candidate = Path(program_files) / "Microsoft Visual Studio" / "Installer" / "vswhere.exe"
+    if candidate.is_file():
+        return candidate
+    found = shutil.which("vswhere")
+    return Path(found) if found else None
+
+
+def vs_install_path() -> Path | None:
+    vswhere = vswhere_exe()
+    if vswhere is None:
+        return None
+    completed = run_text(
+        [
+            str(vswhere),
+            "-latest",
+            "-products",
+            "*",
+            "-requires",
+            "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+            "-property",
+            "installationPath",
+        ]
+    )
+    if completed.returncode != 0:
+        return None
+    lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+    if not lines:
+        return None
+    return Path(lines[-1])
+
+
+def find_dumpbin() -> Path | None:
+    found = shutil.which("dumpbin")
+    if found:
+        return Path(found)
+    install = vs_install_path()
+    if install is None:
+        return None
+    tools = sorted(path for path in (install / "VC" / "Tools" / "MSVC").glob("*") if path.is_dir())
+    for tool in reversed(tools):
+        candidate = tool / "bin" / "Hostx64" / "x64" / "dumpbin.exe"
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def version_key(name: str) -> tuple[int, ...] | None:
+    numbers: list[int] = []
+    for part in name.split("."):
+        if not part.isdigit():
+            return None
+        numbers.append(int(part))
+    if len(numbers) < 2:
+        return None
+    return tuple(numbers)
+
+
+def toolset_from_dumpbin(dumpbin: Path) -> tuple[str, tuple[int, ...] | None]:
+    parts = dumpbin.parts
+    for index, part in enumerate(parts):
+        if part.lower() == "msvc" and index + 1 < len(parts):
+            label = parts[index + 1]
+            return label, version_key(label)
+    return "", None
+
+
+def append_redist(found: list[tuple[Path, Path, str]], version_dir: Path) -> None:
+    if not version_dir.is_dir():
+        return
+    crt = version_dir / "x64" / "Microsoft.VC143.CRT"
+    redist_txt = version_dir / "Redist.txt"
+    if "debug_nonredist" in {part.lower() for part in crt.parts}:
+        return
+    if crt.is_dir() and redist_txt.is_file():
+        found.append((crt, redist_txt, version_dir.name))
+
+
+def find_redist(explicit: Path | None, dumpbin: Path) -> tuple[Path, Path, str, str] | None:
+    tool_label, tool_key = toolset_from_dumpbin(dumpbin)
+    if explicit is not None:
+        crt = explicit.resolve()
+        if "debug_nonredist" in {part.lower() for part in crt.parts}:
+            print(f"拒绝调试运行库目录 {crt}", file=sys.stderr)
+            return None
+        redist_txt = None
+        label = crt.parent.name
+        for parent in [crt, *crt.parents]:
+            candidate = parent / "Redist.txt"
+            if candidate.is_file():
+                redist_txt = candidate
+                label = parent.name
+                break
+            if parent.name.lower() == "msvc":
+                break
+        if redist_txt is None:
+            print(f"{crt} 向上找不到 Redist.txt，不能确认这些 DLL 允许再分发", file=sys.stderr)
+            return None
+        return crt, redist_txt, label, tool_label
+
+    if tool_key is None:
+        print(
+            f"dumpbin 在 {dumpbin}，路径里没有 VC\\Tools\\MSVC\\<版本>。"
+            "读不到实际工具集版本，不能判断再发行目录是否更旧。不猜测补丁号。",
+            file=sys.stderr,
+        )
+        return None
+    install = vs_install_path()
+    if install is None:
+        print("没有找到带 VC 工具的 Visual Studio，不能定位官方再发行目录", file=sys.stderr)
+        return None
+    found: list[tuple[Path, Path, str]] = []
+    redist_root = install / "VC" / "Redist" / "MSVC"
+    if redist_root.is_dir():
+        for version_dir in redist_root.iterdir():
+            append_redist(found, version_dir)
+    tools_redist = os.environ.get("VCToolsRedistDir")
+    if tools_redist:
+        append_redist(found, Path(tools_redist))
+    if not found:
+        print(
+            f"工具集版本是 {tool_label}，在 {redist_root} 没有带 x64\\Microsoft.VC143.CRT 和 Redist.txt 的目录。"
+            "不从系统目录复制，也不下载 DLL。",
+            file=sys.stderr,
+        )
+        return None
+    dotted = []
+    named = []
+    for crt, redist_txt, label in found:
+        key = version_key(label)
+        if key is None:
+            named.append((crt, redist_txt, label))
+        elif key >= tool_key:
+            dotted.append((key, crt, redist_txt, label))
+    if dotted:
+        dotted.sort()
+        _, crt, redist_txt, label = dotted[-1]
+        return crt, redist_txt, label, tool_label
+    if named:
+        def named_rank(label: str) -> tuple[int, int | str]:
+            lowered = label.lower()
+            if lowered.startswith("v") and lowered[1:].isdigit():
+                return (1, int(lowered[1:]))
+            return (0, lowered)
+
+        named.sort(key=lambda item: named_rank(item[2]))
+        crt, redist_txt, label = named[-1]
+        return crt, redist_txt, label, tool_label
+    older = ", ".join(sorted(label for _, _, label in found))
+    print(
+        f"工具集版本是 {tool_label}。微软只支持相同或更新的再发行文件，找到的目录都更旧：{older}。"
+        "不下载更新的 DLL，也不从系统目录复制。",
+        file=sys.stderr,
+    )
+    return None
+
+
+def redist_names(redist_txt: Path) -> set[str]:
+    names: set[str] = set()
+    for line in redist_txt.read_text(encoding="utf-8", errors="replace").splitlines():
+        token = line.strip().strip('"')
+        if not token or token.startswith(("#", ";", "[")):
+            continue
+        filename = Path(token).name
+        if filename.lower().endswith(".dll"):
+            names.add(filename.lower())
+    return names
+
+
+def dependents_of(dumpbin: Path, binary: Path) -> list[str] | None:
+    completed = run_text([str(dumpbin), "/nologo", "/dependents", str(binary)])
+    if completed.returncode != 0:
+        print(f"dumpbin 不能读取 {binary}：{completed.stderr.strip()}", file=sys.stderr)
+        return None
+    names: list[str] = []
+    for line in completed.stdout.splitlines():
+        token = line.strip()
+        if token.lower().endswith(".dll") and " " not in token:
+            names.append(token)
+    return names
+
+
+def observe_log_path(vcpkg_bin: Path) -> Path:
+    return vcpkg_bin.parent.parent.parent / "package-dependency-observe.txt"
+
+
+def write_observe(vcpkg_bin: Path, lines: list[str]) -> None:
+    path = observe_log_path(vcpkg_bin)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+
+
+def system_basis(name: str) -> str:
+    lowered = name.lower()
+    if lowered in SYSTEM_DLLS:
+        return "SYSTEM_DLLS 精确匹配，不查找磁盘，不复制"
+    if lowered.startswith("api-ms-win-") or lowered.startswith("ext-ms-"):
+        return "api-ms-win- 或 ext-ms- 前缀，不查找磁盘，不复制"
+    return "is_system_dll 为真，但没有落到已知规则"
+
+
+def parse_list_identity(stem: str, triplet: str) -> tuple[str, str] | None:
+    suffix = "_" + triplet
+    if not stem.endswith(suffix):
+        return None
+    rest = stem[: -len(suffix)]
+    port, sep, version = rest.partition("_")
+    if not sep or not port or not version:
+        return None
+    return port, version
+
+
+def license_paths(triplet_dir: Path, port: str) -> str:
+    share = triplet_dir / "share" / port
+    if not share.is_dir():
+        return "安装树无 share 目录，许可路径未找到"
+    found: list[str] = []
+    for name in ("copyright", "LICENSE", "LICENSE.txt", "COPYING"):
+        candidate = share / name
+        if candidate.is_file():
+            found.append(str(candidate))
+    for candidate in sorted(share.glob("vcpkg.spdx.json")):
+        if candidate.is_file():
+            found.append(str(candidate))
+    if not found:
+        return "安装树未找到许可文件"
+    return ";".join(found)
+
+
+def attribute_z_lines(vcpkg_bin: Path, seen: bool) -> list[str]:
+    seen_text = "true" if seen else "false"
+    info = vcpkg_bin.parent.parent / "vcpkg" / "info"
+    triplet = vcpkg_bin.parent.name
+    triplet_dir = vcpkg_bin.parent
+    if not info.is_dir():
+        return [
+            "kind=z.dll-manifest | seen_in_scan="
+            + seen_text
+            + " | port= | version= | list= | license= | basis=安装清单目录不存在："
+            + str(info)
+            + "，未归属"
+        ]
+    lines: list[str] = []
+    target = "z.dll"
+    for list_file in sorted(info.glob("*.list")):
+        try:
+            content = list_file.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            lines.append(
+                "kind=z.dll-manifest | seen_in_scan="
+                + seen_text
+                + " | port= | version= | list="
+                + str(list_file)
+                + " | license= | basis=清单读取失败："
+                + str(exc)
+            )
+            continue
+        hit = False
+        for raw in content.splitlines():
+            normalized = raw.strip().replace("\\", "/")
+            if normalized and Path(normalized).name.lower() == target:
+                hit = True
+                break
+        if not hit:
+            continue
+        identity = parse_list_identity(list_file.stem, triplet)
+        if identity is None:
+            lines.append(
+                "kind=z.dll-manifest | seen_in_scan="
+                + seen_text
+                + " | port=未能解析 | version=未能解析 | list="
+                + str(list_file)
+                + " | license=未按端口查找 | basis=清单路径末段是 z.dll，文件名不是 {port}_{version}_"
+                + triplet
+                + ".list"
+            )
+            continue
+        port, version = identity
+        lines.append(
+            "kind=z.dll-manifest | seen_in_scan="
+            + seen_text
+            + " | port="
+            + port
+            + " | version="
+            + version
+            + " | list="
+            + str(list_file)
+            + " | license="
+            + license_paths(triplet_dir, port)
+            + " | basis=本次 vcpkg info 清单的路径末段是 z.dll"
+        )
+    if not lines:
+        lines.append(
+            "kind=z.dll-manifest | seen_in_scan="
+            + seen_text
+            + " | port= | version= | list= | license= | basis=本次 info 清单没有路径末段等于 z.dll，未归属"
+        )
+    return lines
+
+
+def finish_observe(
+    vcpkg_bin: Path,
+    entries: list[str],
+    missing: list[str],
+    refused: list[str],
+    dumpbin_failed: list[Path],
+    scan: str,
+) -> None:
+    seen_z = any(part == "dll=z.dll" for line in entries for part in line.split(" | "))
+    header = [
+        "result=fail",
+        "scan=" + scan,
+        "missing_names=" + ",".join(sorted(set(missing))),
+        "refused_names=" + ",".join(sorted(set(refused))),
+        "dumpbin_failed=" + ",".join(str(path) for path in dumpbin_failed),
+    ]
+    body = header + entries + attribute_z_lines(vcpkg_bin, seen_z)
+    try:
+        write_observe(vcpkg_bin, body)
+    except OSError as exc:
+        print(f"依赖观察日志没有写成：{exc}", file=sys.stderr)
+
+
+def collect_dependencies(app_dir: Path, vcpkg_bin: Path, dumpbin: Path) -> set[str] | None:
+    if not vcpkg_bin.is_dir():
+        print(f"vcpkg bin 不存在：{vcpkg_bin}", file=sys.stderr)
+        finish_observe(vcpkg_bin, [], [], [], [], "not-started")
+        return None
+    queue = [path for path in app_dir.rglob("*") if path.suffix.lower() in {".exe", ".dll"}]
+    seen: set[Path] = set()
+    needed_vc: set[str] = set()
+    missing: list[str] = []
+    refused: list[str] = []
+    dumpbin_failed: list[Path] = []
+    entries: list[str] = []
+    qtcore = app_dir / "Qt6Core.dll"
+    if not qtcore.is_file():
+        found_qt = sorted(path for path in app_dir.rglob("Qt6Core.dll") if path.is_file())
+        qtcore = found_qt[0] if found_qt else qtcore
+    qt_sha = file_sha256(qtcore) if qtcore.is_file() else ""
+    qt_import_text = ""
+    if qtcore.is_file():
+        imported = run_text([str(dumpbin), "/nologo", "/imports", str(qtcore)])
+        qt_import_text = imported.stdout if imported.returncode == 0 else imported.stderr
+    qt_rows = parse_dumpbin_imports(qt_import_text)
+    icu_decision = icuuc_system_basis(qt_sha, qt_rows)
+    tkopengl = next(app_dir.rglob("TKOpenGl.dll"), None)
+    if tkopengl is None:
+        candidate = vcpkg_bin / "TKOpenGl.dll"
+        tkopengl = candidate if candidate.is_file() else None
+    tk_text = ""
+    if tkopengl is not None and tkopengl.is_file():
+        tk_run = run_text([str(dumpbin), "/nologo", "/imports", str(tkopengl)])
+        tk_text = tk_run.stdout if tk_run.returncode == 0 else tk_run.stderr
+    tk_rows = parse_dumpbin_imports(tk_text)
+    evidence = [
+        "qt6core_path=" + (str(qtcore) if qtcore.is_file() else ""),
+        "qt6core_sha256=" + qt_sha,
+        "qt6core_import_dlls=" + ";".join(sorted({dll for dll, _symbol, _delay in qt_rows})),
+        "qt6core_icu_imports="
+        + ";".join(f"{dll}|{symbol}|delay={delay}" for dll, symbol, delay in icu_rows(qt_rows)),
+        "tkopengl_path=" + (str(tkopengl) if tkopengl is not None else ""),
+        "tkopengl_sha256=" + (file_sha256(tkopengl) if tkopengl is not None and tkopengl.is_file() else ""),
+        "tkopengl_imports=" + ";".join(sorted({dll for dll, _symbol, _delay in tk_rows})),
+        "----- qt6core dumpbin /imports -----",
+        qt_import_text,
+        "----- tkopengl dumpbin /imports -----",
+        tk_text,
+    ]
+    try:
+        evidence_path = module_evidence_path(vcpkg_bin)
+        evidence_path.parent.mkdir(parents=True, exist_ok=True)
+        evidence_path.write_text("\n".join(evidence) + "\n", encoding="utf-8")
+    except OSError as exc:
+        entries.append("kind=module-evidence | basis=证据文件没有写成：" + str(exc))
+    entries.extend("kind=module-evidence | " + line for line in evidence if not line.startswith("-----") and line not in {qt_import_text, tk_text})
+    while queue:
+        binary = queue.pop()
+        resolved = binary.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        names = dependents_of(dumpbin, binary)
+        if names is None:
+            dumpbin_failed.append(resolved)
+            entries.append(
+                "kind=dumpbin-failed | dll= | importer="
+                + str(resolved)
+                + " | resolved= | resolved_exists= | basis=dumpbin /dependents 失败，已继续扫描其余已入队文件"
+            )
+            continue
+        importer = str(resolved)
+        for name in names:
+            if is_system_dll(name):
+                entries.append(
+                    "kind=system-not-copied | dll="
+                    + name
+                    + " | importer="
+                    + importer
+                    + " | resolved=未在磁盘解析 | resolved_exists=not-checked | basis="
+                    + system_basis(name)
+                )
+                continue
+            if is_vc_runtime(name):
+                needed_vc.add(name)
+                entries.append(
+                    "kind=vc-runtime | dll="
+                    + name
+                    + " | importer="
+                    + importer
+                    + " | resolved=未在 vcpkg bin 解析 | resolved_exists=not-checked | basis=VC 运行库前缀，本步不复制，留给 Redist"
+                )
+                continue
+            if name.lower() == "icuuc.dll":
+                allowed, icu_basis = icu_decision
+                source = vcpkg_bin / name
+                if allowed:
+                    entries.append(
+                        "kind=system-not-copied | dll="
+                        + name
+                        + " | importer="
+                        + importer
+                        + " | resolved=未在磁盘解析 | resolved_exists=not-checked | basis="
+                        + icu_basis
+                    )
+                    continue
+                missing.append(name)
+                entries.append(
+                    "kind=missing | dll="
+                    + name
+                    + " | importer="
+                    + importer
+                    + " | resolved="
+                    + str(source)
+                    + " | resolved_exists="
+                    + ("true" if source.is_file() else "false")
+                    + " | basis="
+                    + icu_basis
+                )
+                continue
+            destination = app_dir / name
+            if destination.is_file():
+                queue.append(destination)
+                continue
+            source = vcpkg_bin / name
+            exists = source.is_file()
+            if not exists:
+                missing.append(name)
+                entries.append(
+                    "kind=missing | dll="
+                    + name
+                    + " | importer="
+                    + importer
+                    + " | resolved="
+                    + str(source)
+                    + " | resolved_exists=false | basis=不是系统名单、不是 API set 前缀、不是 VC 运行库前缀；vcpkg bin 无此文件"
+                )
+                continue
+            if not license_ready(name) and not manifest_license_ok(vcpkg_bin, name):
+                refused.append(name)
+                entries.append(
+                    "kind=refused | dll="
+                    + name
+                    + " | importer="
+                    + importer
+                    + " | resolved="
+                    + str(source)
+                    + " | resolved_exists=true | basis=vcpkg bin 有此文件，LICENSED_PREFIXES 不匹配文件名，不复制"
+                )
+                continue
+            shutil.copy2(source, destination)
+            queue.append(destination)
+    if missing or refused or dumpbin_failed:
+        if missing:
+            print("这些依赖不在 vcpkg bin，也不是系统 DLL，已停止：" + ", ".join(sorted(set(missing))), file=sys.stderr)
+        if refused:
+            print(
+                "这些 DLL 没有对应的许可证材料，不复制：" + ", ".join(sorted(set(refused))),
+                file=sys.stderr,
+            )
+        finish_observe(vcpkg_bin, entries, missing, refused, dumpbin_failed, "finished")
+        return None
+    return needed_vc
+
+
+def copy_vc_runtime(app_dir: Path, needed: set[str], explicit: Path | None, dumpbin: Path) -> bool:
+    if not needed:
+        return True
+    located = find_redist(explicit, dumpbin)
+    if located is None:
+        print("需要 VC++ 运行库，但没有可用的官方再发行目录：" + ", ".join(sorted(needed)), file=sys.stderr)
+        return False
+    crt, redist_txt, redist_label, tool_label = located
+    allowed = redist_names(redist_txt)
+    if not allowed:
+        print(f"{redist_txt} 没有列出 DLL，不能判断哪些文件允许再分发", file=sys.stderr)
+        return False
+    copied: list[str] = []
+    for name in sorted(needed):
+        if name.lower() not in allowed:
+            print(f"{redist_txt} 没有点名 {name}，不从系统目录拿它", file=sys.stderr)
+            return False
+        source = crt / name
+        if not source.is_file():
+            print(f"官方目录 {crt} 里没有 {name}", file=sys.stderr)
+            return False
+        shutil.copy2(source, app_dir / name)
+        copied.append(name)
+    licenses = app_dir / "licenses"
+    licenses.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(redist_txt, licenses / "MSVC-Redist.txt")
+    tool_text = tool_label or "未从 dumpbin 路径读到"
+    (licenses / "MSVC-Redist-来源.txt").write_text(
+        "这是打包时读到的来源，不是仓库里自写的许可证，也不是法律审查结论。\n"
+        f"工具集目录版本: {tool_text}\n"
+        f"再发行目录名: {redist_label}\n"
+        f"DLL 目录: {crt}\n"
+        f"Redist.txt: {redist_txt}\n"
+        "复制的文件: " + ", ".join(copied) + "\n"
+        "规则: https://learn.microsoft.com/en-us/cpp/windows/determining-which-dlls-to-redistribute\n"
+        "目录补丁号不必与工具集相同。只使用相同或更新的官方再发行目录；没有 Redist.txt 点名的文件不复制。\n",
+        encoding="utf-8",
+    )
+    return True
+
+
+def copy_license_tree(app_dir: Path) -> None:
+    source = Path(__file__).resolve().parents[1] / "packaging" / "licenses"
+    destination = app_dir / "licenses"
+    shutil.copytree(source, destination, dirs_exist_ok=True)
+
+
+def hex40(label: str, value: str | None) -> str | None:
+    if value is None:
+        return None
+    text = value.strip().lower()
+    if len(text) != 40 or any(char not in "0123456789abcdef" for char in text):
+        raise ValueError(f"{label} 必须是 40 位十六进制，不猜测。这次是 {value!r}")
+    return text
+
+
+def identity_text(checkout_sha: str, checkout_tree: str, pr_head_sha: str | None) -> str:
+    lines = [f"sha={checkout_sha}", f"tree={checkout_tree}"]
+    if pr_head_sha is not None:
+        lines.append(f"pr_head_sha={pr_head_sha}")
+    return "\n".join(lines) + "\n"
+
+
+def redist_dlls_in_zip(archive: zipfile.ZipFile) -> list[str]:
+    names = set(archive.namelist())
+    redist_name = "StepLens/licenses/MSVC-Redist.txt"
+    note_name = "StepLens/licenses/MSVC-Redist-来源.txt"
+    if redist_name not in names:
+        raise ValueError(f"zip 缺少 {redist_name}")
+    if not archive.read(redist_name).strip():
+        raise ValueError(f"{redist_name} 是空的")
+    if note_name not in names:
+        raise ValueError(f"zip 缺少 {note_name}")
+    copied: list[str] = []
+    for line in archive.read(note_name).decode("utf-8", errors="replace").splitlines():
+        if line.startswith("复制的文件:"):
+            copied = [part.strip() for part in line.split(":", 1)[1].split(",") if part.strip()]
+            break
+    if not copied:
+        raise ValueError("来源说明没有「复制的文件」名单，缺 Redist 不能当成通过")
+    for name in copied:
+        if is_system_dll(name):
+            raise ValueError(f"名单里出现系统 DLL {name}，拒绝")
+        member = f"StepLens/{name}"
+        if member not in names:
+            raise ValueError(f"zip 缺少再发行文件 {member}")
+    return copied
+
+
+def write_package_manifest(
+    output: Path,
+    checkout_sha: str,
+    checkout_tree: str,
+    pr_head_sha: str | None,
+    require_redist: bool,
+) -> None:
+    expected = identity_text(checkout_sha, checkout_tree, pr_head_sha)
+    dlls: list[str] = []
+    member_lines: list[str] = []
+    with zipfile.ZipFile(output) as archive:
+        identity_name = "StepLens/package-identity.txt"
+        if identity_name not in archive.namelist():
+            raise ValueError(f"zip 缺少 {identity_name}")
+        actual = archive.read(identity_name).decode("utf-8")
+        if actual != expected:
+            raise ValueError("zip 内 package-identity.txt 与 checkout SHA/tree 不一致")
+        if require_redist:
+            dlls = redist_dlls_in_zip(archive)
+        for info in archive.infolist():
+            if info.is_dir():
+                continue
+            digest = hashlib.sha256(archive.read(info.filename)).hexdigest()
+            member_lines.append(f"{info.filename}\t{digest}")
+    zip_digest = hashlib.sha256(output.read_bytes()).hexdigest()
+    header = [
+        f"checkout_sha={checkout_sha}",
+        f"checkout_tree={checkout_tree}",
+    ]
+    if pr_head_sha is not None:
+        header.append(f"pr_head_sha={pr_head_sha}")
+    header.append(f"zip_sha256={zip_digest}")
+    if require_redist:
+        header.append("redist_dlls=" + ",".join(dlls))
+    manifest = output.parent / f"{output.name}.manifest.txt"
+    manifest.write_text("\n".join(header + member_lines) + "\n", encoding="utf-8", newline="\n")
+    print(f"已写入 {manifest}")
+    print(f"zip_sha256={zip_digest}")
+
+
 def main() -> int:
     _configure_stdio()
+    if sys.platform != "win32":
+        return fail("绿色版打包只在 Windows 上收集 DLL。这次没有执行收集。")
     args = parse_args()
+    try:
+        checkout_sha = hex40("--checkout-sha", args.checkout_sha)
+        checkout_tree = hex40("--checkout-tree", args.checkout_tree)
+        pr_head_sha = hex40("--pr-head-sha", args.pr_head_sha)
+    except ValueError as exc:
+        return fail(str(exc))
+    if (checkout_sha is None) != (checkout_tree is None):
+        return fail("--checkout-sha 和 --checkout-tree 必须同时给出，不猜测")
+    if args.require_redist and checkout_sha is None:
+        return fail("QA 核验必须同时给出 --checkout-sha 和 --checkout-tree，不猜测")
     app_dir = args.prefix / "StepLens"
     exe = app_dir / "StepLens.exe"
     if not exe.is_file():
-        print(f"未找到 {exe}。先执行 cmake --install。", file=sys.stderr)
-        return 1
+        return fail(f"未找到 {exe}。先执行 cmake --install。")
 
     windeployqt = args.qt_dir / "bin" / "windeployqt.exe"
     if not windeployqt.is_file():
-        print(f"未找到 {windeployqt}", file=sys.stderr)
-        return 1
+        return fail(f"未找到 {windeployqt}")
 
     command = [
         str(windeployqt),
@@ -57,12 +961,26 @@ def main() -> int:
     print(" ".join(command))
     completed = subprocess.run(command, cwd=app_dir, check=False)
     if completed.returncode != 0:
-        print(f"windeployqt 退出码 {completed.returncode}", file=sys.stderr)
-        return completed.returncode
+        return fail(f"windeployqt 退出码 {completed.returncode}")
 
-    # windeployqt 会改写 qt.conf。用仓库里的相对路径版本盖回去。
     repo_qt_conf = Path(__file__).resolve().parents[1] / "packaging" / "qt.conf"
     (app_dir / "qt.conf").write_bytes(repo_qt_conf.read_bytes())
+
+    dumpbin = find_dumpbin()
+    if dumpbin is None:
+        return fail("没有找到 dumpbin，不能按实际依赖收集 DLL。不改为整目录复制。")
+    needed_vc = collect_dependencies(app_dir, args.vcpkg_bin, dumpbin)
+    if needed_vc is None:
+        return 1
+    if not copy_vc_runtime(app_dir, needed_vc, args.vc_redist, dumpbin):
+        return 1
+    copy_license_tree(app_dir)
+    if checkout_sha is not None and checkout_tree is not None:
+        (app_dir / "package-identity.txt").write_text(
+            identity_text(checkout_sha, checkout_tree, pr_head_sha),
+            encoding="utf-8",
+            newline="\n",
+        )
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     if args.output.exists():
@@ -72,6 +990,11 @@ def main() -> int:
             if path.is_file():
                 archive.write(path, path.relative_to(args.prefix).as_posix())
     print(f"已写入 {args.output}")
+    if checkout_sha is not None and checkout_tree is not None:
+        try:
+            write_package_manifest(args.output, checkout_sha, checkout_tree, pr_head_sha, args.require_redist)
+        except ValueError as exc:
+            return fail(str(exc))
     return 0
 
 

@@ -23,7 +23,9 @@ enum class ErrorCode : std::uint8_t {
     Cancelled,
     OutOfMemory,
     MeshFailed,
-    Internal
+    Internal,
+    DegenerateGeometry,
+    UnsupportedCombination
 };
 
 // message 是英文技术信息，写日志。userMessage 是给界面的中文（UTF-8）。

@@ -1,8 +1,19 @@
-# ui：LoadingOverlay（T11）。装配树和属性面板是 T10 / T12，这里先不放。
 steplens_add_module(ui
     LoadingOverlay.h
-    LoadingOverlay.cpp)
-target_link_libraries(steplens_ui PUBLIC Qt6::Widgets)
+    LoadingOverlay.cpp
+    AssemblyTreeModel.h
+    AssemblyTreeModel.cpp
+    AssemblyTreeFilterProxy.h
+    AssemblyTreeFilterProxy.cpp
+    AssemblyTreePanel.h
+    AssemblyTreePanel.cpp
+    MeasureResultModel.h
+    MeasureResultModel.cpp
+    PropertyPanel.h
+    PropertyPanel.cpp
+    ToolbarIcons.h
+    ToolbarIcons.cpp)
+target_link_libraries(steplens_ui PUBLIC steplens::model Qt6::Widgets)
 
 # steplens_add_module 在链接 Qt 之前套了语言开关。Qt 会再注入同一组，MSVC 会报 D9025。
 get_target_property(_ui_opts steplens_ui COMPILE_OPTIONS)

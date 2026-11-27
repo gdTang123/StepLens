@@ -5,10 +5,12 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 
+#include "../core/TempDir.h"
 #include "core/CancelToken.h"
 #include "core/OcctLoadContract.h"
 #include "core/ProgressSink.h"
 #include "io/ILoader.h"
+#include "io/LoadInternal.h"
 #include "mesh/Tessellator.h"
 #include "model/DocumentModel.h"
 #include "model/DocumentRelease.h"
@@ -20,23 +22,29 @@
 #include <AIS_InteractiveContext.hxx>
 #include <Aspect_DisplayConnection.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
+#include <BRep_Tool.hxx>
+#include <IGESControl_Writer.hxx>
 #include <OpenGl_GraphicDriver.hxx>
 #include <SelectMgr_EntityOwner.hxx>
 #include <SelectMgr_Selection.hxx>
 #include <Standard_Failure.hxx>
+#include <StdSelect_BRepOwner.hxx>
 #include <TDataStd_Name.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopoDS.hxx>
 #include <V3d_Viewer.hxx>
 #include <XCAFApp_Application.hxx>
 #include <XCAFDoc_ColorTool.hxx>
 #include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
+#include <gp_Pnt.hxx>
 #include <gp_Trsf.hxx>
 #include <gp_Vec.hxx>
 
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <filesystem>
 #include <gtest/gtest.h>
 #include <iostream>
 #include <mutex>
@@ -204,6 +212,82 @@ OwnerSample sampleSelection(const opencascade::handle<AIS_InteractiveObject>& ob
     return sample;
 }
 
+// 与 SceneBuilder::pickedElement / pickedVertex 一致：Location 一次；Identity 时回退 object->Transformation。
+gp_Trsf resolveInstanceTransform(const opencascade::handle<StdSelect_BRepOwner>& owner,
+                                 const opencascade::handle<AIS_InteractiveObject>& object) {
+    gp_Trsf trsf;
+    if (!owner.IsNull()) {
+        trsf = owner->Location().Transformation();
+    }
+    if (trsf.Form() == gp_Identity && !object.IsNull()) {
+        trsf = object->Transformation();
+    }
+    return trsf;
+}
+
+opencascade::handle<StdSelect_BRepOwner>
+firstBRepOwner(const opencascade::handle<AIS_InteractiveObject>& object, int mode) {
+    if (object.IsNull()) {
+        return {};
+    }
+    if (!object->HasSelection(mode) || object->Selection(mode).IsNull() ||
+        object->Selection(mode)->IsEmpty()) {
+        object->RecomputePrimitives(mode);
+    }
+    if (!object->HasSelection(mode) || object->Selection(mode).IsNull()) {
+        return {};
+    }
+    for (const auto& entity : object->Selection(mode)->Entities()) {
+        if (entity.IsNull()) {
+            continue;
+        }
+        const auto sensitive = entity->BaseSensitive();
+        if (sensitive.IsNull() || sensitive->OwnerId().IsNull()) {
+            continue;
+        }
+        const opencascade::handle<StdSelect_BRepOwner> owner =
+            opencascade::handle<StdSelect_BRepOwner>::DownCast(sensitive->OwnerId());
+        if (!owner.IsNull() && !owner->Shape().IsNull()) {
+            return owner;
+        }
+    }
+    return {};
+}
+
+opencascade::handle<StdSelect_BRepOwner>
+matchingVertexOwner(const opencascade::handle<AIS_InteractiveObject>& object,
+                    const TopoDS_Shape& localVertex) {
+    if (object.IsNull() || localVertex.IsNull() || localVertex.ShapeType() != TopAbs_VERTEX) {
+        return {};
+    }
+    constexpr int kVertexMode = 1;
+    if (!object->HasSelection(kVertexMode) || object->Selection(kVertexMode).IsNull() ||
+        object->Selection(kVertexMode)->IsEmpty()) {
+        object->RecomputePrimitives(kVertexMode);
+    }
+    if (!object->HasSelection(kVertexMode) || object->Selection(kVertexMode).IsNull()) {
+        return {};
+    }
+    for (const auto& entity : object->Selection(kVertexMode)->Entities()) {
+        if (entity.IsNull()) {
+            continue;
+        }
+        const auto sensitive = entity->BaseSensitive();
+        if (sensitive.IsNull() || sensitive->OwnerId().IsNull()) {
+            continue;
+        }
+        const opencascade::handle<StdSelect_BRepOwner> owner =
+            opencascade::handle<StdSelect_BRepOwner>::DownCast(sensitive->OwnerId());
+        if (owner.IsNull() || owner->Shape().IsNull() || owner->Shape().ShapeType() != TopAbs_VERTEX) {
+            continue;
+        }
+        if (owner->Shape().IsSame(localVertex)) {
+            return owner;
+        }
+    }
+    return {};
+}
+
 } // namespace
 
 TEST(SelectionMap, SiblingInstancesStayDistinct) {
@@ -238,6 +322,163 @@ TEST(SelectionMap, SiblingInstancesStayDistinct) {
     EXPECT_EQ(map.objectOf(2), right);
     EXPECT_NEAR(left->Transformation().TranslationPart().X(), 0.0, 1.0e-9);
     EXPECT_NEAR(right->Transformation().TranslationPart().X(), 40.0, 1.0e-9);
+}
+
+TEST(SelectionMap, MultipleObjectsCanMapToOneNode) {
+    opencascade::handle<AIS_InteractiveObject> first = new AIS_ConnectedInteractive();
+    opencascade::handle<AIS_InteractiveObject> second = new AIS_ConnectedInteractive();
+    steplens::scene::SelectionMap map;
+    map.bind(0, first);
+    map.bind(0, second);
+    EXPECT_EQ(map.nodeOf(first), 0u);
+    EXPECT_EQ(map.nodeOf(second), 0u);
+    EXPECT_EQ(map.objectOf(0), first);
+    const auto objects = map.objectsOf(0);
+    ASSERT_EQ(objects.size(), 2u);
+    EXPECT_EQ(objects[0], first);
+    EXPECT_EQ(objects[1], second);
+}
+
+TEST(SceneBuilder, IgesSingleRootMapsAllPrototypesToRoot) {
+    const int before = documentCount();
+    steplens::test::TempDir dir;
+    const auto path = dir.path() / "two-boxes.iges";
+    IGESControl_Writer writer;
+    ASSERT_TRUE(writer.AddShape(boxAt(0.0, 0.0, 0.0)));
+    ASSERT_TRUE(writer.AddShape(boxAt(40.0, 0.0, 0.0)));
+    ASSERT_TRUE(writer.Write(steplens::io::detail::pathUtf8(path).c_str(), false));
+
+    steplens::ProgressSink sink;
+    sink.reset(static_cast<std::uint64_t>(std::filesystem::file_size(path)));
+    auto loader = steplens::io::makeLoader(path);
+    ASSERT_TRUE(loader);
+    auto loaded = loader->load(path, {}, sink, steplens::CancelToken{});
+    ASSERT_TRUE(loaded.ok()) << loaded.error().message;
+    EXPECT_EQ(loaded.value().schema, "IGES");
+    auto model = requireModel(
+        steplens::model::DocumentModel::build(std::move(loaded.value()), sink, steplens::CancelToken{}));
+    ASSERT_TRUE(model);
+    ASSERT_EQ(model->nodeCount(), 1u);
+    EXPECT_EQ(model->node(0).children.size(), 0u);
+    ASSERT_GE(model->prototypes().size(), 2u);
+    for (const auto& prototype : model->prototypes()) {
+        const auto leaves = model->leafNodesOf(prototype.id);
+        ASSERT_EQ(leaves.size(), 1u);
+        EXPECT_EQ(leaves.front(), 0u);
+    }
+    EXPECT_EQ(model->node(0).prototype, steplens::model::kNoPrototype);
+
+    auto batches = tessellate(*model);
+    ASSERT_EQ(batches.size(), model->prototypes().size());
+    auto context = contextOrEmpty();
+    ASSERT_FALSE(context.IsNull());
+    steplens::scene::SceneBuilder builder(context);
+    builder.reset(model);
+    for (auto& batch : batches) {
+        builder.enqueue(std::move(batch));
+    }
+    int pumps = 0;
+    std::int64_t maxStallUs = 0;
+    drain(builder, pumps, maxStallUs);
+    ASSERT_FALSE(builder.failed()) << builder.lastError();
+    const auto objects = builder.objectsOf(0);
+    ASSERT_EQ(objects.size(), model->prototypes().size());
+    ASSERT_GE(objects.size(), 2u);
+    EXPECT_EQ(builder.objectOf(0), objects.front());
+    for (const auto& object : objects) {
+        EXPECT_EQ(builder.nodeOf(object), 0u);
+    }
+    builder.setNodeVisible(0, false);
+    for (const auto& object : objects) {
+        EXPECT_FALSE(context->IsDisplayed(object));
+    }
+    builder.setNodeVisible(0, true);
+    for (const auto& object : objects) {
+        EXPECT_TRUE(context->IsDisplayed(object));
+    }
+    builder.highlightNode(0);
+    for (const auto& object : objects) {
+        EXPECT_TRUE(context->IsSelected(object));
+    }
+    for (const auto& object : objects) {
+        context->ClearSelected(false);
+        context->AddOrRemoveSelected(object, false);
+        EXPECT_EQ(builder.selectedNode(), 0u);
+    }
+
+    // 此测试验证真实 AIS 映射、显隐和选择；它不验证像素视口或 ViewerWidget 鼠标拾取，GUI 缺口另列。
+    builder.reset(nullptr);
+    model.reset();
+    EXPECT_TRUE(steplens::model::waitForDocumentRelease(std::chrono::seconds(30)));
+    EXPECT_EQ(documentCount(), before);
+}
+
+TEST(SceneBuilder, IgesRootHideBeforeEnqueueKeepsLaterObjectsHidden) {
+    const int before = documentCount();
+    steplens::test::TempDir dir;
+    const auto path = dir.path() / "two-boxes.iges";
+    IGESControl_Writer writer;
+    ASSERT_TRUE(writer.AddShape(boxAt(0.0, 0.0, 0.0)));
+    ASSERT_TRUE(writer.AddShape(boxAt(40.0, 0.0, 0.0)));
+    ASSERT_TRUE(writer.Write(steplens::io::detail::pathUtf8(path).c_str(), false));
+
+    steplens::ProgressSink sink;
+    sink.reset(static_cast<std::uint64_t>(std::filesystem::file_size(path)));
+    auto loader = steplens::io::makeLoader(path);
+    ASSERT_TRUE(loader);
+    auto loaded = loader->load(path, {}, sink, steplens::CancelToken{});
+    ASSERT_TRUE(loaded.ok()) << loaded.error().message;
+    EXPECT_EQ(loaded.value().schema, "IGES");
+    auto model = requireModel(
+        steplens::model::DocumentModel::build(std::move(loaded.value()), sink, steplens::CancelToken{}));
+    ASSERT_TRUE(model);
+    ASSERT_EQ(model->nodeCount(), 1u);
+    EXPECT_EQ(model->node(0).children.size(), 0u);
+    EXPECT_EQ(model->node(0).prototype, steplens::model::kNoPrototype);
+    ASSERT_GE(model->prototypes().size(), 2u);
+    for (const auto& prototype : model->prototypes()) {
+        const auto leaves = model->leafNodesOf(prototype.id);
+        ASSERT_EQ(leaves.size(), 1u);
+        EXPECT_EQ(leaves.front(), 0u);
+    }
+
+    auto batches = tessellate(*model);
+    ASSERT_EQ(batches.size(), model->prototypes().size());
+    auto context = contextOrEmpty();
+    ASSERT_FALSE(context.IsNull());
+    steplens::scene::SceneBuilder builder(context);
+    builder.reset(model);
+    ASSERT_TRUE(builder.objectsOf(0).empty());
+    builder.setNodeVisible(0, false);
+
+    std::vector<opencascade::handle<AIS_InteractiveObject>> objects;
+    for (auto& batch : batches) {
+        builder.enqueue(std::move(batch));
+        int pumps = 0;
+        std::int64_t maxStallUs = 0;
+        drain(builder, pumps, maxStallUs);
+        ASSERT_FALSE(builder.failed()) << builder.lastError();
+        objects = builder.objectsOf(0);
+        ASSERT_FALSE(objects.empty());
+        for (const auto& object : objects) {
+            EXPECT_FALSE(context->IsDisplayed(object)) << "materialized object must stay hidden";
+            EXPECT_EQ(builder.nodeOf(object), 0u);
+        }
+    }
+    ASSERT_EQ(objects.size(), model->prototypes().size());
+    ASSERT_GE(objects.size(), 2u);
+
+    builder.setNodeVisible(0, true);
+    for (const auto& object : objects) {
+        EXPECT_TRUE(context->IsDisplayed(object));
+        EXPECT_EQ(builder.nodeOf(object), 0u);
+    }
+    EXPECT_EQ(builder.objectOf(0), objects.front());
+
+    builder.reset(nullptr);
+    model.reset();
+    EXPECT_TRUE(steplens::model::waitForDocumentRelease(std::chrono::seconds(30)));
+    EXPECT_EQ(documentCount(), before);
 }
 
 TEST(SceneBuilder, SamePrototypeIsPresentedOnceAndPickReturnsInstance) {
@@ -515,6 +756,58 @@ TEST(SceneBuilder, InstanceColorUsesItsOwnPrototypeAndSharesArrays) {
     expectDocumentsReleased(before);
 }
 
+TEST(SceneBuilder, SelectedNodeMapsConnectedAndColorOverrideInstances) {
+    const int before = documentCount();
+    auto doc = newDocument();
+    auto shapes = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
+    auto colors = XCAFDoc_DocumentTool::ColorTool(doc->Main());
+    const TDF_Label part = shapes->AddShape(boxAt(0.0, 0.0, 0.0), false);
+    const TDF_Label root = shapes->NewShape();
+    gp_Trsf plainTrsf;
+    plainTrsf.SetTranslation(gp_Vec{0.0, 0.0, 0.0});
+    shapes->AddComponent(root, part, TopLoc_Location{plainTrsf});
+    gp_Trsf coloredTrsf;
+    coloredTrsf.SetTranslation(gp_Vec{50.0, 0.0, 0.0});
+    const TDF_Label coloredUse = shapes->AddComponent(root, part, TopLoc_Location{coloredTrsf});
+    colors->SetColor(coloredUse, Quantity_Color{1.0, 0.0, 0.0, Quantity_TOC_RGB}, XCAFDoc_ColorGen);
+    shapes->UpdateAssemblies();
+
+    auto model = buildModel(std::move(doc));
+    ASSERT_TRUE(model);
+    const auto leaves = model->leafNodesOf(0);
+    ASSERT_EQ(leaves.size(), 2u);
+    const auto plainId = model->node(leaves[0]).instanceColor ? leaves[1] : leaves[0];
+    const auto coloredId = model->node(leaves[0]).instanceColor ? leaves[0] : leaves[1];
+    auto batches = tessellate(*model);
+    ASSERT_EQ(batches.size(), 1u);
+    auto context = contextOrEmpty();
+    ASSERT_FALSE(context.IsNull());
+    steplens::scene::SceneBuilder builder(context);
+    builder.reset(model);
+    builder.enqueue(std::move(batches[0]));
+    int pumps = 0;
+    std::int64_t maxStallUs = 0;
+    drain(builder, pumps, maxStallUs);
+
+    const auto plain = builder.objectOf(plainId);
+    const auto colored = builder.objectOf(coloredId);
+    ASSERT_FALSE(plain.IsNull());
+    ASSERT_FALSE(colored.IsNull());
+    context->AddOrRemoveSelected(plain, false);
+    ASSERT_FALSE(context->HasSelectedShape());
+    ASSERT_EQ(builder.selectedNode(), plainId);
+    context->ClearSelected(false);
+    context->AddOrRemoveSelected(colored, false);
+    ASSERT_FALSE(context->HasSelectedShape());
+    ASSERT_EQ(builder.selectedNode(), coloredId);
+    context->ClearSelected(false);
+    EXPECT_FALSE(builder.selectedNode().has_value());
+
+    builder.reset(nullptr);
+    model.reset();
+    expectDocumentsReleased(before);
+}
+
 TEST(SceneBuilder, ColorGroupsFollowMeshBatch) {
     const int before = documentCount();
     auto doc = newDocument();
@@ -564,4 +857,101 @@ TEST(SceneBuilder, ColorGroupsFollowMeshBatch) {
     builder.reset(nullptr);
     model.reset();
     expectDocumentsReleased(before);
+}
+
+TEST(SceneBuilder, ConnectedPrototypeVertexPickKeepsBRepOwnerAndInstanceTransform) {
+    auto context = contextOrEmpty();
+    ASSERT_FALSE(context.IsNull());
+
+    steplens::mesh::MeshBatch batch;
+    batch.id = 42;
+    const TopoDS_Shape box = boxAt(0.0, 0.0, 0.0, 10.0);
+    opencascade::handle<steplens::scene::PrototypePrs> proto = new steplens::scene::PrototypePrs(batch, box);
+    ASSERT_EQ(proto->AcceptShapeDecomposition(), true);
+
+    gp_Trsf leftTrsf;
+    leftTrsf.SetTranslation(gp_Vec{0.0, 0.0, 0.0});
+    gp_Trsf rightTrsf;
+    rightTrsf.SetTranslation(gp_Vec{40.0, 0.0, 0.0});
+
+    opencascade::handle<AIS_ConnectedInteractive> left = new AIS_ConnectedInteractive();
+    opencascade::handle<AIS_ConnectedInteractive> right = new AIS_ConnectedInteractive();
+    left->Connect(proto, leftTrsf);
+    right->Connect(proto, rightTrsf);
+
+    constexpr int kVertexMode = 1;
+    constexpr int kEdgeMode = 2;
+    context->Display(left, steplens::scene::PrototypePrs::ShadedWithEdges, kVertexMode, false);
+    context->Display(right, steplens::scene::PrototypePrs::ShadedWithEdges, kVertexMode, false);
+    left->RecomputePrimitives(kVertexMode);
+    right->RecomputePrimitives(kVertexMode);
+    left->RecomputePrimitives(kEdgeMode);
+    right->RecomputePrimitives(kEdgeMode);
+
+    ASSERT_FALSE(firstBRepOwner(left, kVertexMode).IsNull());
+    ASSERT_FALSE(firstBRepOwner(right, kVertexMode).IsNull());
+    ASSERT_FALSE(firstBRepOwner(left, kEdgeMode).IsNull());
+    ASSERT_FALSE(firstBRepOwner(right, kEdgeMode).IsNull());
+
+    const opencascade::handle<StdSelect_BRepOwner> leftSeed = firstBRepOwner(left, kVertexMode);
+    ASSERT_FALSE(leftSeed.IsNull());
+    ASSERT_EQ(leftSeed->Shape().ShapeType(), TopAbs_VERTEX);
+    const TopoDS_Shape localVertex = leftSeed->Shape();
+    const opencascade::handle<StdSelect_BRepOwner> rightOwner = matchingVertexOwner(right, localVertex);
+    ASSERT_FALSE(rightOwner.IsNull()) << "same prototype vertex must stay a StdSelect_BRepOwner";
+
+    const gp_Pnt local = BRep_Tool::Pnt(TopoDS::Vertex(localVertex));
+    const gp_Trsf leftResolved = resolveInstanceTransform(leftSeed, left);
+    const gp_Trsf rightResolved = resolveInstanceTransform(rightOwner, right);
+    const gp_Pnt worldLeft = local.Transformed(leftResolved);
+    const gp_Pnt worldRight = local.Transformed(rightResolved);
+    EXPECT_NEAR(worldLeft.Distance(worldRight), 40.0, 1.0e-6)
+        << "world delta must be instance translation 40, not 0 (untransformed) or 80 (double)";
+    EXPECT_NEAR(worldRight.X() - worldLeft.X(), 40.0, 1.0e-6);
+    EXPECT_NEAR(worldLeft.X(), local.X(), 1.0e-6);
+    EXPECT_NEAR(worldRight.X(), local.X() + 40.0, 1.0e-6);
+
+    steplens::scene::SceneBuilder builder(context);
+    context->ClearSelected(false);
+    context->SetSelected(leftSeed, false);
+    const auto pickedLeft = builder.pickedElement();
+    ASSERT_TRUE(pickedLeft.has_value());
+    ASSERT_EQ(pickedLeft->shape.ShapeType(), TopAbs_VERTEX);
+    const gp_Pnt viaBuilderLeft =
+        BRep_Tool::Pnt(TopoDS::Vertex(pickedLeft->shape)).Transformed(pickedLeft->transform);
+
+    context->ClearSelected(false);
+    context->SetSelected(rightOwner, false);
+    const auto pickedRight = builder.pickedElement();
+    ASSERT_TRUE(pickedRight.has_value());
+    ASSERT_EQ(pickedRight->shape.ShapeType(), TopAbs_VERTEX);
+    const gp_Pnt viaBuilderRight =
+        BRep_Tool::Pnt(TopoDS::Vertex(pickedRight->shape)).Transformed(pickedRight->transform);
+    EXPECT_NEAR(viaBuilderLeft.Distance(viaBuilderRight), 40.0, 1.0e-6);
+    EXPECT_NEAR(viaBuilderRight.X() - viaBuilderLeft.X(), 40.0, 1.0e-6);
+
+    // instanceColor 路径：独立 PrototypePrs + SetLocalTransformation，不经 ConnectedInteractive。
+    steplens::mesh::MeshBatch coloredBatch;
+    coloredBatch.id = 43;
+    opencascade::handle<steplens::scene::PrototypePrs> colored =
+        new steplens::scene::PrototypePrs(coloredBatch, box);
+    colored->SetLocalTransformation(rightTrsf);
+    context->Display(colored, steplens::scene::PrototypePrs::ShadedWithEdges, kVertexMode, false);
+    colored->RecomputePrimitives(kVertexMode);
+    const opencascade::handle<StdSelect_BRepOwner> coloredOwner = firstBRepOwner(colored, kVertexMode);
+    ASSERT_FALSE(coloredOwner.IsNull());
+    ASSERT_EQ(coloredOwner->Shape().ShapeType(), TopAbs_VERTEX);
+    const gp_Pnt coloredLocal = BRep_Tool::Pnt(TopoDS::Vertex(coloredOwner->Shape()));
+    const gp_Pnt coloredWorld = coloredLocal.Transformed(resolveInstanceTransform(coloredOwner, colored));
+    EXPECT_NEAR(coloredWorld.X(), coloredLocal.X() + 40.0, 1.0e-6);
+
+    context->ClearSelected(false);
+    context->SetSelected(coloredOwner, false);
+    const auto pickedColored = builder.pickedElement();
+    ASSERT_TRUE(pickedColored.has_value());
+    const gp_Pnt viaBuilderColored =
+        BRep_Tool::Pnt(TopoDS::Vertex(pickedColored->shape)).Transformed(pickedColored->transform);
+    EXPECT_NEAR(viaBuilderColored.X(), coloredLocal.X() + 40.0, 1.0e-6);
+
+    context->RemoveAll(false);
 }

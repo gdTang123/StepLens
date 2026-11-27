@@ -30,6 +30,8 @@ TEST(Settings, WritesIniBesideExecutableWhenWritableAndUsesDefaults) {
     EXPECT_DOUBLE_EQ(settings.memory().softLimitRatio, 0.60);
     EXPECT_DOUBLE_EQ(settings.memory().hardLimitRatio, 0.80);
     EXPECT_DOUBLE_EQ(settings.mesh().coarseCoef, 0.004);
+    EXPECT_EQ(settings.lengthUnit().label, QStringLiteral("mm"));
+    EXPECT_DOUBLE_EQ(settings.lengthUnit().fromMillimeters, 1.0);
 
     ASSERT_TRUE(settings.addRecentFile(QStringLiteral("part.step")));
     ASSERT_FALSE(settings.recentFiles().isEmpty());
@@ -127,6 +129,34 @@ TEST(Settings, RealSaveFailureMigratesAllValuesAndRecentFileToFallback) {
 #else
     GTEST_SKIP() << "真实 chmod 保存失败回退场景仅在 Linux 执行";
 #endif
+}
+
+TEST(Settings, LengthUnitReadsLabelAndScaleWithoutHardcodingMm) {
+    QTemporaryDir root;
+    ASSERT_TRUE(root.isValid());
+    {
+        QSettings ini(root.filePath(QStringLiteral("StepLens.ini")), QSettings::IniFormat);
+        ini.setValue(QStringLiteral("units/lengthLabel"), QStringLiteral("in"));
+        ini.setValue(QStringLiteral("units/fromMillimeters"), 1.0 / 25.4);
+        ini.sync();
+    }
+    steplens::Settings settings(root.path(), root.filePath(QStringLiteral("config")));
+    EXPECT_EQ(settings.lengthUnit().label, QStringLiteral("in"));
+    EXPECT_NEAR(settings.lengthUnit().fromMillimeters, 1.0 / 25.4, 1e-12);
+}
+
+TEST(Settings, InvalidLengthUnitScaleFallsBackToMm) {
+    QTemporaryDir root;
+    ASSERT_TRUE(root.isValid());
+    {
+        QSettings ini(root.filePath(QStringLiteral("StepLens.ini")), QSettings::IniFormat);
+        ini.setValue(QStringLiteral("units/lengthLabel"), QStringLiteral("in"));
+        ini.setValue(QStringLiteral("units/fromMillimeters"), 0.0);
+        ini.sync();
+    }
+    steplens::Settings settings(root.path(), root.filePath(QStringLiteral("config")));
+    EXPECT_EQ(settings.lengthUnit().label, QStringLiteral("mm"));
+    EXPECT_DOUBLE_EQ(settings.lengthUnit().fromMillimeters, 1.0);
 }
 
 TEST(Settings, InvalidMemoryRatiosFallBackToDefaults) {
