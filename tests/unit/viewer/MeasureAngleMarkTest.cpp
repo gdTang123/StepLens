@@ -225,7 +225,7 @@ TEST(MeasureAngleMark, DegenerateOrEmptyShapesDoNotThrow) {
     TopoDS_Edge degenerated;
     BRep_Builder builder;
     builder.MakeEdge(degenerated);
-    builder.Degenerated(degenerated, Standard_True);
+    builder.Degenerated(degenerated, true);
     ASSERT_TRUE(BRep_Tool::Degenerated(degenerated));
 
     const gp_Pln plane(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0));

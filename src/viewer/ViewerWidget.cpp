@@ -1012,10 +1012,10 @@ ViewerWidget::ViewDump ViewerWidget::renderOffscreen(int scale, bool withAlpha) 
     params.Width = static_cast<Standard_Integer>(targetWidth);
     params.Height = static_cast<Standard_Integer>(targetHeight);
     params.BufferType = withAlpha ? Graphic3d_BT_RGBA : Graphic3d_BT_RGB;
-    params.ToAdjustAspect = Standard_True;
+    params.ToAdjustAspect = true;
     bool dumped = false;
     try {
-        dumped = m_state->view->ToPixMap(pixmap, params) == Standard_True;
+        dumped = m_state->view->ToPixMap(pixmap, params) == true;
     } catch (const Standard_Failure&) {
         dumped = false;
     }
@@ -1616,7 +1616,7 @@ void ViewerWidget::acceptAngleClick() {
     }
     opencascade::handle<AIS_TextLabel> label = new AIS_TextLabel();
     const QByteArray utf8 = text.toUtf8();
-    label->SetText(TCollection_ExtendedString(utf8.constData(), Standard_True));
+    label->SetText(TCollection_ExtendedString(utf8.constData(), true));
     label->SetPosition(at);
     label->SetColor(measureColor());
     configureMeasureTextLabel(label);
@@ -1734,7 +1734,7 @@ void ViewerWidget::showDistanceMark(double millimeters, double ax, double ay, do
     }
     opencascade::handle<AIS_TextLabel> label = new AIS_TextLabel();
     const QByteArray utf8 = text.toUtf8();
-    label->SetText(TCollection_ExtendedString(utf8.constData(), Standard_True));
+    label->SetText(TCollection_ExtendedString(utf8.constData(), true));
     label->SetPosition(
         gp_Pnt((from.X() + to.X()) * 0.5, (from.Y() + to.Y()) * 0.5, (from.Z() + to.Z()) * 0.5));
     label->SetColor(measureColor());

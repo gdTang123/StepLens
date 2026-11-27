@@ -11,7 +11,7 @@ void configureMeasureTextLabel(const opencascade::handle<AIS_TextLabel>& label) 
         return;
     }
     // 关闭世界单位随视图放大，避免小零件上字高接近半个特征并被裁糊。
-    label->SetZoomable(Standard_False);
+    label->SetZoomable(false);
     label->SetHeight(kMeasureLabelPointSize);
     label->SetDisplayType(Aspect_TODT_SUBTITLE);
     // 浅色衬底抬可读性，尽量少遮挡。

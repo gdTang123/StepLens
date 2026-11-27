@@ -1,5 +1,6 @@
-# 核对 TKOpenGl 没有链进 viewer、app、场景测试、steplens-bench 以外的目标。
-# scene 静态库不链 TKOpenGl。场景测试和 steplens-bench 要建视图，所以单独允许。
+﻿# 核对 TKOpenGl 没有链进 viewer、app、场景测试、viewer 宿主测试、steplens-bench 以外的目标。
+# scene 静态库不链 TKOpenGl。场景测试、steplens_viewer_host_tests 和 steplens-bench
+# 因专属视图/viewer 职责要建视图，所以单独允许。
 #
 # 1. 读 CMake 写出的 occt-link-report.txt（链接闭包，不依赖 dumpbin）。
 # 2. 对构建目录里我们自己的 exe/dll 跑 dumpbin /dependents。
@@ -28,7 +29,7 @@ if ($Report -ne "") {
     }
     Write-Host "---- occt-link-report ----"
     Get-Content -LiteralPath $Report | ForEach-Object { Write-Host $_ }
-    $allowed = @("steplens_occt_vis", "steplens_viewer", "StepLens", "steplens_scene_tests", "steplens_bench")
+    $allowed = @("steplens_occt_vis", "steplens_viewer", "StepLens", "steplens_scene_tests", "steplens_viewer_host_tests", "steplens_bench")
     $viewerOk = $false
     $visOk = $false
     foreach ($line in Get-Content -LiteralPath $Report) {
@@ -57,8 +58,11 @@ if (-not $dumpbin) {
 }
 
 $root = (Resolve-Path -LiteralPath $BuildDir).Path
-$bins = @(Get-ChildItem -LiteralPath $root -Recurse -File -Include *.exe, *.dll |
-    Where-Object { $_.FullName -notmatch '\\vcpkg_installed\\' })
+$bins = @(Get-ChildItem -LiteralPath $root -Recurse -File |
+    Where-Object {
+        ($_.Extension -eq '.exe' -or $_.Extension -eq '.dll') -and
+        ($_.FullName -notmatch '\\vcpkg_installed\\')
+    })
 if ($bins.Count -eq 0) {
     Write-Host "$BuildDir 里没有 exe/dll"
     exit 1
@@ -80,7 +84,8 @@ foreach ($bin in $bins) {
     $rel = $bin.FullName.Substring($root.Length).TrimStart('\', '/')
     if ($hit) {
         Write-Host "TKOpenGl.dll  YES  $rel"
-        if ($bin.Name -ne "StepLens.exe" -and $bin.Name -ne "steplens_scene_tests.exe" -and $bin.Name -ne "steplens-bench.exe") {
+        if ($bin.Name -ne "StepLens.exe" -and $bin.Name -ne "steplens_scene_tests.exe" -and
+            $bin.Name -ne "steplens_viewer_host_tests.exe" -and $bin.Name -ne "steplens-bench.exe") {
             $bad += $rel
         }
     } else {
@@ -93,5 +98,5 @@ if ($bad.Count -gt 0) {
     exit 1
 }
 
-Write-Host "dumpbin: 除 StepLens.exe、steplens_scene_tests.exe 和 steplens-bench.exe 外没有 TKOpenGl.dll"
+Write-Host "dumpbin: 除 StepLens.exe、steplens_scene_tests.exe、steplens_viewer_host_tests.exe 和 steplens-bench.exe 外没有 TKOpenGl.dll"
 exit 0

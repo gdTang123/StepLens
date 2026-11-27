@@ -73,7 +73,7 @@ void computeMass(const TopoDS_Shape& shape, double lengthUnitToMm, QString* volu
     try {
         if (hasFace(shape)) {
             GProp_GProps props;
-            const double error = BRepGProp::SurfaceProperties(shape, props, kRelativeError, Standard_True);
+            const double error = BRepGProp::SurfaceProperties(shape, props, kRelativeError, true);
             if (massUsable(error, props.Mass())) {
                 const double unit = lengthUnitToMm * lengthUnitToMm;
                 *area = scaledText(props.Mass(), unit, QStringLiteral("mm²"));
@@ -81,8 +81,7 @@ void computeMass(const TopoDS_Shape& shape, double lengthUnitToMm, QString* volu
         }
         if (hasClosedShell(shape)) {
             GProp_GProps props;
-            const double error =
-                BRepGProp::VolumeProperties(shape, props, kRelativeError, Standard_True, Standard_True);
+            const double error = BRepGProp::VolumeProperties(shape, props, kRelativeError, true, true);
             if (massUsable(error, props.Mass())) {
                 const double unit = lengthUnitToMm * lengthUnitToMm * lengthUnitToMm;
                 *volume = scaledText(props.Mass(), unit, QStringLiteral("mm³"));

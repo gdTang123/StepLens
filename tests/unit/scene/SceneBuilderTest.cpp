@@ -867,7 +867,7 @@ TEST(SceneBuilder, ConnectedPrototypeVertexPickKeepsBRepOwnerAndInstanceTransfor
     batch.id = 42;
     const TopoDS_Shape box = boxAt(0.0, 0.0, 0.0, 10.0);
     opencascade::handle<steplens::scene::PrototypePrs> proto = new steplens::scene::PrototypePrs(batch, box);
-    ASSERT_EQ(proto->AcceptShapeDecomposition(), Standard_True);
+    ASSERT_EQ(proto->AcceptShapeDecomposition(), true);
 
     gp_Trsf leftTrsf;
     leftTrsf.SetTranslation(gp_Vec{0.0, 0.0, 0.0});
